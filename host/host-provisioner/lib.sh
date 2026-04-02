@@ -79,6 +79,22 @@ require_docker() {
     fi
 }
 
+# ── Terminal helpers ────────────────────────────────────────────────────────
+# A controlling terminal may still exist when stdin is piped, e.g. curl | bash.
+has_tty() {
+    [ -t 0 ] || [ -t 1 ] || [ -t 2 ] || { [ -r /dev/tty ] && [ -w /dev/tty ]; }
+}
+
+# Run an interactive command against the controlling terminal when stdin is
+# redirected, while preserving normal execution for real TTY sessions.
+function run_with_tty {
+    if [ -t 0 ] || ! { [ -r /dev/tty ] && [ -w /dev/tty ]; }; then
+        "$@"
+    else
+        "$@" </dev/tty >/dev/tty 2>&1
+    fi
+}
+
 # ── Prompt helpers (work even when script is piped via curl) ─────────────────
 # Usage: prompt_value "Enter domain" "example.com"
 #   → reads from /dev/tty if stdin is not a terminal

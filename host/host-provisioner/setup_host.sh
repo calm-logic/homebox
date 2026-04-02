@@ -31,6 +31,54 @@ fi
 info "Platform: $PLATFORM ($ARCH)"
 info "Base directory: $HOMEBOX_BASE_DIR"
 
+HOMEBOX_INSTALL_MODE="$(echo "${HOMEBOX_INSTALL_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+existing_components=()
+[ -f "$HOMEBOX_INFRA_DIR/.env" ] && existing_components+=("environment")
+[ -f "$HOMEBOX_TRAEFIK_DIR/dynamic_conf.yml" ] && existing_components+=("traefik")
+[ -f "$HOMEBOX_BASE_DIR/actions-runner/.runner" ] && existing_components+=("runner")
+[ -f "$HOME/.cloudflared/config.yml" ] && existing_components+=("cloudflare")
+
+if [ "${#existing_components[@]}" -gt 0 ] && [ -z "$HOMEBOX_INSTALL_MODE" ]; then
+    warn "Existing Homebox setup detected."
+    info "Found: ${existing_components[*]}"
+
+    while true; do
+        HOMEBOX_INSTALL_MODE="$(prompt_value "Choose action: proceed, reinstall, or cancel" "proceed")"
+        HOMEBOX_INSTALL_MODE="$(echo "$HOMEBOX_INSTALL_MODE" | tr '[:upper:]' '[:lower:]')"
+
+        case "$HOMEBOX_INSTALL_MODE" in
+            proceed|reinstall) break ;;
+            cancel)
+                warn "Installation cancelled."
+                exit 0
+                ;;
+            *)
+                warn "Please enter proceed, reinstall, or cancel."
+                ;;
+        esac
+    done
+fi
+
+if [ -z "$HOMEBOX_INSTALL_MODE" ]; then
+    HOMEBOX_INSTALL_MODE="proceed"
+fi
+
+export HOMEBOX_INSTALL_MODE
+info "Install mode: $HOMEBOX_INSTALL_MODE"
+
+copy_infra_file() {
+    local src="$1"
+    local dest="$2"
+    local label="$3"
+
+    if [ "$HOMEBOX_INSTALL_MODE" = "reinstall" ] || [ ! -f "$dest" ]; then
+        cp "$src" "$dest"
+        info "$label: ${dest}"
+    else
+        info "Keeping existing $label: ${dest}"
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Install Docker
 # ─────────────────────────────────────────────────────────────────────────────
@@ -100,12 +148,9 @@ if [ ! -d "$SRC_INFRA" ]; then
     fail "Cannot find base-infrastructure/ next to this script (looked in ${SRC_INFRA})."
 fi
 
-cp "$SRC_INFRA/docker-compose.yml" "$HOMEBOX_INFRA_DIR/docker-compose.yml"
-cp "$SRC_INFRA/.env.example"       "$HOMEBOX_INFRA_DIR/.env.example"
-cp "$SRC_INFRA/dynamic_conf.yml"   "$HOMEBOX_TRAEFIK_DIR/dynamic_conf.yml"
-
-info "Compose file:   ${HOMEBOX_INFRA_DIR}/docker-compose.yml"
-info "Dynamic config: ${HOMEBOX_TRAEFIK_DIR}/dynamic_conf.yml"
+copy_infra_file "$SRC_INFRA/docker-compose.yml" "$HOMEBOX_INFRA_DIR/docker-compose.yml" "Compose file"
+copy_infra_file "$SRC_INFRA/.env.example" "$HOMEBOX_INFRA_DIR/.env.example" "Example env"
+copy_infra_file "$SRC_INFRA/dynamic_conf.yml" "$HOMEBOX_TRAEFIK_DIR/dynamic_conf.yml" "Dynamic config"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Create Docker network

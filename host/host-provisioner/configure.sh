@@ -17,13 +17,39 @@ source "$SCRIPT_DIR/lib.sh"
 
 require_docker
 
+HOMEBOX_INSTALL_MODE="${HOMEBOX_INSTALL_MODE:-proceed}"
+HOMEBOX_ENV_NEEDS_WRITE=0
+
+load_existing_env() {
+    if [ ! -f "$HOMEBOX_INFRA_DIR/.env" ]; then
+        return 0
+    fi
+
+    if [ -z "${HOMEBOX_DOMAIN:-}" ]; then
+        HOMEBOX_DOMAIN="$(sed -n 's/^HOMEBOX_DOMAIN=//p' "$HOMEBOX_INFRA_DIR/.env" | head -1)"
+    fi
+
+    if [ -z "${TRAEFIK_DASHBOARD_AUTH:-}" ]; then
+        TRAEFIK_DASHBOARD_AUTH="$(sed -n 's/^TRAEFIK_DASHBOARD_AUTH=//p' "$HOMEBOX_INFRA_DIR/.env" | head -1)"
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 1: Domain
 # ─────────────────────────────────────────────────────────────────────────────
 configure_domain() {
     step "Step 1/6 — Domain Configuration"
 
+    if [ "$HOMEBOX_INSTALL_MODE" != "reinstall" ]; then
+        load_existing_env
+        if [ -n "${HOMEBOX_DOMAIN:-}" ]; then
+            info "Keeping existing domain: $HOMEBOX_DOMAIN"
+            return 0
+        fi
+    fi
+
     HOMEBOX_DOMAIN="$(prompt_value "Enter your root domain (e.g. example.com)" "")"
+    HOMEBOX_ENV_NEEDS_WRITE=1
 
     if [ -z "$HOMEBOX_DOMAIN" ]; then
         fail "Domain cannot be empty."
@@ -38,6 +64,14 @@ configure_domain() {
 # ─────────────────────────────────────────────────────────────────────────────
 configure_dashboard_auth() {
     step "Step 2/6 — Traefik Dashboard Authentication"
+
+    if [ "$HOMEBOX_INSTALL_MODE" != "reinstall" ]; then
+        load_existing_env
+        if [ -n "${TRAEFIK_DASHBOARD_AUTH:-}" ]; then
+            info "Keeping existing dashboard credentials from $HOMEBOX_INFRA_DIR/.env"
+            return 0
+        fi
+    fi
 
     local username password password2 hash
 
@@ -66,6 +100,7 @@ configure_dashboard_auth() {
 
     # Escape $ for docker-compose .env format ($ → $$)
     TRAEFIK_DASHBOARD_AUTH="$(echo "$hash" | sed 's/\$/\$\$/g')"
+    HOMEBOX_ENV_NEEDS_WRITE=1
 
     info "Dashboard credentials generated for user: $username"
 }
@@ -75,6 +110,11 @@ configure_dashboard_auth() {
 # ─────────────────────────────────────────────────────────────────────────────
 generate_env() {
     step "Step 3/6 — Generating .env"
+
+    if [ "$HOMEBOX_INSTALL_MODE" != "reinstall" ] && [ "$HOMEBOX_ENV_NEEDS_WRITE" -eq 0 ] && [ -f "$HOMEBOX_INFRA_DIR/.env" ]; then
+        info "Keeping existing environment file: $HOMEBOX_INFRA_DIR/.env"
+        return 0
+    fi
 
     cat > "$HOMEBOX_INFRA_DIR/.env" <<EOF
 HOMEBOX_DOMAIN=${HOMEBOX_DOMAIN}
@@ -116,6 +156,12 @@ install_cloudflared() {
 configure_cloudflared() {
     step "Step 4/6 — Cloudflare Tunnel"
 
+    local cred_dir="$HOME/.cloudflared"
+    if [ "$HOMEBOX_INSTALL_MODE" != "reinstall" ] && [ -f "$cred_dir/config.yml" ]; then
+        info "Keeping existing Cloudflare Tunnel config: $cred_dir/config.yml"
+        return 0
+    fi
+
     if ! prompt_yn "Set up a Cloudflare Tunnel?"; then
         info "Skipping Cloudflare Tunnel setup."
         return 0
@@ -128,8 +174,8 @@ configure_cloudflared() {
     info "This will open a browser window. Log in and authorize the tunnel."
     echo ""
 
-    if [ -t 0 ] && [ -t 1 ]; then
-        cloudflared tunnel login
+    if has_tty; then
+        run_with_tty cloudflared tunnel login
     else
         # Headless — try API token
         if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
@@ -170,7 +216,6 @@ configure_cloudflared() {
     info "Tunnel ID: $tunnel_id"
 
     # Generate config.yml
-    local cred_dir="$HOME/.cloudflared"
     mkdir -p "$cred_dir"
 
     cat > "$cred_dir/config.yml" <<EOF
@@ -226,6 +271,12 @@ print_manual_runner_instructions() {
 configure_github_runner() {
     step "Step 5/6 — GitHub Actions Self-Hosted Runner"
 
+    local runner_dir="${HOMEBOX_BASE_DIR}/actions-runner"
+    if [ "$HOMEBOX_INSTALL_MODE" != "reinstall" ] && [ -f "$runner_dir/.runner" ]; then
+        info "Keeping existing GitHub Actions runner: $runner_dir"
+        return 0
+    fi
+
     if ! prompt_yn "Set up a GitHub Actions self-hosted runner?"; then
         info "Skipping runner setup."
         return 0
@@ -274,17 +325,45 @@ configure_github_runner() {
         return 0
     fi
 
-    # Extract owner/repo
-    local owner_repo
-    owner_repo="$(echo "$repo_url" | sed 's|https://github.com/||' | sed 's|\.git$||' | sed 's|/$||')"
+    local owner_repo token token_error
+    case "$repo_url" in
+        git@github.com:*)
+            owner_repo="${repo_url#git@github.com:}"
+            owner_repo="${owner_repo%.git}"
+            owner_repo="${owner_repo%/}"
+            repo_url="https://github.com/${owner_repo}"
+            ;;
+        https://github.com/*|http://github.com/*)
+            owner_repo="$(echo "$repo_url" | sed 's|^https\{0,1\}://github.com/||' | sed 's|\.git$||' | sed 's|/$||')"
+            repo_url="https://github.com/${owner_repo}"
+            ;;
+        *)
+            warn "Unsupported repository URL: $repo_url"
+            warn "Use a GitHub repository URL like https://github.com/owner/repo"
+            return 0
+            ;;
+    esac
+
+    info "Using repository: $repo_url"
 
     # Get registration token
     info "Requesting runner registration token..."
-    local token
-    token="$(gh api "repos/${owner_repo}/actions/runners/registration-token" -q '.token' 2>/dev/null)" || true
+    if token="$(gh api --method POST "repos/${owner_repo}/actions/runners/registration-token" -q '.token' 2>/tmp/homebox-gh-runner.err)"; then
+        :
+    else
+        token=""
+        token_error="$(cat /tmp/homebox-gh-runner.err 2>/dev/null)"
+    fi
 
     if [ -z "$token" ]; then
-        warn "Could not get registration token. Check your permissions and try again."
+        warn "Could not get registration token."
+        if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ]; then
+            warn "GH_TOKEN or GITHUB_TOKEN is set; gh will prefer that over your saved gh login."
+        fi
+        warn "Ensure the authenticated account has admin access to ${owner_repo}."
+        if [ -n "${token_error:-}" ]; then
+            warn "$token_error"
+        fi
         print_manual_runner_instructions
         return 0
     fi
@@ -308,7 +387,15 @@ configure_github_runner() {
     fi
 
     # Download and extract
-    local runner_dir="${HOMEBOX_BASE_DIR}/actions-runner"
+    if [ "$HOMEBOX_INSTALL_MODE" = "reinstall" ] && [ -d "$runner_dir" ]; then
+        info "Reinstall requested. Removing existing runner files from $runner_dir"
+        if [ -x "$runner_dir/svc.sh" ]; then
+            (cd "$runner_dir" && ./svc.sh stop 2>/dev/null || true)
+            (cd "$runner_dir" && ./svc.sh uninstall 2>/dev/null || true)
+        fi
+        rm -rf "$runner_dir"
+    fi
+
     mkdir -p "$runner_dir"
 
     local runner_url="https://github.com/actions/runner/releases/download/v${runner_version}/actions-runner-${runner_os}-${RUNNER_ARCH}-${runner_version}.tar.gz"
