@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/aleontiev/homebox.git"
-BRANCH="main"
+BRANCH="master"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -30,9 +30,13 @@ fail()  { printf "${RED}[FAIL]${NC}  %s\n" "$*" >&2; exit 1; }
 
 # ── Banner ───────────────────────────────────────────────────────────────────
 printf "\n${BOLD}${CYAN}"
-echo "  ╦ ╦┌─┐┌┬┐┌─┐┌┐ ┌─┐─┐ ┬"
-echo "  ╠═╣│ │││││├┤ ├┴┐│ │┌┴┬┘"
-echo "  ╩ ╩└─┘┴ ┴└─┘└─┘└─┘┴ └─"
+echo ".__                         ___.                 "
+echo "|  |__   ____   _____   ____\\_ |__   _______  ___"
+echo "|  |  \\ /  _ \\ /     \\_/ __ \\| __ \\ /  _ \\  \\/  /"
+echo "|   Y  (  <_> )  Y Y  \\  ___/| \\_\\ (  <_> >    < "
+echo "|___|  /\____/|__|_|  /\\___  >___  /\____/__/\\_ \\"
+echo "     \\/             \\/     \\/    \\/            \\/"
+
 printf "${NC}\n"
 echo "  Self-hosted Internal PaaS — Installer"
 echo ""
@@ -76,7 +80,7 @@ else
                 warn "Docker Desktop has been installed."
                 warn "Open Docker Desktop from Applications, wait for it to start,"
                 warn "then re-run this installer:"
-                warn "  curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/main/homebox-infra/install.sh | bash"
+                warn "  curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/master/homebox-infra/install.sh | bash"
                 exit 0
             else
                 fail "Install Docker Desktop from https://docker.com/products/docker-desktop or install Homebrew (https://brew.sh) first."

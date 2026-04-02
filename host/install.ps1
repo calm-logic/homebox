@@ -2,7 +2,7 @@
 # Homebox One-Liner Installer (Windows)
 # =============================================================================
 # Usage:
-#   irm https://raw.githubusercontent.com/aleontiev/homebox/main/homebox-infra/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/aleontiev/homebox/master/homebox-infra/install.ps1 | iex
 #
 # Requires: PowerShell 5.1+ and Administrator privileges.
 # =============================================================================
@@ -10,7 +10,7 @@
 $ErrorActionPreference = "Stop"
 
 $RepoUrl = "https://github.com/aleontiev/homebox.git"
-$Branch = "main"
+$Branch = "master"
 $HomeboxDir = "$env:USERPROFILE\homebox"
 
 # ── Banner ───────────────────────────────────────────────────────────────────
