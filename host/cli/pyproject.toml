@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "homebox-cli"
+version = "0.1.0"
+description = "CLI for managing Homebox Internal PaaS routing and deployments"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12,<1",
+    "paramiko>=3.4,<4",
+    "pyyaml>=6,<7",
+    "rich>=13,<14",
+]
+
+[project.scripts]
+homebox = "homebox_cli.main:app"

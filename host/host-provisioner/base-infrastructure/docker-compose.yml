@@ -1,0 +1,55 @@
+# =============================================================================
+# Homebox Base Infrastructure
+# =============================================================================
+# Provides: Traefik reverse proxy ONLY.
+#
+# Each project runs its own database, cache, and app containers in a separate
+# compose stack. Projects join the shared "traefik-net" network so Traefik can
+# route to them, but their backing services (Postgres, Redis, etc.) remain
+# internal to the project — no host port conflicts.
+#
+# Start:  docker compose --env-file .env up -d
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Traefik — reverse proxy & edge router
+  # ---------------------------------------------------------------------------
+  traefik:
+    image: traefik:v3.1
+    restart: unless-stopped
+    command:
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      # API / Dashboard
+      - "--api.dashboard=true"
+      - "--api.insecure=false"
+      # File provider — watches dynamic_conf.yml for dev-mode routing
+      - "--providers.file.filename=/etc/traefik/dynamic_conf.yml"
+      - "--providers.file.watch=true"
+      # Docker provider — picks up labels from project containers
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=traefik-net"
+      # Logging
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${TRAEFIK_DYNAMIC_CONF_DIR:-/opt/homebox/traefik}/dynamic_conf.yml:/etc/traefik/dynamic_conf.yml
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`dashboard.${HOMEBOX_DOMAIN}`)"
+      - "traefik.http.routers.dashboard.service=api@internal"
+      - "traefik.http.routers.dashboard.entrypoints=web"
+      - "traefik.http.routers.dashboard.middlewares=dashboard-auth"
+      - "traefik.http.middlewares.dashboard-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
+
+networks:
+  traefik-net:
+    name: traefik-net
+    driver: bridge

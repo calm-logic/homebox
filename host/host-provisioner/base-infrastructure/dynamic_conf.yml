@@ -1,0 +1,33 @@
+# =============================================================================
+# Traefik Dynamic Configuration
+# =============================================================================
+# This file is managed by the `homebox` CLI. Manual edits are allowed but may
+# be overwritten by `homebox switch`.
+#
+# Each project gets a router + service block that points traffic to either:
+#   - the developer's Devbox  (homebox switch <project> dev)
+#   - the publisher container (homebox switch <project> pub)
+#
+# In "pub" mode, routing is handled by Docker labels on the project's container,
+# and the entry here is removed. In "dev" mode, routing is set here to forward
+# to the Devbox IP.
+# =============================================================================
+
+http:
+  routers: {}
+  services: {}
+
+# Example entry (added automatically by `homebox switch myapp dev`):
+#
+# http:
+#   routers:
+#     myapp:
+#       rule: "Host(`myapp.example.com`)"
+#       service: myapp
+#       entryPoints:
+#         - web
+#   services:
+#     myapp:
+#       loadBalancer:
+#         servers:
+#           - url: "http://192.168.1.50:8000"
