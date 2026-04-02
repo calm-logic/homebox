@@ -106,7 +106,7 @@ chmod +x "$CLONE_DIR/homebox-infra/host-provisioner/lib.sh"
 chmod +x "$CLONE_DIR/homebox-infra/host-provisioner/configure.sh"
 
 if [ "$PLATFORM" = "linux" ]; then
-    sudo bash "$PROVISIONER"
+    sudo HOMEBOX_SUPPRESS_BANNER=1 bash "$PROVISIONER"
 else
-    bash "$PROVISIONER"
+    HOMEBOX_SUPPRESS_BANNER=1 bash "$PROVISIONER"
 fi
