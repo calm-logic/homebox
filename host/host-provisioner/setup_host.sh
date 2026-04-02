@@ -2,195 +2,135 @@
 # =============================================================================
 # Homebox Host Provisioner
 # =============================================================================
-# Run this script on the dedicated Host server to install Docker, create the
-# base infrastructure directories, and print next-steps for cloudflared and
-# the GitHub Actions self-hosted runner.
+# Sets up a machine (Linux or macOS) as a Homebox host: installs Docker,
+# creates directories, deploys base infrastructure, and runs interactive
+# configuration (domain, auth, cloudflared, GitHub runner).
 #
 # Usage:
-#   chmod +x setup_host.sh
-#   sudo ./setup_host.sh
+#   Linux:  sudo ./setup_host.sh
+#   macOS:  ./setup_host.sh        (no sudo required)
+#
+# Or via the one-liner installer:
+#   curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash
 # =============================================================================
 
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Colours (disabled when stdout is not a terminal)
-# ---------------------------------------------------------------------------
-if [ -t 1 ]; then
-    GREEN='\033[0;32m'
-    YELLOW='\033[1;33m'
-    CYAN='\033[0;36m'
-    RED='\033[0;31m'
-    NC='\033[0m'
-else
-    GREEN='' YELLOW='' CYAN='' RED='' NC=''
-fi
-
-info()  { printf "${GREEN}[INFO]${NC}  %s\n" "$*"; }
-warn()  { printf "${YELLOW}[WARN]${NC}  %s\n" "$*"; }
-step()  { printf "${CYAN}[STEP]${NC}  %s\n" "$*"; }
-fail()  { printf "${RED}[FAIL]${NC}  %s\n" "$*" >&2; exit 1; }
-
-# ---------------------------------------------------------------------------
-# Pre-flight checks
-# ---------------------------------------------------------------------------
-if [ "$(id -u)" -ne 0 ]; then
-    fail "This script must be run as root (use sudo)."
-fi
-
-HOMEBOX_BASE_DIR="${HOMEBOX_BASE_DIR:-/opt/homebox}"
-TRAEFIK_CONF_DIR="${HOMEBOX_BASE_DIR}/traefik"
-PROJECTS_DIR="${HOMEBOX_BASE_DIR}/projects"
-INFRA_DIR="${HOMEBOX_BASE_DIR}/base-infrastructure"
-
-# ---------------------------------------------------------------------------
-# 1. Install Docker & Docker Compose
-# ---------------------------------------------------------------------------
-step "1/5  Installing Docker"
-
-if command -v docker &>/dev/null; then
-    info "Docker is already installed: $(docker --version)"
-else
-    # Use the official convenience script (works on Debian, Ubuntu, Fedora, etc.)
-    curl -fsSL https://get.docker.com | sh
-    info "Docker installed: $(docker --version)"
-fi
-
-# Ensure the calling user (SUDO_USER) can run docker without sudo
-if [ -n "${SUDO_USER:-}" ]; then
-    usermod -aG docker "$SUDO_USER" 2>/dev/null || true
-    info "Added $SUDO_USER to the docker group (re-login to take effect)."
-fi
-
-# Docker Compose v2 ships as a docker plugin; verify it's present
-if docker compose version &>/dev/null; then
-    info "Docker Compose plugin detected: $(docker compose version --short)"
-else
-    warn "Docker Compose plugin not found — installing via apt."
-    apt-get update -qq && apt-get install -y -qq docker-compose-plugin
-    info "Docker Compose installed: $(docker compose version --short)"
-fi
-
-# ---------------------------------------------------------------------------
-# 2. Create directory layout
-# ---------------------------------------------------------------------------
-step "2/5  Creating Homebox directories under ${HOMEBOX_BASE_DIR}"
-
-mkdir -p "$TRAEFIK_CONF_DIR" "$PROJECTS_DIR" "$INFRA_DIR"
-
-# ---------------------------------------------------------------------------
-# 3. Copy base infrastructure files
-# ---------------------------------------------------------------------------
-step "3/5  Deploying base infrastructure files"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
+banner
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-flight checks
+# ─────────────────────────────────────────────────────────────────────────────
+if [ "$PLATFORM" = "linux" ] && [ "$(id -u)" -ne 0 ]; then
+    fail "On Linux, this script must be run as root (use sudo)."
+fi
+
+info "Platform: $PLATFORM ($ARCH)"
+info "Base directory: $HOMEBOX_BASE_DIR"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Install Docker
+# ─────────────────────────────────────────────────────────────────────────────
+step "1/4  Docker"
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    info "Docker is running: $(docker --version)"
+else
+    if command -v docker >/dev/null 2>&1; then
+        fail "Docker is installed but not running. Start Docker and re-run this script."
+    fi
+
+    info "Docker not found. Installing..."
+    case "$PLATFORM" in
+        linux)
+            curl -fsSL https://get.docker.com | sh
+            if [ -n "${SUDO_USER:-}" ]; then
+                usermod -aG docker "$SUDO_USER" 2>/dev/null || true
+                info "Added $SUDO_USER to the docker group (re-login to take effect)."
+            fi
+            ;;
+        macos)
+            if command -v brew >/dev/null 2>&1; then
+                info "Installing Docker Desktop via Homebrew..."
+                brew install --cask docker
+                echo ""
+                warn "Docker Desktop has been installed."
+                warn "Open Docker Desktop from Applications, wait for it to start,"
+                warn "then re-run this script."
+                exit 0
+            else
+                fail "Install Docker Desktop from https://docker.com/products/docker-desktop or install Homebrew (https://brew.sh) first."
+            fi
+            ;;
+    esac
+fi
+
+# Verify Docker Compose plugin
+if docker compose version >/dev/null 2>&1; then
+    info "Docker Compose: $(docker compose version --short)"
+else
+    if [ "$PLATFORM" = "linux" ]; then
+        warn "Docker Compose plugin not found — installing..."
+        apt-get update -qq && apt-get install -y -qq docker-compose-plugin
+        info "Docker Compose installed: $(docker compose version --short)"
+    else
+        fail "Docker Compose not available. Ensure Docker Desktop is up to date."
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. Create directory layout
+# ─────────────────────────────────────────────────────────────────────────────
+step "2/4  Creating directories"
+
+mkdir -p "$HOMEBOX_TRAEFIK_DIR" "$HOMEBOX_PROJECTS_DIR" "$HOMEBOX_INFRA_DIR"
+info "Directories created under $HOMEBOX_BASE_DIR"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Deploy base infrastructure files
+# ─────────────────────────────────────────────────────────────────────────────
+step "3/4  Deploying base infrastructure"
+
 SRC_INFRA="${SCRIPT_DIR}/base-infrastructure"
 
 if [ ! -d "$SRC_INFRA" ]; then
     fail "Cannot find base-infrastructure/ next to this script (looked in ${SRC_INFRA})."
 fi
 
-cp -v "$SRC_INFRA/docker-compose.yml" "$INFRA_DIR/docker-compose.yml"
-cp -v "$SRC_INFRA/.env.example"       "$INFRA_DIR/.env.example"
+cp "$SRC_INFRA/docker-compose.yml" "$HOMEBOX_INFRA_DIR/docker-compose.yml"
+cp "$SRC_INFRA/.env.example"       "$HOMEBOX_INFRA_DIR/.env.example"
+cp "$SRC_INFRA/dynamic_conf.yml"   "$HOMEBOX_TRAEFIK_DIR/dynamic_conf.yml"
 
-# Deploy the dynamic_conf.yml to Traefik's watched directory
-cp -v "$SRC_INFRA/dynamic_conf.yml"   "$TRAEFIK_CONF_DIR/dynamic_conf.yml"
+info "Compose file:   ${HOMEBOX_INFRA_DIR}/docker-compose.yml"
+info "Dynamic config: ${HOMEBOX_TRAEFIK_DIR}/dynamic_conf.yml"
 
-# Create .env from example if it doesn't already exist
-if [ ! -f "$INFRA_DIR/.env" ]; then
-    cp "$INFRA_DIR/.env.example" "$INFRA_DIR/.env"
-    warn ".env created from .env.example — edit it before starting services!"
-fi
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. Create Docker network
+# ─────────────────────────────────────────────────────────────────────────────
+step "4/4  Docker network"
 
-info "Files deployed:"
-info "  Compose file:     ${INFRA_DIR}/docker-compose.yml"
-info "  Env file:         ${INFRA_DIR}/.env"
-info "  Dynamic config:   ${TRAEFIK_CONF_DIR}/dynamic_conf.yml"
-
-# ---------------------------------------------------------------------------
-# 4. Create the Docker network (idempotent)
-# ---------------------------------------------------------------------------
-step "4/5  Ensuring traefik-net Docker network exists"
-
-if docker network inspect traefik-net &>/dev/null; then
+if docker network inspect traefik-net >/dev/null 2>&1; then
     info "Network traefik-net already exists."
 else
     docker network create traefik-net
     info "Created network traefik-net."
 fi
 
-# ---------------------------------------------------------------------------
-# 5. Print manual next-steps
-# ---------------------------------------------------------------------------
-step "5/5  Manual steps required"
+# ─────────────────────────────────────────────────────────────────────────────
+# Hand off to interactive configuration
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+success "Base infrastructure is ready."
+echo ""
 
-cat <<INSTRUCTIONS
-
-${GREEN}=============================================================================
-  Homebox Host Provisioner — Complete!
-=============================================================================${NC}
-
-${YELLOW}Before starting services, complete these manual steps:${NC}
-
-${CYAN}A) Edit your .env file${NC}
-   vi ${INFRA_DIR}/.env
-   - Set HOMEBOX_DOMAIN to your actual domain (e.g., example.com)
-   - Generate dashboard auth:  htpasswd -nb admin yourpassword
-
-${CYAN}B) Authenticate Cloudflare Tunnel (cloudflared)${NC}
-   1. Install cloudflared:
-        curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-          -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
-   2. Authenticate (opens a browser):
-        cloudflared tunnel login
-   3. Create a tunnel:
-        cloudflared tunnel create homebox
-   4. Configure the tunnel to route *.YOURDOMAIN.COM to http://localhost:80
-      (Traefik handles host-based routing from there):
-        cat > ~/.cloudflared/config.yml <<EOF
-        tunnel: <TUNNEL_ID>
-        credentials-file: /root/.cloudflared/<TUNNEL_ID>.json
-
-        ingress:
-          - hostname: "*.yourdomain.com"
-            service: http://localhost:80
-          - service: http_status:404
-        EOF
-   5. Add a DNS CNAME record for *.yourdomain.com -> <TUNNEL_ID>.cfargotunnel.com
-      (or use:  cloudflared tunnel route dns homebox "*.yourdomain.com")
-   6. Run the tunnel as a service:
-        cloudflared service install
-        systemctl enable --now cloudflared
-
-${CYAN}C) Install GitHub Actions Self-Hosted Runner${NC}
-   1. Go to your GitHub org/repo -> Settings -> Actions -> Runners -> New self-hosted runner
-   2. Follow the provided commands to download and configure the runner:
-        mkdir -p /opt/actions-runner && cd /opt/actions-runner
-        curl -o actions-runner-linux-x64.tar.gz -L <URL_FROM_GITHUB>
-        tar xzf actions-runner-linux-x64.tar.gz
-        ./config.sh --url https://github.com/<OWNER>/<REPO> --token <TOKEN>
-   3. Install and start as a service:
-        sudo ./svc.sh install
-        sudo ./svc.sh start
-
-${CYAN}D) Start the base infrastructure${NC}
-   cd ${INFRA_DIR}
-   docker compose --env-file .env up -d
-
-   Verify:
-   - Traefik dashboard: http://dashboard.\${HOMEBOX_DOMAIN} (or http://<HOST_IP>:8080)
-
-${CYAN}Architecture note:${NC}
-   The base infrastructure runs ONLY Traefik. Each project brings its own
-   backing services (Postgres, Redis, etc.) in its own docker-compose.yml.
-   This means:
-   - No port conflicts between projects
-   - Each project can pin its own DB/cache versions independently
-   - Projects communicate internally via Docker DNS (no host ports needed)
-   - Only Traefik exposes ports 80/8080 to the host
-   - Projects join the shared "traefik-net" network for HTTP routing
-   - Project data is persisted under ${PROJECTS_DIR}/<project-name>/
-
-INSTRUCTIONS
-
-info "Done. Happy shipping!"
+if prompt_yn "Run interactive configuration now? (domain, auth, tunnel, runner)"; then
+    bash "$SCRIPT_DIR/configure.sh"
+else
+    echo ""
+    info "You can run configuration later with:"
+    info "  bash $SCRIPT_DIR/configure.sh"
+    echo ""
+fi

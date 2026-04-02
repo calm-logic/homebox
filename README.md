@@ -1,20 +1,40 @@
 # Homebox
 
-A self-hosted Internal PaaS for deploying and managing containerized applications on a single server. Homebox uses Traefik as a reverse proxy, Cloudflare Tunnel for internet exposure, and provides a CLI for developers to switch between local development and published container routing.
+A self-hosted Internal PaaS for deploying and managing containerized applications. Homebox runs on any machine with Docker (Linux, macOS, or Windows), uses Traefik as a reverse proxy, Cloudflare Tunnel for internet exposure, and provides a CLI for developers to switch between local development and published container routing.
+
+## Quick Start
+
+Install on any machine with a single command:
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/main/homebox-infra/install.sh | bash
+```
+
+**Windows (PowerShell as Administrator):**
+```powershell
+irm https://raw.githubusercontent.com/aleontiev/homebox/main/homebox-infra/install.ps1 | iex
+```
+
+The installer will:
+1. Check for (or install) Docker
+2. Create the Homebox directory structure
+3. Walk you through domain, authentication, Cloudflare Tunnel, and GitHub runner setup
+4. Start Traefik
 
 ## Architecture
 
 ```
 Internet
-  │
-  ▼
+  |
+  v
 Cloudflare Tunnel
-  │
-  ▼
+  |
+  v
 Traefik (port 80)
-  ├── app1.example.com → app1 container  (pub mode)
-  ├── app2.example.com → dev machine IP  (dev mode)
-  └── app3.example.com → app3 container  (pub mode)
+  |-- app1.example.com -> app1 container  (pub mode)
+  |-- app2.example.com -> dev machine IP  (dev mode)
+  +-- app3.example.com -> app3 container  (pub mode)
 ```
 
 Each project runs in its own Docker Compose stack with isolated networking:
@@ -28,61 +48,68 @@ Backing services (Postgres, Redis) are never exposed to the host network.
 
 ```
 homebox-infra/
-├── cli/                        # Python CLI for developers
+├── install.sh / install.ps1       # One-liner installers
+├── cli/                           # Python CLI for developers
 │   ├── homebox_cli/
-│   │   ├── main.py             # Commands: init, switch, db sync
-│   │   ├── config.py           # ~/.homebox.json management
-│   │   ├── network.py          # Local IP detection
-│   │   ├── ssh.py              # SSH client for remote operations
-│   │   └── traefik.py          # Traefik config file manipulation
+│   │   ├── main.py                # Commands: init, switch, db sync
+│   │   ├── config.py              # ~/.homebox.json management
+│   │   ├── network.py             # Local IP detection
+│   │   ├── ssh.py                 # SSH client for remote operations
+│   │   └── traefik.py             # Traefik config file manipulation
 │   └── pyproject.toml
 ├── host-provisioner/
 │   ├── base-infrastructure/
-│   │   ├── docker-compose.yml  # Traefik service definition
-│   │   ├── .env.example        # Host configuration template
-│   │   └── dynamic_conf.yml    # Traefik dynamic routing rules
-│   └── setup_host.sh           # Host provisioning script
+│   │   ├── docker-compose.yml     # Traefik service definition
+│   │   ├── .env.example           # Host configuration template
+│   │   └── dynamic_conf.yml       # Traefik dynamic routing rules
+│   ├── lib.sh                     # Shared utilities (colors, platform detection)
+│   ├── setup_host.sh              # Host provisioning script
+│   └── configure.sh               # Interactive configuration
 └── docs/
-    └── claude-bootstrap-skill.md  # Guide for scaffolding new projects
+    ├── homebox-ready.md           # Making a project Homebox-compatible
+    └── claude-bootstrap-skill.md  # LLM guide for scaffolding projects
 ```
 
 ## Host Setup
 
 ### Prerequisites
 
-- A Linux server (Ubuntu/Debian)
-- Root access
-- A domain managed by Cloudflare
+- **Any machine** — Linux, macOS (including Mac Mini), or Windows
+- **Docker** — Docker Engine on Linux, Docker Desktop on macOS/Windows
+- A domain managed by Cloudflare (for tunnel access)
 
-### Provision the host
+### One-liner install (recommended)
+
+See [Quick Start](#quick-start) above. The installer handles everything interactively.
+
+### Manual setup
+
+If you prefer to run the provisioner directly:
 
 ```bash
+# Linux (requires sudo)
 sudo ./homebox-infra/host-provisioner/setup_host.sh
+
+# macOS (no sudo required)
+./homebox-infra/host-provisioner/setup_host.sh
 ```
 
-This installs Docker, creates the directory structure at `/opt/homebox`, deploys base infrastructure files, and creates the shared `traefik-net` Docker network.
+The provisioner installs Docker, creates the directory structure, deploys base infrastructure files, creates the `traefik-net` Docker network, and launches the interactive configurator.
 
-### Configure and start
+**Default paths:**
+| Platform | Base directory |
+|----------|---------------|
+| Linux    | `/opt/homebox` |
+| macOS    | `~/homebox` |
+| Windows  | `%USERPROFILE%\homebox` |
 
-1. Copy and edit the environment file:
-   ```bash
-   cp /opt/homebox/base-infrastructure/.env.example /opt/homebox/base-infrastructure/.env
-   ```
+Override with `HOMEBOX_BASE_DIR` environment variable.
 
-2. Set your values:
-   ```env
-   HOMEBOX_DOMAIN=example.com
-   TRAEFIK_DASHBOARD_AUTH=admin:$apr1$...    # generate with: htpasswd -n admin
-   TRAEFIK_DYNAMIC_CONF_DIR=/opt/homebox/traefik
-   ```
+To re-run just the configuration (domain, auth, tunnel, runner):
 
-3. Set up a Cloudflare Tunnel pointing to `localhost:80`.
-
-4. Start Traefik:
-   ```bash
-   cd /opt/homebox/base-infrastructure
-   docker compose --env-file .env up -d
-   ```
+```bash
+bash homebox-infra/host-provisioner/configure.sh
+```
 
 ## Developer Setup
 
@@ -139,26 +166,17 @@ With explicit options:
 homebox db sync myapp --db myapp_db --user myapp_user --local-db myapp_dev --container myapp-db-1
 ```
 
-## Deploying a New Project
+## Making a Project Homebox-Ready
 
-Each project needs:
+Any project with a `docker-compose.yml` that includes Traefik labels and joins the `traefik-net` network is Homebox-compatible. See the full guide: **[homebox-ready.md](homebox-infra/docs/homebox-ready.md)**.
 
-1. A **Dockerfile** with layer caching and a non-root user
-2. A **docker-compose.yml** with Traefik labels and internal networking
-3. A **GitHub Actions workflow** for CI/CD (using a self-hosted runner on the host)
+The minimum requirements:
 
-Traefik labels for production routing:
+1. An app service with Traefik routing labels
+2. The app service joins the external `traefik-net` network
+3. Backing services stay on an internal network (no host ports)
 
-```yaml
-labels:
-  - "traefik.enable=true"
-  - "traefik.http.routers.myapp.rule=Host(`myapp.example.com`)"
-  - "traefik.http.routers.myapp.entrypoints=web"
-  - "traefik.http.services.myapp.loadbalancer.server.port=8000"
-  - "traefik.docker.network=traefik-net"
-```
-
-See [`homebox-infra/docs/claude-bootstrap-skill.md`](homebox-infra/docs/claude-bootstrap-skill.md) for a detailed project scaffolding guide.
+To scaffold a new project or add Homebox support to an existing repo, see the [bootstrap skill](homebox-infra/docs/claude-bootstrap-skill.md).
 
 ## Development Workflow
 
@@ -173,7 +191,7 @@ See [`homebox-infra/docs/claude-bootstrap-skill.md`](homebox-infra/docs/claude-b
    homebox db sync myapp
    ```
 
-3. **Deploy** — push to your branch and let GitHub Actions build and deploy the container. Then switch back:
+3. **Deploy** — push to your branch. GitHub Actions runs tests in the cloud, then deploys to your host:
    ```bash
    homebox switch myapp pub
    ```
@@ -188,4 +206,5 @@ See [`homebox-infra/docs/claude-bootstrap-skill.md`](homebox-infra/docs/claude-b
 | Database | PostgreSQL 16 |
 | Cache | Valkey (Redis-compatible) 7 |
 | CLI | Python 3.10+, Typer, Paramiko |
-| CI/CD | GitHub Actions (self-hosted runner) |
+| CI/CD | GitHub Actions (tests in cloud, deploy on self-hosted runner) |
+| Host platforms | Linux, macOS, Windows |

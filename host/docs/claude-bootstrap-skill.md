@@ -1,6 +1,6 @@
 # Homebox Project Bootstrap Skill
 
-> **Purpose:** Give this document to an LLM (e.g. Claude) when you want to scaffold a new project that deploys onto your Homebox network. The LLM will generate a production Dockerfile, a Host-ready `docker-compose.yml`, and a GitHub Actions CI/CD workflow.
+> **Purpose:** Give this document to an LLM (e.g. Claude) when you want to scaffold a **new** project or make an **existing** project Homebox-compatible. The LLM will generate or adapt a production Dockerfile, a Host-ready `docker-compose.yml`, and a GitHub Actions CI/CD workflow.
 
 ---
 
@@ -20,6 +20,30 @@ Before invoking this skill, tell the LLM:
 ---
 
 ## Instructions for the LLM
+
+### Pre-Generation Assessment (for existing repos)
+
+Before generating any files, check what already exists in the project:
+
+1. **Does a `Dockerfile` exist?**
+   - **YES:** Review it. Ensure it follows the rules below (slim/alpine base, pinned version, non-root user, layer-cached dependencies). If it deviates, suggest **specific, minimal modifications** rather than replacing it wholesale. Preserve the existing build logic, package installations, and any project-specific steps.
+   - **NO:** Generate one per Section 1 below.
+
+2. **Does a `docker-compose.yml` exist?**
+   - **YES:** Review it. Add the required Traefik labels and `traefik-net` network configuration. Do NOT remove existing services or configuration that does not conflict with Homebox requirements. If the app service already has networks defined, add `traefik-net` to the list. If there are existing labels, append the Traefik labels.
+   - **NO:** Generate one per Section 2 below.
+
+3. **Does a `.github/workflows/deploy.yml` (or similar CI file) exist?**
+   - **YES:** Check if it already handles deployment. If it deploys elsewhere (e.g., Heroku, AWS, Vercel), offer to add a Homebox deploy job **alongside** the existing one, or replace it if the user confirms.
+   - **NO:** Generate one per Section 4 below.
+
+4. **Does a `.env.example` exist?**
+   - **YES:** Add `HOMEBOX_DOMAIN` and `DB_PASSWORD` if they are missing. Do NOT remove existing variables.
+   - **NO:** Generate one per Section 3 below.
+
+When modifying existing files, present the changes as diffs or clearly marked additions so the user can review what changed.
+
+---
 
 You are generating files for a project that will run on a **Homebox** internal PaaS. The infrastructure uses:
 
@@ -164,8 +188,8 @@ on:
     branches: [main]
 
 jobs:
-  deploy:
-    runs-on: self-hosted
+  test:
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -173,8 +197,20 @@ jobs:
 
       - name: Run tests
         run: |
-          # Build a test image or run tests directly
-          docker compose run --rm --no-deps app <test-command>
+          # Run tests in CI (cloud runner)
+          # Replace with your project's test command, e.g.:
+          #   npm test
+          #   pytest
+          #   go test ./...
+          echo "No tests configured — add your test command here"
+
+  deploy:
+    runs-on: self-hosted
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Deploy
         run: |
@@ -190,8 +226,9 @@ jobs:
 ```
 
 **Rules:**
-- `runs-on: self-hosted` — the runner is on the Host, so it has direct Docker access.
-- Always run tests BEFORE deploying.
+- Tests run on `ubuntu-latest` (cloud runner) — fast, isolated, no load on your host.
+- Deployment runs on `self-hosted` (your Homebox host) — only after tests pass (`needs: test`).
+- Replace the placeholder test command with your project's actual test runner.
 - Use `docker compose down --remove-orphans` then `up -d --build` for zero-ambiguity deploys.
 - The workflow should assume the working directory is the project root, and that a `.env` file already exists on the Host (placed during initial setup).
 
@@ -227,3 +264,11 @@ Before presenting the generated files, verify:
 - [ ] `.github/workflows/deploy.yml` uses `runs-on: self-hosted`
 - [ ] Tests run before deploy in the workflow
 - [ ] All hardcoded values are replaced with the user's provided variables
+
+**Additional checks for existing repos:**
+
+- [ ] Existing files were assessed before generating new ones
+- [ ] Existing Dockerfile was adapted (not replaced) if it existed
+- [ ] Existing `docker-compose.yml` had Traefik config merged in (not replaced)
+- [ ] Existing `.env.example` had Homebox vars added (not replaced)
+- [ ] Existing CI workflows were preserved alongside new Homebox deploy job
