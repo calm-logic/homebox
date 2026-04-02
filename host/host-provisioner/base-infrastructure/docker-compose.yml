@@ -50,6 +50,6 @@ services:
       - "traefik.http.middlewares.dashboard-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
 
 networks:
-  traefik-net:
+    external: true
     name: traefik-net
-    driver: bridge
+    external: true
