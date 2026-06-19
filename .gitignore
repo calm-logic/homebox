@@ -1,2 +1,61 @@
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+develop-eggs/
+.installed.cfg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ── Node / frontend ──────────────────────────────────────────────────────────
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+*.tsbuildinfo
+.vite/
+.eslintcache
+
+# Build output (the admin SPA is rebuilt from source in the Docker image;
+# app/main.py serves the in-image static_spa, not the committed bundle)
+dist/
+static_spa/
+
+# ── Secrets / local config ───────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.local
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Editor / OS ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# ── Agent / tooling ──────────────────────────────────────────────────────────
 .codex
 .claude
