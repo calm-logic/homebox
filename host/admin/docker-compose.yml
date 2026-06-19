@@ -1,0 +1,69 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: homebox-admin-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: homebox_admin
+      POSTGRES_USER: homebox_admin
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - admin-db:/var/lib/postgresql/data
+    ports:
+      - "5399:5432"
+    networks:
+      - admin-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U homebox_admin -d homebox_admin"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    container_name: homebox-admin
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://homebox_admin:${DB_PASSWORD}@db:5432/homebox_admin
+      APP_SECRET: ${APP_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      # Don't pass HOMEBOX_BASE_DIR into the container — that's the *host* path,
+      # but the volume below mounts it at /host/homebox inside the container, which
+      # is the default in app/config.py:homebox_base_dir.
+      HOMEBOX_ADMIN_USERNAME: ${HOMEBOX_ADMIN_USERNAME:-homebox}
+      DASHBOARD_AUTH: ${DASHBOARD_AUTH}
+      HOMEBOX_OAUTH_PROXY_URL: ${HOMEBOX_OAUTH_PROXY_URL:-https://oauth.homebox.sh}
+    ports:
+      # Bind to localhost by default — the public URL is set up later through
+      # the onboarding wizard (Cloudflare Tunnel → Traefik → admin). Override
+      # by setting HOMEBOX_ADMIN_BIND=0.0.0.0 in .env for LAN-only deploys.
+      - "${HOMEBOX_ADMIN_BIND:-127.0.0.1}:${HOMEBOX_ADMIN_PORT:-7765}:8000"
+    volumes:
+      - ${HOMEBOX_HOST_BASE_DIR:-/opt/homebox}:/host/homebox
+      # Deployed projects, mounted at the SAME path as on the host so that
+      # docker-compose bind mounts in project stacks resolve identically inside
+      # the admin container and on the daemon. See app/config.py:projects_host_dir.
+      - ${HOMEBOX_HOST_BASE_DIR:-/opt/homebox}/projects:/opt/homebox/projects
+      - ${HOMEBOX_SECRETS_DIR}:/host/secrets:ro
+      # Read-write so the admin app can restart cloudflared/traefik when
+      # config changes are applied from the UI.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - admin-internal
+      - traefik-net
+    # Traefik routing for the admin's public hostname is handled through the
+    # file provider (traefik/dynamic_conf.yml), written by the admin app once
+    # the onboarding wizard's "admin domain" step completes. No docker-provider
+    # labels here — keeping them with a stale ADMIN_DOMAIN was the source of
+    # the dual-routing confusion.
+
+volumes:
+  admin-db:
+
+networks:
+  admin-internal:
+  traefik-net:
+    external: true

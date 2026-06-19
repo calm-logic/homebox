@@ -107,12 +107,14 @@ prompt_value() {
         prompt_text="$prompt_text [$default]"
     fi
 
-    if [ -t 0 ]; then
-        printf "%s: " "$prompt_text"
-        read -r result
-    else
+    # Callers use VAR="$(prompt_value ...)", which captures stdout. Always
+    # write the prompt to the terminal so it is visible immediately.
+    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
         printf "%s: " "$prompt_text" >/dev/tty
         read -r result </dev/tty
+    else
+        printf "%s: " "$prompt_text" >&2
+        read -r result
     fi
 
     if [ -z "$result" ] && [ -n "$default" ]; then
@@ -127,14 +129,15 @@ prompt_secret() {
     local prompt_text="$1"
     local result
 
-    if [ -t 0 ]; then
-        printf "%s: " "$prompt_text"
-        read -rs result
-        echo ""
-    else
+    # Same capture-safe pattern as prompt_value.
+    if [ -r /dev/tty ] && [ -w /dev/tty ]; then
         printf "%s: " "$prompt_text" >/dev/tty
         read -rs result </dev/tty
         echo "" >/dev/tty
+    else
+        printf "%s: " "$prompt_text" >&2
+        read -rs result
+        echo "" >&2
     fi
     echo "$result"
 }
@@ -162,6 +165,116 @@ prompt_yn() {
         y|yes) return 0 ;;
         *)     return 1 ;;
     esac
+}
+
+prompt_existing_action() {
+    local subject="$1"
+    local default="${2:-keep}"
+    local result
+
+    while true; do
+        result="$(prompt_value "$subject already exists. Choose action: keep, reinstall, or cancel" "$default")"
+        result="$(echo "$result" | tr '[:upper:]' '[:lower:]')"
+
+        case "$result" in
+            keep|reinstall|cancel)
+                echo "$result"
+                return 0
+                ;;
+            *)
+                warn "Please enter keep, reinstall, or cancel."
+                ;;
+        esac
+    done
+}
+
+# ── Random secrets ───────────────────────────────────────────────────────────
+generate_random_password() {
+    LC_ALL=C tr -dc 'A-Za-z0-9_-' </dev/urandom | head -c 24
+    echo ""
+}
+
+generate_random_hex() {
+    local bytes="${1:-32}"
+    LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c "$((bytes * 2))"
+    echo ""
+}
+
+# ── User home (works under sudo) ─────────────────────────────────────────────
+homebox_user() {
+    if [ -n "${SUDO_USER:-}" ]; then
+        echo "$SUDO_USER"
+    else
+        id -un
+    fi
+}
+
+homebox_home() {
+    if [ -n "${SUDO_USER:-}" ]; then
+        getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6
+    else
+        echo "$HOME"
+    fi
+}
+
+homebox_secrets_dir() {
+    echo "$(homebox_home)/.homebox"
+}
+
+homebox_secrets_file() {
+    echo "$(homebox_secrets_dir)/secrets.json"
+}
+
+# Ensure the secrets directory exists, owned by the invoking (sudo) user.
+ensure_secrets_dir() {
+    local dir
+    dir="$(homebox_secrets_dir)"
+    if [ ! -d "$dir" ]; then
+        mkdir -p "$dir"
+        chown "$(homebox_user)" "$dir" 2>/dev/null || true
+        chmod 700 "$dir"
+    fi
+}
+
+# Read a JSON value: read_secret <jq-path>  (e.g. .admin.password)
+read_secret() {
+    local path="$1"
+    local file
+    file="$(homebox_secrets_file)"
+    [ -f "$file" ] || { echo ""; return 0; }
+    if command -v jq >/dev/null 2>&1; then
+        jq -r "$path // empty" "$file" 2>/dev/null
+    else
+        # crude fallback: only supports .a.b.c paths to string scalars
+        local key
+        key="$(echo "$path" | awk -F. '{print $NF}')"
+        sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" | head -1
+    fi
+}
+
+# Read the whitelisted login emails (one per line) from secrets.json's
+# `identities` array. Requires jq; without it, returns nothing (best-effort —
+# arrays aren't reliably parseable with the sed fallback).
+read_identities() {
+    local file
+    file="$(homebox_secrets_file)"
+    [ -f "$file" ] || return 0
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.identities[]? // empty' "$file" 2>/dev/null
+    fi
+}
+
+# Write the entire secrets.json from a heredoc / stdin. Caller is responsible
+# for the JSON content.
+write_secrets_json() {
+    local file
+    ensure_secrets_dir
+    file="$(homebox_secrets_file)"
+    local tmp="${file}.tmp"
+    cat > "$tmp"
+    mv "$tmp" "$file"
+    chown "$(homebox_user)" "$file" 2>/dev/null || true
+    chmod 600 "$file"
 }
 
 # ── Initialize ───────────────────────────────────────────────────────────────

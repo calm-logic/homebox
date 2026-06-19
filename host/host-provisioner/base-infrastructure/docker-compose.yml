@@ -13,43 +13,86 @@
 
 services:
   # ---------------------------------------------------------------------------
+  # Docker socket proxy — exposes a filtered, read-only subset of the Docker
+  # API to Traefik over TCP. Avoids giving Traefik full root via the socket
+  # and works around Docker 29 + Traefik client-lib quirks.
+  # ---------------------------------------------------------------------------
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: homebox-docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      SERVICES: 1
+      TASKS: 1
+      NETWORKS: 1
+      EVENTS: 1
+      PING: 1
+      VERSION: 1
+      INFO: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - traefik-net
+
+  # ---------------------------------------------------------------------------
   # Traefik — reverse proxy & edge router
   # ---------------------------------------------------------------------------
   traefik:
-    image: traefik:v3.1
+    image: traefik:v3.3
+    container_name: homebox-traefik
     restart: unless-stopped
+    depends_on:
+      - docker-proxy
+    environment:
+      # Docker 29 dropped legacy API versions; Traefik's docker client
+      # defaults to v1.24, which the daemon rejects with 400. Pin a modern
+      # version so the client doesn't try to negotiate against /v1.24.
+      DOCKER_API_VERSION: "1.45"
     command:
-      # Entrypoints
       - "--entrypoints.web.address=:80"
-      # API / Dashboard
       - "--api.dashboard=true"
-      - "--api.insecure=false"
-      # File provider — watches dynamic_conf.yml for dev-mode routing
+      - "--api.insecure=true"
       - "--providers.file.filename=/etc/traefik/dynamic_conf.yml"
       - "--providers.file.watch=true"
-      # Docker provider — picks up labels from project containers
       - "--providers.docker=true"
+      - "--providers.docker.endpoint=tcp://docker-proxy:2375"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.docker.network=traefik-net"
-      # Logging
       - "--log.level=INFO"
     ports:
       - "80:80"
       - "8080:8080"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - ${TRAEFIK_DYNAMIC_CONF_DIR:-/opt/homebox/traefik}/dynamic_conf.yml:/etc/traefik/dynamic_conf.yml
     networks:
       - traefik-net
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.dashboard.rule=Host(`dashboard.${HOMEBOX_DOMAIN}`)"
-      - "traefik.http.routers.dashboard.service=api@internal"
-      - "traefik.http.routers.dashboard.entrypoints=web"
-      - "traefik.http.routers.dashboard.middlewares=dashboard-auth"
-      - "traefik.http.middlewares.dashboard-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
+    # Traefik admin dashboard is reachable on the host at http://localhost:8080
+    # (port 8080 published above). No public hostname route — that used to be
+    # `dashboard.<HOMEBOX_DOMAIN>`, but the new install flow doesn't bake a
+    # root domain in at install time, so there's nothing to interpolate.
+
+  # ---------------------------------------------------------------------------
+  # Cloudflared — tunnel to Cloudflare's edge. Deployed only when a
+  # CLOUDFLARED_CONFIG_DIR is provided (configure.sh sets this once a tunnel
+  # has been authenticated and routed).
+  # ---------------------------------------------------------------------------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: homebox-cloudflared
+    restart: unless-stopped
+    user: "0:0"
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ${CLOUDFLARED_CONFIG_DIR:-/dev/null}:/etc/cloudflared:ro
+    networks:
+      - traefik-net
+    depends_on:
+      - traefik
+    profiles:
+      - tunnel
 
 networks:
+  traefik-net:
     external: true
     name: traefik-net
-    external: true

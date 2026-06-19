@@ -2,12 +2,17 @@
 # =============================================================================
 # Homebox Interactive Configuration
 # =============================================================================
-# Configures domain, dashboard auth, Cloudflare Tunnel, and GitHub Actions
-# runner. Safe to re-run — each step detects existing config and skips or
-# offers to reconfigure.
+# Brings up the Homebox admin UI bound to 127.0.0.1 only. All Cloudflare setup
+# (token, tunnel, public URL) happens in the admin's first-run onboarding
+# wizard — this script never touches `cloudflared` or the user's personal
+# Cloudflare account, so a host that already runs unrelated cloudflared
+# tunnels is safe to install on.
 #
-# Called automatically by setup_host.sh, or run standalone:
-#   bash configure.sh
+# Steps:
+#   1. Admin credentials (~/.homebox/secrets.json — bcrypt hash only)
+#   2. Generate admin .env, copy source into /opt/homebox/admin
+#   3. Bring up Traefik (base infrastructure) and the admin stack
+#   4. Print local URL + first-run password (user finishes setup in the UI)
 # =============================================================================
 
 set -euo pipefail
@@ -17,425 +22,297 @@ source "$SCRIPT_DIR/lib.sh"
 
 require_docker
 
-HOMEBOX_INSTALL_MODE="${HOMEBOX_INSTALL_MODE:-proceed}"
-HOMEBOX_ENV_NEEDS_WRITE=0
+ADMIN_SRC_DIR="${SCRIPT_DIR}/../admin"
+ADMIN_DEPLOY_DIR="${HOMEBOX_BASE_DIR}/admin"
+ADMIN_PORT="${HOMEBOX_ADMIN_PORT:-7765}"
 
-load_existing_env() {
-    if [ ! -f "$HOMEBOX_INFRA_DIR/.env" ]; then
+HOMEBOX_FIRST_RUN_PASSWORD=""
+RESET_PASSWORD=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --reset-password) RESET_PASSWORD=1 ;;
+        --help|-h)
+            echo "Usage: configure.sh [--reset-password]"
+            echo "  --reset-password   Generate a new admin password (invalidates the old one)"
+            exit 0
+            ;;
+    esac
+done
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 1: Admin credentials
+# ─────────────────────────────────────────────────────────────────────────────
+load_or_generate_admin_credentials() {
+    step "Step 1/4 — Admin credentials"
+
+    ensure_secrets_dir
+    HOMEBOX_ADMIN_USERNAME="$(read_secret '.admin.username')"
+    HOMEBOX_ADMIN_PASSWORD_HASH="$(read_secret '.admin.password_hash')"
+
+    if [ -z "$HOMEBOX_ADMIN_USERNAME" ]; then
+        HOMEBOX_ADMIN_USERNAME="homebox"
+    fi
+
+    if [ "$RESET_PASSWORD" -eq 1 ] && [ -n "$HOMEBOX_ADMIN_PASSWORD_HASH" ]; then
+        warn "Resetting admin password — the old password is being invalidated."
+        HOMEBOX_ADMIN_PASSWORD_HASH=""
+    fi
+
+    if [ -z "$HOMEBOX_ADMIN_PASSWORD_HASH" ]; then
+        local plain hash
+        plain="$(generate_random_password)"
+        info "Generating bcrypt hash..."
+        hash="$(docker run --rm httpd:2-alpine htpasswd -nbB \
+            "$HOMEBOX_ADMIN_USERNAME" "$plain" 2>/dev/null \
+            | sed -n "s/^${HOMEBOX_ADMIN_USERNAME}://p")"
+        if [ -z "$hash" ]; then
+            fail "Failed to generate bcrypt hash."
+        fi
+        HOMEBOX_ADMIN_PASSWORD_HASH="$hash"
+        HOMEBOX_FIRST_RUN_PASSWORD="$plain"
+        info "Generated admin credentials (hash saved to $(homebox_secrets_file))"
+    else
+        info "Reusing existing admin credentials from $(homebox_secrets_file)"
+    fi
+
+    prompt_whitelist_email
+    write_admin_secrets
+}
+
+# Optionally collect a whitelisted email so its owner can sign into Homebox
+# passwordlessly via Google/GitHub OAuth (matched against an Identity row). The
+# admin app seeds it from secrets.json on startup. Optional + skippable.
+prompt_whitelist_email() {
+    # Preserve any emails already on disk (requires jq; best-effort otherwise).
+    WHITELIST_EMAILS=()
+    local e
+    while IFS= read -r e; do
+        [ -n "$e" ] && WHITELIST_EMAILS+=("$e")
+    done < <(read_identities)
+
+    has_tty || return 0  # non-interactive install: skip the prompt entirely
+
+    local answer
+    answer="$(prompt_value "Add a whitelisted email for passwordless access? (leave blank to skip)" "")"
+    answer="$(echo "$answer" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [ -z "$answer" ] && return 0
+
+    if ! [[ "$answer" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
+        warn "'$answer' doesn't look like an email — skipping."
         return 0
     fi
 
-    if [ -z "${HOMEBOX_DOMAIN:-}" ]; then
-        HOMEBOX_DOMAIN="$(sed -n 's/^HOMEBOX_DOMAIN=//p' "$HOMEBOX_INFRA_DIR/.env" | head -1)"
-    fi
-
-    if [ -z "${TRAEFIK_DASHBOARD_AUTH:-}" ]; then
-        TRAEFIK_DASHBOARD_AUTH="$(sed -n 's/^TRAEFIK_DASHBOARD_AUTH=//p' "$HOMEBOX_INFRA_DIR/.env" | head -1)"
-    fi
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 1: Domain
-# ─────────────────────────────────────────────────────────────────────────────
-configure_domain() {
-    step "Step 1/6 — Domain Configuration"
-
-    if [ "$HOMEBOX_INSTALL_MODE" != "reinstall" ]; then
-        load_existing_env
-        if [ -n "${HOMEBOX_DOMAIN:-}" ]; then
-            info "Keeping existing domain: $HOMEBOX_DOMAIN"
+    # Dedupe.
+    for e in "${WHITELIST_EMAILS[@]:-}"; do
+        if [ "$e" = "$answer" ]; then
+            info "$answer is already whitelisted."
             return 0
         fi
-    fi
-
-    HOMEBOX_DOMAIN="$(prompt_value "Enter your root domain (e.g. example.com)" "")"
-    HOMEBOX_ENV_NEEDS_WRITE=1
-
-    if [ -z "$HOMEBOX_DOMAIN" ]; then
-        fail "Domain cannot be empty."
-    fi
-
-    info "Domain: $HOMEBOX_DOMAIN"
-    info "Projects will be accessible at <project>.$HOMEBOX_DOMAIN"
+    done
+    WHITELIST_EMAILS+=("$answer")
+    info "Whitelisted $answer for passwordless login."
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 2: Dashboard authentication
-# ─────────────────────────────────────────────────────────────────────────────
-configure_dashboard_auth() {
-    step "Step 2/6 — Traefik Dashboard Authentication"
-
-    if [ "$HOMEBOX_INSTALL_MODE" != "reinstall" ]; then
-        load_existing_env
-        if [ -n "${TRAEFIK_DASHBOARD_AUTH:-}" ]; then
-            info "Keeping existing dashboard credentials from $HOMEBOX_INFRA_DIR/.env"
-            return 0
-        fi
-    fi
-
-    local username password password2 hash
-
-    username="$(prompt_value "Dashboard username" "admin")"
-
-    while true; do
-        password="$(prompt_secret "Dashboard password")"
-        if [ -z "$password" ]; then
-            warn "Password cannot be empty."
-            continue
-        fi
-        password2="$(prompt_secret "Confirm password")"
-        if [ "$password" = "$password2" ]; then
-            break
-        fi
-        warn "Passwords do not match. Try again."
+# Write secrets.json from the current admin + whitelist state. Called once after
+# Step 1 settles, so a reused-password install still persists a newly added email.
+write_admin_secrets() {
+    local ids_json="" first=1 e
+    for e in "${WHITELIST_EMAILS[@]:-}"; do
+        [ -z "$e" ] && continue
+        if [ "$first" -eq 1 ]; then first=0; else ids_json+=", "; fi
+        ids_json+="\"${e}\""
     done
 
-    # Generate htpasswd hash using Docker (no binary dependency)
-    info "Generating credentials..."
-    hash="$(docker run --rm httpd:2-alpine htpasswd -nb "$username" "$password" 2>/dev/null)"
-
-    if [ -z "$hash" ]; then
-        fail "Failed to generate htpasswd hash."
-    fi
-
-    # Escape $ for docker-compose .env format ($ → $$)
-    TRAEFIK_DASHBOARD_AUTH="$(echo "$hash" | sed 's/\$/\$\$/g')"
-    HOMEBOX_ENV_NEEDS_WRITE=1
-
-    info "Dashboard credentials generated for user: $username"
+    write_secrets_json <<EOF
+{
+  "admin": {
+    "username": "${HOMEBOX_ADMIN_USERNAME}",
+    "password_hash": "${HOMEBOX_ADMIN_PASSWORD_HASH}"
+  },
+  "identities": [${ids_json}]
+}
+EOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 3: Generate .env
+# Step 2: Admin .env + source deploy
 # ─────────────────────────────────────────────────────────────────────────────
-generate_env() {
-    step "Step 3/6 — Generating .env"
+generate_admin_env() {
+    step "Step 2/4 — Admin app environment"
 
-    if [ "$HOMEBOX_INSTALL_MODE" != "reinstall" ] && [ "$HOMEBOX_ENV_NEEDS_WRITE" -eq 0 ] && [ -f "$HOMEBOX_INFRA_DIR/.env" ]; then
-        info "Keeping existing environment file: $HOMEBOX_INFRA_DIR/.env"
-        return 0
+    mkdir -p "$ADMIN_DEPLOY_DIR"
+
+    local env_file="$ADMIN_DEPLOY_DIR/.env"
+    local db_password app_secret encryption_key dashboard_auth secrets_dir
+
+    if [ -f "$env_file" ] && grep -q '^DB_PASSWORD=' "$env_file"; then
+        info "Reusing existing per-deploy secrets from $env_file"
+        db_password="$(sed -n 's/^DB_PASSWORD=//p' "$env_file" | head -1)"
+        app_secret="$(sed -n 's/^APP_SECRET=//p' "$env_file" | head -1)"
+        encryption_key="$(sed -n 's/^ENCRYPTION_KEY=//p' "$env_file" | head -1)"
+    else
+        info "Generating new per-deploy secrets"
+        db_password="$(generate_random_password)"
+        app_secret="$(generate_random_hex 32)"
+        encryption_key="$(generate_random_hex 32)"
     fi
 
-    cat > "$HOMEBOX_INFRA_DIR/.env" <<EOF
-HOMEBOX_DOMAIN=${HOMEBOX_DOMAIN}
-TRAEFIK_DASHBOARD_AUTH=${TRAEFIK_DASHBOARD_AUTH}
+    # The bcrypt hash from secrets.json is also a valid htpasswd line; escape
+    # $ for compose .env consumption.
+    dashboard_auth="$(echo "${HOMEBOX_ADMIN_USERNAME}:${HOMEBOX_ADMIN_PASSWORD_HASH}" \
+        | sed 's/\$/\$\$/g')"
+
+    secrets_dir="$(homebox_secrets_dir)"
+
+    # No ADMIN_DOMAIN / HOMEBOX_DOMAIN baked in — those come from the admin UI's
+    # onboarding flow once the user picks them.
+    cat > "$env_file" <<EOF
+# Homebox admin — generated $(date -u +%Y-%m-%dT%H:%M:%SZ). Do not commit.
+HOMEBOX_ADMIN_PORT=${ADMIN_PORT}
+HOMEBOX_ADMIN_USERNAME=${HOMEBOX_ADMIN_USERNAME}
+HOMEBOX_SECRETS_DIR=${secrets_dir}
+HOMEBOX_HOST_BASE_DIR=${HOMEBOX_BASE_DIR}
+DB_PASSWORD=${db_password}
+APP_SECRET=${app_secret}
+ENCRYPTION_KEY=${encryption_key}
+DASHBOARD_AUTH=${dashboard_auth}
+EOF
+    chmod 600 "$env_file"
+    info "Wrote $env_file (mode 600)"
+}
+
+deploy_admin_source() {
+    step "Step 3/4 — Deploying admin source"
+
+    if [ ! -d "$ADMIN_SRC_DIR" ]; then
+        fail "Admin source not found at $ADMIN_SRC_DIR"
+    fi
+
+    if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete \
+            --exclude '.env' \
+            --exclude '__pycache__' \
+            --exclude '.venv' \
+            "$ADMIN_SRC_DIR/" "$ADMIN_DEPLOY_DIR/"
+    else
+        local tmp_env=""
+        if [ -f "$ADMIN_DEPLOY_DIR/.env" ]; then
+            tmp_env="$(mktemp)"
+            cp "$ADMIN_DEPLOY_DIR/.env" "$tmp_env"
+        fi
+        rm -rf "$ADMIN_DEPLOY_DIR"
+        mkdir -p "$ADMIN_DEPLOY_DIR"
+        cp -R "$ADMIN_SRC_DIR"/. "$ADMIN_DEPLOY_DIR/"
+        if [ -n "$tmp_env" ]; then
+            cp "$tmp_env" "$ADMIN_DEPLOY_DIR/.env"
+            rm -f "$tmp_env"
+        fi
+    fi
+    info "Admin source deployed to $ADMIN_DEPLOY_DIR"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 4: Bring up Traefik + admin
+# ─────────────────────────────────────────────────────────────────────────────
+start_stacks() {
+    step "Step 4/4 — Starting Traefik + admin"
+
+    if ! docker network inspect traefik-net >/dev/null 2>&1; then
+        docker network create traefik-net
+    fi
+
+    # Refresh base-infrastructure files from source (the .env is preserved).
+    local base_src="${SCRIPT_DIR}/base-infrastructure"
+    if [ -d "$base_src" ]; then
+        mkdir -p "$HOMEBOX_INFRA_DIR" "$HOMEBOX_TRAEFIK_DIR"
+        cp "$base_src/docker-compose.yml" "$HOMEBOX_INFRA_DIR/docker-compose.yml"
+        if [ -f "$base_src/.env.example" ]; then
+            cp "$base_src/.env.example" "$HOMEBOX_INFRA_DIR/.env.example"
+        fi
+        info "Refreshed base infrastructure from source."
+    fi
+
+    # Base infrastructure (Traefik). Cloudflared is *not* started here — the
+    # admin app launches it after the user completes onboarding.
+    if [ -f "$HOMEBOX_INFRA_DIR/docker-compose.yml" ]; then
+        local base_env="$HOMEBOX_INFRA_DIR/.env"
+        local dashboard_auth_for_base
+        dashboard_auth_for_base="$(echo "${HOMEBOX_ADMIN_USERNAME}:${HOMEBOX_ADMIN_PASSWORD_HASH}" \
+            | sed 's/\$/\$\$/g')"
+        cat > "$base_env" <<EOF
+TRAEFIK_DASHBOARD_AUTH=${dashboard_auth_for_base}
 TRAEFIK_DYNAMIC_CONF_DIR=${HOMEBOX_TRAEFIK_DIR}
 EOF
+        chmod 600 "$base_env"
 
-    info "Environment file written to $HOMEBOX_INFRA_DIR/.env"
+        # Empty dynamic config so Traefik starts cleanly. The admin app
+        # rewrites this with the admin route after onboarding step 3.
+        local dyn="$HOMEBOX_TRAEFIK_DIR/dynamic_conf.yml"
+        if [ ! -f "$dyn" ]; then
+            cat > "$dyn" <<'EOF'
+# Managed by Homebox admin — onboarding wizard rewrites this once the
+# admin's public hostname is chosen.
+http:
+  routers: {}
+  services: {}
+EOF
+            chmod 644 "$dyn"
+        fi
+
+        info "Bringing up Traefik (cloudflared will be started by the admin after onboarding)."
+        (cd "$HOMEBOX_INFRA_DIR" && docker compose --env-file .env up -d)
+    else
+        warn "Base infrastructure not found at $HOMEBOX_INFRA_DIR — skipping Traefik."
+    fi
+
+    (cd "$ADMIN_DEPLOY_DIR" && docker compose --env-file .env up -d --build)
+    success "Admin stack is up."
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 4: Cloudflare Tunnel
+# Summary
 # ─────────────────────────────────────────────────────────────────────────────
-install_cloudflared() {
-    if command -v cloudflared >/dev/null 2>&1; then
-        info "cloudflared already installed: $(cloudflared --version 2>&1 | head -1)"
-        return 0
-    fi
+print_summary_and_open() {
+    local local_url="http://localhost:${ADMIN_PORT}"
 
-    info "Installing cloudflared..."
+    echo ""
+    echo "=============================================="
+    success "Homebox admin is ready"
+    echo "=============================================="
+    info "Local URL  : $local_url"
+    info "Username   : $HOMEBOX_ADMIN_USERNAME"
+    if [ -n "$HOMEBOX_FIRST_RUN_PASSWORD" ]; then
+        echo ""
+        printf "${BOLD}${GREEN}First-run password (write this down — it will not be shown again):${NC}\n"
+        printf "${BOLD}    %s${NC}\n" "$HOMEBOX_FIRST_RUN_PASSWORD"
+        echo ""
+        info "Only the bcrypt hash is persisted in $(homebox_secrets_file)."
+        info "Lost it? Re-run 'make configure --reset-password' to regenerate."
+    else
+        info "Password   : reused (hash on disk in $(homebox_secrets_file))"
+    fi
+    echo ""
+    info "The admin is bound to 127.0.0.1 only. Reach it from this host directly,"
+    info "or via SSH tunnel from another machine:"
+    info "    ssh -L ${ADMIN_PORT}:localhost:${ADMIN_PORT} <this-host>"
+    echo ""
+    info "First login starts the onboarding wizard — it'll walk you through"
+    info "connecting Cloudflare and assigning a public URL for the admin."
+    echo ""
+
     case "$PLATFORM" in
+        macos) open "$local_url" >/dev/null 2>&1 || true ;;
         linux)
-            local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${ARCH}"
-            curl -fsSL "$url" -o /usr/local/bin/cloudflared
-            chmod +x /usr/local/bin/cloudflared
-            ;;
-        macos)
-            if command -v brew >/dev/null 2>&1; then
-                brew install cloudflared
-            else
-                fail "Install Homebrew (https://brew.sh) first, or install cloudflared manually."
+            if command -v xdg-open >/dev/null 2>&1; then
+                if [ -n "${SUDO_USER:-}" ]; then
+                    sudo -u "$SUDO_USER" xdg-open "$local_url" >/dev/null 2>&1 || true
+                else
+                    xdg-open "$local_url" >/dev/null 2>&1 || true
+                fi
             fi
             ;;
     esac
-
-    info "cloudflared installed: $(cloudflared --version 2>&1 | head -1)"
-}
-
-configure_cloudflared() {
-    step "Step 4/6 — Cloudflare Tunnel"
-
-    local cred_dir="$HOME/.cloudflared"
-    if [ "$HOMEBOX_INSTALL_MODE" != "reinstall" ] && [ -f "$cred_dir/config.yml" ]; then
-        info "Keeping existing Cloudflare Tunnel config: $cred_dir/config.yml"
-        return 0
-    fi
-
-    if ! prompt_yn "Set up a Cloudflare Tunnel?"; then
-        info "Skipping Cloudflare Tunnel setup."
-        return 0
-    fi
-
-    install_cloudflared
-
-    # Authenticate
-    info "Authenticating with Cloudflare..."
-    info "This will open a browser window. Log in and authorize the tunnel."
-    echo ""
-
-    if has_tty; then
-        run_with_tty cloudflared tunnel login
-    else
-        # Headless — try API token
-        if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
-            info "Using CLOUDFLARE_API_TOKEN for authentication."
-        else
-            warn "Non-interactive session detected and no CLOUDFLARE_API_TOKEN set."
-            warn "To authenticate headless:"
-            warn "  1. Create an API token at https://dash.cloudflare.com/profile/api-tokens"
-            warn "  2. Export CLOUDFLARE_API_TOKEN=<token>"
-            warn "  3. Re-run: bash $SCRIPT_DIR/configure.sh"
-            warn ""
-            warn "Skipping tunnel setup for now."
-            return 0
-        fi
-    fi
-
-    # Create tunnel
-    local tunnel_name="homebox"
-
-    # Check if tunnel already exists
-    if cloudflared tunnel list 2>/dev/null | grep -q "$tunnel_name"; then
-        info "Tunnel '$tunnel_name' already exists."
-        local tunnel_id
-        tunnel_id="$(cloudflared tunnel list 2>/dev/null | grep "$tunnel_name" | awk '{print $1}')"
-    else
-        info "Creating tunnel: $tunnel_name"
-        local create_output
-        create_output="$(cloudflared tunnel create "$tunnel_name" 2>&1)"
-        local tunnel_id
-        tunnel_id="$(echo "$create_output" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1)"
-    fi
-
-    if [ -z "${tunnel_id:-}" ]; then
-        warn "Could not determine tunnel ID. You may need to configure the tunnel manually."
-        return 0
-    fi
-
-    info "Tunnel ID: $tunnel_id"
-
-    # Generate config.yml
-    mkdir -p "$cred_dir"
-
-    cat > "$cred_dir/config.yml" <<EOF
-tunnel: ${tunnel_id}
-credentials-file: ${cred_dir}/${tunnel_id}.json
-
-ingress:
-  - hostname: "*.${HOMEBOX_DOMAIN}"
-    service: http://localhost:80
-  - service: http_status:404
-EOF
-
-    info "Tunnel config written to $cred_dir/config.yml"
-
-    # DNS routing
-    info "Adding DNS route: *.${HOMEBOX_DOMAIN} → tunnel"
-    if cloudflared tunnel route dns "$tunnel_name" "*.${HOMEBOX_DOMAIN}" 2>/dev/null; then
-        info "DNS route added."
-    else
-        warn "DNS routing failed. You may need to add a CNAME record manually:"
-        warn "  *.${HOMEBOX_DOMAIN} → ${tunnel_id}.cfargotunnel.com"
-    fi
-
-    # Install as service
-    if [ "$PLATFORM" = "linux" ]; then
-        if systemctl is-active --quiet cloudflared 2>/dev/null; then
-            info "cloudflared service is already running."
-        else
-            cloudflared service install 2>/dev/null || true
-            systemctl enable --now cloudflared 2>/dev/null || true
-            info "cloudflared installed and started as system service."
-        fi
-    elif [ "$PLATFORM" = "macos" ]; then
-        cloudflared service install 2>/dev/null || true
-        info "cloudflared installed as launch daemon."
-    fi
-
-    success "Cloudflare Tunnel configured."
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 5: GitHub Actions Runner
-# ─────────────────────────────────────────────────────────────────────────────
-print_manual_runner_instructions() {
-    echo ""
-    info "To set up the runner manually:"
-    info "  1. Go to your repo → Settings → Actions → Runners → New self-hosted runner"
-    info "  2. Follow the provided download and configuration commands"
-    info "  3. Install as a service: sudo ./svc.sh install && sudo ./svc.sh start"
-    echo ""
-}
-
-configure_github_runner() {
-    step "Step 5/6 — GitHub Actions Self-Hosted Runner"
-
-    local runner_dir="${HOMEBOX_BASE_DIR}/actions-runner"
-    if [ "$HOMEBOX_INSTALL_MODE" != "reinstall" ] && [ -f "$runner_dir/.runner" ]; then
-        info "Keeping existing GitHub Actions runner: $runner_dir"
-        return 0
-    fi
-
-    if ! prompt_yn "Set up a GitHub Actions self-hosted runner?"; then
-        info "Skipping runner setup."
-        return 0
-    fi
-
-    # Check for gh CLI
-    if ! command -v gh >/dev/null 2>&1; then
-        warn "GitHub CLI (gh) not found."
-
-        if prompt_yn "Install GitHub CLI?"; then
-            case "$PLATFORM" in
-                linux)
-                    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-                        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null
-                    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-                        | tee /etc/apt/sources.list.d/github-cli.list >/dev/null
-                    apt-get update -qq && apt-get install -y -qq gh
-                    ;;
-                macos)
-                    if command -v brew >/dev/null 2>&1; then
-                        brew install gh
-                    else
-                        warn "Install Homebrew first, or install gh manually from https://cli.github.com"
-                        print_manual_runner_instructions
-                        return 0
-                    fi
-                    ;;
-            esac
-        else
-            print_manual_runner_instructions
-            return 0
-        fi
-    fi
-
-    # Check gh authentication
-    if ! gh auth status >/dev/null 2>&1; then
-        info "GitHub CLI is not authenticated. Logging in..."
-        gh auth login
-    fi
-
-    local repo_url
-    repo_url="$(prompt_value "GitHub repository URL (e.g. https://github.com/owner/repo)" "")"
-
-    if [ -z "$repo_url" ]; then
-        warn "No repository URL provided. Skipping runner setup."
-        return 0
-    fi
-
-    local owner_repo token token_error
-    case "$repo_url" in
-        git@github.com:*)
-            owner_repo="${repo_url#git@github.com:}"
-            owner_repo="${owner_repo%.git}"
-            owner_repo="${owner_repo%/}"
-            repo_url="https://github.com/${owner_repo}"
-            ;;
-        https://github.com/*|http://github.com/*)
-            owner_repo="$(echo "$repo_url" | sed 's|^https\{0,1\}://github.com/||' | sed 's|\.git$||' | sed 's|/$||')"
-            repo_url="https://github.com/${owner_repo}"
-            ;;
-        *)
-            warn "Unsupported repository URL: $repo_url"
-            warn "Use a GitHub repository URL like https://github.com/owner/repo"
-            return 0
-            ;;
-    esac
-
-    info "Using repository: $repo_url"
-
-    # Get registration token
-    info "Requesting runner registration token..."
-    if token="$(gh api --method POST "repos/${owner_repo}/actions/runners/registration-token" -q '.token' 2>/tmp/homebox-gh-runner.err)"; then
-        :
-    else
-        token=""
-        token_error="$(cat /tmp/homebox-gh-runner.err 2>/dev/null)"
-    fi
-
-    if [ -z "$token" ]; then
-        warn "Could not get registration token."
-        if [ -n "${GH_TOKEN:-}" ] || [ -n "${GITHUB_TOKEN:-}" ]; then
-            warn "GH_TOKEN or GITHUB_TOKEN is set; gh will prefer that over your saved gh login."
-        fi
-        warn "Ensure the authenticated account has admin access to ${owner_repo}."
-        if [ -n "${token_error:-}" ]; then
-            warn "$token_error"
-        fi
-        print_manual_runner_instructions
-        return 0
-    fi
-
-    # Determine runner platform string
-    local runner_os
-    case "$PLATFORM" in
-        linux) runner_os="linux" ;;
-        macos) runner_os="osx" ;;
-    esac
-
-    # Get latest runner version
-    info "Fetching latest runner version..."
-    local runner_version
-    runner_version="$(gh api repos/actions/runner/releases/latest -q '.tag_name' 2>/dev/null | sed 's/^v//')" || true
-
-    if [ -z "$runner_version" ]; then
-        warn "Could not determine latest runner version."
-        print_manual_runner_instructions
-        return 0
-    fi
-
-    # Download and extract
-    if [ "$HOMEBOX_INSTALL_MODE" = "reinstall" ] && [ -d "$runner_dir" ]; then
-        info "Reinstall requested. Removing existing runner files from $runner_dir"
-        if [ -x "$runner_dir/svc.sh" ]; then
-            (cd "$runner_dir" && ./svc.sh stop 2>/dev/null || true)
-            (cd "$runner_dir" && ./svc.sh uninstall 2>/dev/null || true)
-        fi
-        rm -rf "$runner_dir"
-    fi
-
-    mkdir -p "$runner_dir"
-
-    local runner_url="https://github.com/actions/runner/releases/download/v${runner_version}/actions-runner-${runner_os}-${RUNNER_ARCH}-${runner_version}.tar.gz"
-    info "Downloading runner v${runner_version} (${runner_os}-${RUNNER_ARCH})..."
-    curl -fsSL "$runner_url" | tar xz -C "$runner_dir"
-
-    # Configure
-    local runner_name
-    runner_name="homebox-$(hostname -s 2>/dev/null || hostname)"
-
-    info "Configuring runner as '$runner_name'..."
-    (cd "$runner_dir" && ./config.sh \
-        --url "$repo_url" \
-        --token "$token" \
-        --unattended \
-        --name "$runner_name" \
-        --labels "homebox,self-hosted" \
-        --replace)
-
-    # Install as service
-    if [ "$PLATFORM" = "linux" ]; then
-        (cd "$runner_dir" && sudo ./svc.sh install && sudo ./svc.sh start)
-    elif [ "$PLATFORM" = "macos" ]; then
-        (cd "$runner_dir" && ./svc.sh install && ./svc.sh start)
-    fi
-
-    success "GitHub Actions runner '$runner_name' installed and started."
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 6: Start infrastructure
-# ─────────────────────────────────────────────────────────────────────────────
-start_infrastructure() {
-    step "Step 6/6 — Starting Base Infrastructure"
-
-    (cd "$HOMEBOX_INFRA_DIR" && docker compose --env-file .env up -d)
-
-    echo ""
-    success "Traefik is running."
-    info "Dashboard: http://dashboard.${HOMEBOX_DOMAIN}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -443,27 +320,15 @@ start_infrastructure() {
 # ─────────────────────────────────────────────────────────────────────────────
 main() {
     banner
-    info "Interactive configuration for Homebox host"
+    info "Homebox configure — admin bootstrap (localhost-only; Cloudflare set up in the UI)"
     info "Base directory: $HOMEBOX_BASE_DIR"
     echo ""
 
-    configure_domain
-    configure_dashboard_auth
-    generate_env
-    configure_cloudflared
-    configure_github_runner
-    start_infrastructure
-
-    echo ""
-    echo "=============================================="
-    success "Homebox setup complete!"
-    echo "=============================================="
-    echo ""
-    info "Your host is ready to accept project deployments."
-    info "Install the developer CLI on your workstation:"
-    info "  pip install ./homebox-infra/cli"
-    info "  homebox init"
-    echo ""
+    load_or_generate_admin_credentials
+    generate_admin_env
+    deploy_admin_source
+    start_stacks
+    print_summary_and_open
 }
 
 main "$@"
