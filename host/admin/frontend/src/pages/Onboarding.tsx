@@ -12,7 +12,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Cloud, ExternalLink, Plug, CheckCircle2, ArrowRight, AlertTriangle } from "lucide-react";
+import { Cloud, ExternalLink, CheckCircle2, ArrowRight, AlertTriangle } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { useToast } from "../lib/toast";
 import { Logo } from "../components/Logo";
@@ -79,7 +79,7 @@ export function Onboarding() {
           active={activeStep === 1}
           subtitle={state?.steps.cloudflare_token.account_name
             ? <>Connected to <strong>{state.steps.cloudflare_token.account_name}</strong></>
-            : <>Generate a scoped API token, paste it below.</>}
+            : <>Connect your Cloudflare account so this host can route traffic.</>}
         >
           {activeStep === 1 && <Step1Connect />}
         </Step>
@@ -145,6 +145,7 @@ function Step({
 function Step1Connect() {
   const qc = useQueryClient();
   const toast = useToast();
+  const [revealed, setRevealed] = useState(false);
   const [token, setToken] = useState("");
   const [accounts, setAccounts] = useState<CloudflareAccount[]>([]);
   const [accountId, setAccountId] = useState("");
@@ -165,54 +166,81 @@ function Step1Connect() {
     onError: (e) => toast.show(String(e), "fail"),
   });
 
-  function save(e: FormEvent) {
-    e.preventDefault();
-    submit.mutate({ token, account_id: accountId || undefined });
+  // Connect + test as soon as a token is provided (on paste, or Enter).
+  function connectWith(raw: string) {
+    const t = raw.trim();
+    if (!t || submit.isPending) return;
+    setToken(t);
+    submit.mutate({ token: t });
   }
 
+  function onPaste(e: React.ClipboardEvent<HTMLInputElement>) {
+    const pasted = e.clipboardData.getData("text");
+    if (pasted.trim()) {
+      e.preventDefault();
+      connectWith(pasted);
+    }
+  }
+
+  // ── Account picker (token accepted but the token sees >1 account) ──
+  if (accounts.length > 0) {
+    return (
+      <form onSubmit={e => { e.preventDefault(); submit.mutate({ token, account_id: accountId || undefined }); }}>
+        <div className="field">
+          <label className="lbl">Account</label>
+          <select value={accountId} onChange={e => setAccountId(e.target.value)} required>
+            <option value="" disabled>Pick an account…</option>
+            {accounts.map(a => (
+              <option key={a.id} value={a.id}>{a.name} ({a.id.slice(0, 8)}…)</option>
+            ))}
+          </select>
+          <span className="hint">Tunnels and DNS will be created under the account you pick here.</span>
+        </div>
+        <div className="btn-row">
+          <span className="spacer" />
+          <button className="btn primary" type="submit" disabled={submit.isPending || !accountId}>
+            {submit.isPending ? <span className="spinner" /> : "Use this account"}
+          </button>
+        </div>
+      </form>
+    );
+  }
+
+  // ── Initial: a single button, nothing else ──
+  if (!revealed) {
+    return (
+      <div className="btn-row">
+        <button className="btn primary" type="button" onClick={() => setRevealed(true)}>
+          <Cloud size={14} /> Connect with Cloudflare
+        </button>
+      </div>
+    );
+  }
+
+  // ── Revealed: paste the token → it connects + tests automatically ──
   return (
-    <form onSubmit={save}>
-      {accounts.length === 0 ? (
-        <>
-          <div className="field">
-            <label className="lbl">Cloudflare API token</label>
-            <input
-              type="password" value={token} onChange={e => setToken(e.target.value)}
-              placeholder="Paste your scoped token" required autoFocus
-            />
-            <span className="hint">Stored encrypted at rest. Scopes: <code>Tunnel:Edit</code>, <code>DNS:Edit</code>, <code>Zone:Read</code>, <code>Account Settings:Read</code>.</span>
-          </div>
-          <div className="btn-row">
-            <a className="btn" href={CF_TOKEN_TEMPLATE_URL} target="_blank" rel="noopener">
-              <ExternalLink size={14} /> Generate token on Cloudflare
-            </a>
-            <span className="dim">opens a tab with the right scopes pre-filled</span>
-            <span className="spacer" />
-            <button className="btn primary" type="submit" disabled={submit.isPending || !token}>
-              {submit.isPending ? <span className="spinner" /> : <><Plug size={14} /> Connect</>}
-            </button>
-          </div>
-        </>
-      ) : (
-        <>
-          <div className="field">
-            <label className="lbl">Account</label>
-            <select value={accountId} onChange={e => setAccountId(e.target.value)} required>
-              <option value="" disabled>Pick an account…</option>
-              {accounts.map(a => (
-                <option key={a.id} value={a.id}>{a.name} ({a.id.slice(0, 8)}…)</option>
-              ))}
-            </select>
-            <span className="hint">Tunnels and DNS will be created under the account you pick here.</span>
-          </div>
-          <div className="btn-row">
-            <span className="spacer" />
-            <button className="btn primary" type="submit" disabled={submit.isPending || !accountId}>
-              {submit.isPending ? <span className="spinner" /> : "Use this account"}
-            </button>
-          </div>
-        </>
-      )}
+    <form onSubmit={e => { e.preventDefault(); connectWith(token); }}>
+      <div className="field">
+        <label className="lbl">Cloudflare API token</label>
+        <input
+          type="password" value={token} autoFocus
+          onChange={e => setToken(e.target.value)} onPaste={onPaste}
+          placeholder="Paste your scoped token — it connects automatically"
+          disabled={submit.isPending}
+        />
+        <span className="hint">
+          {submit.isPending
+            ? "Verifying token with Cloudflare…"
+            : <>Stored encrypted at rest. Scopes: <code>Tunnel:Edit</code>, <code>DNS:Edit</code>, <code>Zone:Read</code>, <code>Account Settings:Read</code>.</>}
+        </span>
+      </div>
+      <div className="btn-row">
+        <a className="btn" href={CF_TOKEN_TEMPLATE_URL} target="_blank" rel="noopener">
+          <ExternalLink size={14} /> Generate token on Cloudflare
+        </a>
+        <span className="dim">opens a tab with the right scopes pre-filled</span>
+        {submit.isPending && <><span className="spacer" /><span className="spinner" /></>}
+      </div>
     </form>
   );
 }
