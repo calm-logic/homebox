@@ -38,7 +38,9 @@ interface TunnelConflict {
 
 const CF_TOKEN_TEMPLATE_URL =
   // Same scope template the Tunnel page uses — keep them in sync.
-  "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22cfd_tunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%5D&name=Homebox+Admin";
+  // Tunnel group key is 'argo_tunnel' (Cloudflare's legacy name for the
+  // Cloudflare Tunnel permission group); 'cfd_tunnel' was silently dropped.
+  "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22argo_tunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%5D&name=Homebox+Admin";
 
 export function Onboarding() {
   const qc = useQueryClient();

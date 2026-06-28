@@ -10,7 +10,9 @@ import type { CloudflareAccount, DnsReport, DnsResyncResult, SetTokenResponse, T
 const CF_TOKEN_TEMPLATE_URL =
   // Pre-fills Cloudflare's "Create Custom Token" with the scopes Homebox needs.
   // (The user still names the token + clicks Create — we can't issue tokens for them.)
-  "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22cfd_tunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%5D&name=Homebox+Admin";
+  // Tunnel group key is 'argo_tunnel' (Cloudflare's legacy name for the Cloudflare
+  // Tunnel permission group); 'cfd_tunnel' was silently dropped from the pre-fill.
+  "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22argo_tunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22read%22%7D%5D&name=Homebox+Admin";
 
 export function Tunnel() {
   const qc = useQueryClient();
