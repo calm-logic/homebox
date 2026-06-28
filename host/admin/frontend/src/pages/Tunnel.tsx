@@ -1,11 +1,11 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RefreshCw, Play, Plug, Unplug, ExternalLink, Cloud, Trash2 } from "lucide-react";
+import { RefreshCw, Play, Plug, Unplug, ExternalLink, Cloud, Trash2, Activity, Wrench, Gauge } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
 import { Domains } from "./Domains";
-import type { CloudflareAccount, SetTokenResponse, TunnelStatus } from "../lib/types";
+import type { CloudflareAccount, DnsReport, DnsResyncResult, SetTokenResponse, TunnelStatus, UptimeReport, UptimeStatus } from "../lib/types";
 
 const CF_TOKEN_TEMPLATE_URL =
   // Pre-fills Cloudflare's "Create Custom Token" with the scopes Homebox needs.
@@ -131,6 +131,10 @@ export function Tunnel() {
         </div>
       </div>
 
+      {tunnelConnected && <TunnelUptime />}
+
+      {tunnelConnected && <RoutingHealth />}
+
       <Domains />
 
       <ConnectTokenModal open={tokenModal} onClose={() => setTokenModal(false)} />
@@ -140,6 +144,211 @@ export function Tunnel() {
         accountId={data.cloudflare.account_id}
       />
     </>
+  );
+}
+
+// ─── Tunnel / infrastructure uptime ───────────────────────────────────────────
+// Uptime % + a recent status timeline per piece of infra, fed by the background
+// monitor (app/monitor.py), which also self-heals a downed connector/traefik.
+
+const UPTIME_COLORS: Record<UptimeStatus, string> = {
+  up: "var(--ok, #2a9d4a)",
+  degraded: "var(--warn, #d9a400)",
+  down: "var(--fail, #d33)",
+  unknown: "var(--border, #cbd5e1)",
+};
+const UPTIME_BADGE: Record<UptimeStatus, string> = {
+  up: "ok", degraded: "warn", down: "fail", unknown: "warn",
+};
+const COMPONENT_LABEL: Record<string, string> = {
+  admin_url: "Public URL (end-to-end)",
+  tunnel: "Tunnel at Cloudflare edge",
+  cloudflared: "Connector (cloudflared)",
+  traefik: "Traefik router",
+  docker_proxy: "Docker socket proxy",
+};
+const UPTIME_WINDOWS = ["6h", "24h", "7d", "14d"];
+
+function Sparkline({ points }: { points: { status: UptimeStatus }[] }) {
+  if (points.length === 0) return <span className="dim">collecting…</span>;
+  return (
+    <div style={{ display: "flex", gap: 1, alignItems: "stretch", height: 16 }}>
+      {points.map((p, i) => (
+        <div
+          key={i}
+          title={p.status}
+          style={{ width: 4, borderRadius: 1, background: UPTIME_COLORS[p.status] ?? UPTIME_COLORS.unknown }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function TunnelUptime() {
+  const [window, setWindow] = useState("24h");
+  const { data } = useQuery<UptimeReport>({
+    queryKey: ["tunnel-uptime", window],
+    queryFn: () => api.get<UptimeReport>(`/api/tunnel/uptime?window=${window}`),
+    refetchInterval: 15000,
+  });
+
+  return (
+    <div className="card" style={{ marginTop: "1rem" }}>
+      <div className="card-row">
+        <div className="grow">
+          <div className="row">
+            <span className="badge ok"><Gauge size={12} /> Uptime</span>
+            <span className="dim">Infrastructure health (auto-monitored every 30s, self-healing)</span>
+          </div>
+        </div>
+        <div className="btn-row">
+          {UPTIME_WINDOWS.map((w) => (
+            <button
+              key={w}
+              className={`btn ${w === window ? "primary" : ""}`}
+              onClick={() => setWindow(w)}
+            >
+              {w}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ marginTop: "0.75rem", display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+        {!data ? (
+          <span className="spinner" />
+        ) : (
+          data.components.map((c) => (
+            <div key={c.component} className="row" style={{ justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap" }}>
+              <div className="row" style={{ gap: "0.5rem", minWidth: 0 }}>
+                <span className={`badge ${UPTIME_BADGE[c.current]}`}>{c.current}</span>
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {COMPONENT_LABEL[c.component] ?? c.component}
+                </span>
+              </div>
+              <div className="row" style={{ gap: "0.75rem" }}>
+                <Sparkline points={c.timeline} />
+                {c.latency_ms != null && <span className="dim">{c.latency_ms} ms</span>}
+                <strong style={{ minWidth: "3.5rem", textAlign: "right" }}>
+                  {c.uptime_pct == null ? "—" : `${c.uptime_pct}%`}
+                </strong>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {data && data.components.every((c) => c.sample_count === 0) && (
+        <div className="dim" style={{ marginTop: "0.6rem" }}>
+          No samples yet — the monitor records one per component every 30 seconds.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── DNS routing health ───────────────────────────────────────────────────────
+// Ingress decides what the tunnel serves; DNS decides which tunnel the edge
+// routes a hostname to. They drift when a tunnel is re-created/adopted (new id)
+// but the CNAMEs still point at the old, dead target → Cloudflare Error 1033 /
+// HTTP 530. This panel checks each managed record and one-click repairs them.
+
+const DNS_STATUS: Record<string, { cls: string; label: string }> = {
+  ok:      { cls: "ok",   label: "OK" },
+  stale:   { cls: "fail", label: "Stale" },
+  missing: { cls: "warn", label: "Missing" },
+  no_zone: { cls: "warn", label: "No zone" },
+  error:   { cls: "fail", label: "Error" },
+};
+
+function RoutingHealth() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+
+  const dns = useQuery<DnsReport>({
+    queryKey: ["tunnel-dns"],
+    queryFn: () => api.get<DnsReport>("/api/tunnel/dns"),
+    enabled: open,
+  });
+
+  const repair = useMutation({
+    mutationFn: () => api.post<DnsResyncResult>("/api/tunnel/resync-dns"),
+    onSuccess: (r) => {
+      const n = r.updated.length;
+      toast.show(n ? `Repointed ${n} DNS record${n === 1 ? "" : "s"} at this tunnel` : "DNS already up to date", "ok");
+      setOpen(true);
+      qc.invalidateQueries({ queryKey: ["tunnel-dns"] });
+      qc.invalidateQueries({ queryKey: ["tunnel"] });
+    },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
+  const report = dns.data;
+  const badge = !open || dns.isLoading
+    ? null
+    : report?.in_sync
+      ? <span className="badge ok">All routed</span>
+      : <span className="badge fail">Out of sync</span>;
+
+  return (
+    <div className="card" style={{ marginTop: "1rem" }}>
+      <div className="card-row">
+        <div className="grow">
+          <div className="row">
+            {badge ?? <span className="badge warn">Unchecked</span>}
+            <span className="dim">DNS routing health</span>
+          </div>
+          <div className="dim" style={{ marginTop: "0.4rem" }}>
+            Verifies each domain's Cloudflare DNS record still points at this tunnel.
+            Stale records are the usual cause of <code>Error 1033</code> / HTTP 530.
+          </div>
+        </div>
+        <div className="btn-row">
+          <button className="btn" onClick={() => { setOpen(true); dns.refetch(); }} disabled={dns.isFetching}>
+            {dns.isFetching ? <span className="spinner" /> : <Activity size={14} />} Check routing
+          </button>
+          <button className="btn primary" onClick={() => repair.mutate()} disabled={repair.isPending}>
+            {repair.isPending ? <span className="spinner" /> : <Wrench size={14} />} Repair DNS
+          </button>
+        </div>
+      </div>
+
+      {open && report?.error && (
+        <div className="dim" style={{ marginTop: "0.75rem", color: "var(--fail, #d33)" }}>
+          Couldn't read DNS from Cloudflare: {report.error}
+        </div>
+      )}
+
+      {open && report && !report.error && report.records.length === 0 && (
+        <div className="dim" style={{ marginTop: "0.75rem" }}>
+          No Cloudflare-routed domains yet — add one under Domains below.
+        </div>
+      )}
+
+      {open && report && report.records.length > 0 && (
+        <div style={{ marginTop: "0.75rem", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+          {report.records.map((r) => {
+            const s = DNS_STATUS[r.status] ?? { cls: "warn", label: r.status };
+            return (
+              <div key={r.hostname} className="row" style={{ justifyContent: "space-between", gap: "0.75rem" }}>
+                <div className="row" style={{ gap: "0.5rem", minWidth: 0 }}>
+                  <span className={`badge ${s.cls}`}>{s.label}</span>
+                  <code style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{r.hostname}</code>
+                </div>
+                <span className="dim" style={{ textAlign: "right" }}>
+                  {r.status === "ok" && "→ this tunnel (proxied)"}
+                  {r.status === "stale" && (r.proxied === false ? "DNS-only (not proxied)" : `→ ${r.actual}`)}
+                  {r.status === "missing" && "no CNAME record"}
+                  {r.status === "no_zone" && "zone not in this Cloudflare account"}
+                  {r.status === "error" && (r.error || "lookup failed")}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 

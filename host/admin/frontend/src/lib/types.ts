@@ -109,6 +109,33 @@ export interface WorkflowRun {
   created_at: string;
 }
 
+export interface DnsRecordHealth {
+  hostname: string;
+  domain: string;
+  zone: string | null;
+  expected: string;
+  actual: string | null;
+  proxied: boolean | null;
+  status: "ok" | "stale" | "missing" | "no_zone" | "error";
+  error?: string;
+}
+
+export interface DnsReport {
+  checked: boolean;
+  in_sync: boolean;
+  tunnel_target: string | null;
+  records: DnsRecordHealth[];
+  error?: string;
+}
+
+export interface DnsResyncResult {
+  ok: boolean;
+  updated: string[];
+  skipped: { hostname: string; reason: string }[];
+  errors: { hostname: string; error: string }[];
+  tunnel_target: string | null;
+}
+
 export interface TunnelStatus {
   exists: boolean;
   running: boolean;
@@ -122,6 +149,31 @@ export interface TunnelStatus {
     account_name: string | null;
   };
   domains: DomainItem[];
+}
+
+export type UptimeStatus = "up" | "degraded" | "down" | "unknown";
+
+export interface UptimePoint {
+  ts: string;
+  status: UptimeStatus;
+  latency_ms: number | null;
+}
+
+export interface UptimeComponent {
+  component: "admin_url" | "tunnel" | "cloudflared" | "traefik" | "docker_proxy";
+  uptime_pct: number | null;
+  current: UptimeStatus;
+  detail: string | null;
+  latency_ms: number | null;
+  last_checked: string | null;
+  sample_count: number;
+  timeline: UptimePoint[];
+}
+
+export interface UptimeReport {
+  window: string;
+  since: string;
+  components: UptimeComponent[];
 }
 
 export interface CloudflareAccount {

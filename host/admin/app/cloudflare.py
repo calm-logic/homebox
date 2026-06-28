@@ -295,6 +295,26 @@ def tunnel_target(tunnel_id: str) -> str:
     return f"{tunnel_id}.cfargotunnel.com"
 
 
+def resolve_zone_for(
+    zones: list[dict[str, Any]], hostname: str
+) -> dict[str, Any] | None:
+    """Pick the Cloudflare zone that owns `hostname`: the longest zone name that
+    equals the hostname or is a parent suffix of it. Lets us repoint DNS for a
+    stored Domain (e.g. `homebox.x100.dev`) without persisting its zone id —
+    the zone (`x100.dev`) is recovered from the account's zone list. Returns the
+    zone dict or None when no connected zone covers the hostname."""
+    host = hostname.strip().lower().strip(".")
+    best: dict[str, Any] | None = None
+    best_len = -1
+    for z in zones:
+        zname = (z.get("name") or "").strip().lower().strip(".")
+        if not zname:
+            continue
+        if (host == zname or host.endswith("." + zname)) and len(zname) > best_len:
+            best, best_len = z, len(zname)
+    return best
+
+
 def build_ingress(domains: list[dict[str, Any]], service_url: str = "http://traefik:80") -> list[dict[str, Any]]:
     """Build the Cloudflare-side ingress array from Domain rows."""
     rules: list[dict[str, Any]] = []

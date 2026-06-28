@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import select, text, update
 
-from . import metrics
+from . import metrics, monitor
 from .auth import RequiresLogin
 from .config import settings
 from .db import Base, engine, SessionLocal
@@ -113,10 +113,14 @@ async def lifespan(app: FastAPI):
     await _seed_primary_domain()
     await _seed_identities()
     sampler = metrics.start()
+    # The monitor's first cycle runs immediately (no initial sleep), so starting
+    # it here also does the post-restart reconcile (relaunch cloudflared, etc.).
+    health = monitor.start()
     try:
         yield
     finally:
         await metrics.stop(sampler)
+        await monitor.stop(health)
 
 
 app = FastAPI(title="Homebox Admin", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")

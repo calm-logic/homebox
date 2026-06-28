@@ -7,6 +7,7 @@ API. Set up by the admin's onboarding wizard; this module exposes the status
 """
 
 import secrets
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import cloudflare as cf
 from ..auth import require_session_api
 from ..db import get_session
-from ..models import Domain, Setting
+from ..models import Domain, Setting, UptimeSample
 from ..host import (
     container_status,
     remove_container,
@@ -77,6 +78,141 @@ async def _push_ingress(state: dict[str, Any], session: AsyncSession) -> None:
     ).scalars().all()
     ingress = cf.build_ingress([{"name": d.name} for d in domains])
     await cf.put_tunnel_config(token, state["account_id"], state["tunnel_id"], ingress)
+
+
+# ───── DNS routing health / repair ────────────────────────────────────────────
+#
+# Ingress tells the tunnel which hostnames to serve; DNS tells Cloudflare's edge
+# which tunnel to send a hostname to. The two are pushed independently, and DNS
+# CNAMEs are only written when a domain is first routed — pinned to whatever
+# tunnel id existed then. Re-create or adopt a tunnel (new id) and every CNAME
+# silently points at the old, dead target → Cloudflare Error 1033. These helpers
+# detect that drift and repoint the records at the live tunnel.
+
+
+def _dns_hostnames(d: Domain) -> list[str]:
+    """The CNAME record names Homebox manages for a routed domain: the host
+    itself, plus its wildcard in wildcard mode (mirrors cf.build_ingress)."""
+    names = [d.name]
+    if d.mode == "wildcard":
+        names.append(f"*.{d.name}")
+    return names
+
+
+async def _all_domains(session: AsyncSession) -> list[Domain]:
+    return list(
+        (await session.execute(select(Domain).order_by(Domain.name))).scalars().all()
+    )
+
+
+async def _dns_report(state: dict[str, Any], session: AsyncSession) -> dict[str, Any]:
+    """Compare every tunnel-served hostname's CNAME against the current tunnel
+    target so the UI can surface stale/missing records before they cause an
+    Error 1033. Domains whose zone isn't in the connected Cloudflare account are
+    reported as `no_zone` (informational — Homebox can't manage their DNS) and
+    don't count against `in_sync`."""
+    token = cf.get_token(state)
+    tunnel_id = state.get("tunnel_id")
+    account_id = state.get("account_id")
+    report: dict[str, Any] = {
+        "checked": False,
+        "in_sync": True,
+        "tunnel_target": cf.tunnel_target(tunnel_id) if tunnel_id else None,
+        "records": [],
+    }
+    if not token or not tunnel_id or not account_id:
+        return report
+
+    target = cf.tunnel_target(tunnel_id)
+    try:
+        zones = await cf.list_zones(token, account_id=account_id)
+    except cf.CloudflareError as e:
+        report["error"] = str(e)
+        report["in_sync"] = False
+        return report
+
+    report["checked"] = True
+    for d in await _all_domains(session):
+        zone = cf.resolve_zone_for(zones, d.name)
+        for host in _dns_hostnames(d):
+            entry: dict[str, Any] = {
+                "hostname": host,
+                "domain": d.name,
+                "zone": zone.get("name") if zone else None,
+                "expected": target,
+                "actual": None,
+                "proxied": None,
+                "status": "ok",
+            }
+            if not zone:
+                # Not on Cloudflare (or different account) — not ours to manage.
+                entry["status"] = "no_zone"
+            else:
+                try:
+                    recs = await cf.list_dns_records(token, zone["id"], name=host)
+                except cf.CloudflareError as e:
+                    entry["status"] = "error"
+                    entry["error"] = str(e)
+                    recs = None
+                if recs is not None:
+                    cname = next((r for r in recs if r.get("type") == "CNAME"), None)
+                    if not cname:
+                        entry["status"] = "missing"
+                    else:
+                        actual = (cname.get("content") or "").strip().lower().strip(".")
+                        proxied = bool(cname.get("proxied"))
+                        entry["actual"] = actual
+                        entry["proxied"] = proxied
+                        entry["status"] = (
+                            "ok" if actual == target.lower() and proxied else "stale"
+                        )
+            # `no_zone` is informational, not a failure we can fix.
+            if entry["status"] not in ("ok", "no_zone"):
+                report["in_sync"] = False
+            report["records"].append(entry)
+    return report
+
+
+async def _resync_dns(state: dict[str, Any], session: AsyncSession) -> dict[str, Any]:
+    """Repoint every tunnel-served hostname's CNAME at the current tunnel
+    target. Idempotent and safe to run any time the tunnel id may have changed
+    (after connect/adopt, or on demand from the UI). Best-effort per record —
+    one zone/record failure doesn't abort the rest. Domains we successfully wire
+    are flagged `cloudflare_routed` so status reflects that Homebox owns them."""
+    token = cf.get_token(state)
+    tunnel_id = state.get("tunnel_id")
+    account_id = state.get("account_id")
+    result: dict[str, Any] = {
+        "updated": [], "skipped": [], "errors": [], "tunnel_target": None,
+    }
+    if not token or not tunnel_id or not account_id:
+        return result
+
+    target = cf.tunnel_target(tunnel_id)
+    result["tunnel_target"] = target
+    zones = await cf.list_zones(token, account_id=account_id)
+    dirty = False
+    for d in await _all_domains(session):
+        zone = cf.resolve_zone_for(zones, d.name)
+        if not zone:
+            result["skipped"].append(
+                {"hostname": d.name, "reason": "no connected Cloudflare zone covers this domain"}
+            )
+            continue
+        wired_any = False
+        for host in _dns_hostnames(d):
+            try:
+                await cf.upsert_cname(token, zone["id"], host, target, proxied=True)
+                result["updated"].append(host)
+                wired_any = True
+            except cf.CloudflareError as e:
+                result["errors"].append({"hostname": host, "error": str(e)})
+        if wired_any and not d.cloudflare_routed:
+            d.cloudflare_routed = True
+            dirty = True
+    if dirty:
+        await session.commit()
+    return result
 
 
 # ───── Status ─────────────────────────────────────────────────────────────────
@@ -245,6 +381,14 @@ async def _adopt_tunnel(
     except cf.CloudflareError as e:
         raise HTTPException(500, f"Tunnel adopted but ingress push failed: {e}")
 
+    # Adopting a tunnel changes the tunnel id, so any CNAMEs from a previous
+    # tunnel now point at a dead target. Repoint them at this one (best-effort —
+    # the DNS health panel surfaces anything that didn't take).
+    try:
+        await _resync_dns(state, session)
+    except cf.CloudflareError:
+        pass
+
     ok, msg = run_cloudflared_remote(connector_token)
     if not ok:
         raise HTTPException(500, f"Tunnel adopted but cloudflared failed to start: {msg}")
@@ -350,6 +494,14 @@ async def connect_tunnel(
     except cf.CloudflareError as e:
         raise HTTPException(500, f"Tunnel created but ingress push failed: {e}")
 
+    # A brand-new tunnel has a fresh id; repoint any already-routed domains'
+    # CNAMEs at it so re-running onboarding doesn't strand them on the old
+    # tunnel (the Error 1033 trap). Best-effort.
+    try:
+        await _resync_dns(state, session)
+    except cf.CloudflareError:
+        pass
+
     ok, msg = run_cloudflared_remote(connector_token)
     if not ok:
         raise HTTPException(500, f"Tunnel created but cloudflared failed to start: {msg}")
@@ -441,9 +593,104 @@ async def apply_tunnel(
     return {"ok": True}
 
 
+@router.get("/dns")
+async def dns_health(
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Per-hostname routing health: does each managed CNAME still point at the
+    live tunnel? `stale`/`missing`/`no_zone` records are the Error 1033 cause."""
+    state = await cf.load_state(session)
+    if not state.get("tunnel_id"):
+        raise HTTPException(400, "No tunnel configured. Connect a tunnel first.")
+    return await _dns_report(state, session)
+
+
+@router.post("/resync-dns")
+async def resync_dns(
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Repoint every managed CNAME at the current tunnel target. Fixes routing
+    after a tunnel was re-created/adopted and the DNS records went stale."""
+    state = await cf.load_state(session)
+    if not state.get("tunnel_id"):
+        raise HTTPException(400, "No tunnel configured. Connect a tunnel first.")
+    try:
+        result = await _resync_dns(state, session)
+    except cf.CloudflareError as e:
+        raise HTTPException(500, f"Cloudflare: {e}")
+    # Surface a hard failure only if nothing was fixed and something errored —
+    # partial success (some records updated, some zones missing) still returns ok
+    # with the per-record detail so the UI can show what's left.
+    if result["errors"] and not result["updated"]:
+        raise HTTPException(500, f"DNS resync failed: {result['errors']}")
+    return {"ok": True, **result}
+
+
 @router.post("/restart")
 async def restart_tunnel(user: str = Depends(require_session_api)):
     ok, msg = restart_container("homebox-cloudflared")
     if not ok:
         raise HTTPException(500, msg)
     return {"ok": True}
+
+
+# ───── Uptime (background monitor) ────────────────────────────────────────────
+
+_UPTIME_WINDOWS = {
+    "1h": timedelta(hours=1),
+    "6h": timedelta(hours=6),
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "14d": timedelta(days=14),
+}
+# Display order; admin_url (true end-to-end) first.
+_UPTIME_COMPONENTS = ("admin_url", "tunnel", "cloudflared", "traefik", "docker_proxy")
+_TIMELINE_POINTS = 60  # most recent samples returned per component for a sparkline
+
+
+@router.get("/uptime")
+async def tunnel_uptime(
+    window: str = "24h",
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Uptime % + recent status timeline per infrastructure component, computed
+    from the UptimeSample rows written by app/monitor.py. 'unknown' samples
+    (component not configured yet) are excluded from the percentage."""
+    win = window if window in _UPTIME_WINDOWS else "24h"
+    since = datetime.utcnow() - _UPTIME_WINDOWS[win]
+
+    rows = (await session.execute(
+        select(UptimeSample)
+        .where(UptimeSample.ts >= since)
+        .order_by(UptimeSample.ts.asc())
+    )).scalars().all()
+
+    by_comp: dict[str, list[UptimeSample]] = {}
+    for s in rows:
+        by_comp.setdefault(s.component, []).append(s)
+
+    components = []
+    for comp in _UPTIME_COMPONENTS:
+        samples = by_comp.get(comp, [])
+        measured = [s for s in samples if s.status != "unknown"]
+        up = sum(1 for s in measured if s.status in ("up", "degraded"))
+        latest = samples[-1] if samples else None
+        timeline = [
+            {"ts": s.ts.isoformat(), "status": s.status, "latency_ms": s.latency_ms}
+            for s in samples[-_TIMELINE_POINTS:]
+        ]
+        components.append({
+            "component": comp,
+            "uptime_pct": round(up / len(measured) * 100, 2) if measured else None,
+            "current": latest.status if latest else "unknown",
+            "detail": latest.detail if latest else None,
+            "latency_ms": latest.latency_ms if latest else None,
+            "last_checked": latest.ts.isoformat() if latest else None,
+            "sample_count": len(samples),
+            "timeline": timeline,
+        })
+
+    return {"window": win, "since": since.isoformat(), "components": components}

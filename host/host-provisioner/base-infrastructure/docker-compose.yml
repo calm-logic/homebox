@@ -34,6 +34,17 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - traefik-net
+    # Gate Traefik on the proxy actually answering the Docker API. Without this,
+    # on a daemon/VM restart Traefik can start before the proxy is ready and log
+    # "Failed to retrieve information of the docker client and server host".
+    # The image is HAProxy-on-Alpine, so BusyBox wget is available to probe the
+    # Docker /version endpoint it fronts on :2375.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:2375/version || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
 
   # ---------------------------------------------------------------------------
   # Traefik — reverse proxy & edge router
@@ -43,7 +54,8 @@ services:
     container_name: homebox-traefik
     restart: unless-stopped
     depends_on:
-      - docker-proxy
+      docker-proxy:
+        condition: service_healthy
     environment:
       # Docker 29 dropped legacy API versions; Traefik's docker client
       # defaults to v1.24, which the daemon rejects with 400. Pin a modern

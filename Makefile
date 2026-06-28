@@ -11,7 +11,7 @@ else
 SUDO :=
 endif
 
-.PHONY: help host configure reset-password admin admin-logs admin-down cli init
+.PHONY: help host configure reset-password admin admin-logs admin-down admin-reset boot enable-boot cli init
 
 help:
 	@echo "Homebox targets:"
@@ -21,6 +21,9 @@ help:
 	@echo "  make admin       Rebuild & restart the admin app stack only (preserves DB)"
 	@echo "  make admin-logs  Tail admin app logs"
 	@echo "  make admin-down  Stop the admin app stack"
+	@echo "  make admin-reset WIPES the admin DB (down -v) then rebuilds — you re-onboard after"
+	@echo "  make boot        Bring the whole stack up now (same script systemd runs on boot)"
+	@echo "  make enable-boot Install + enable the systemd unit so Homebox auto-starts on boot"
 	@echo "  make cli         Install the developer CLI from ./homebox-infra/cli"
 	@echo "  make init        Initialize the developer CLI (~/.homebox.json)"
 
@@ -52,6 +55,18 @@ admin-logs:
 
 admin-down:
 	$(SUDO) bash -c 'cd /opt/homebox/admin && docker compose down'
+
+admin-reset:
+	@echo ">>> WIPING the admin database volume and rebuilding (you will re-onboard)."
+	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' homebox-infra/admin/ /opt/homebox/admin/
+	$(SUDO) bash -c 'cd /opt/homebox/admin && docker compose --env-file .env down -v && docker compose --env-file .env up -d --build'
+	@echo ">>> Admin reset complete. Sign in and re-run onboarding."
+
+boot:
+	$(SUDO) bash $(PROVISIONER_DIR)/homebox-boot.sh
+
+enable-boot:
+	$(SUDO) bash -c 'source $(PROVISIONER_DIR)/lib.sh && install_boot_unit'
 
 cli:
 	pip install ./homebox-infra/cli

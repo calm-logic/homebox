@@ -277,6 +277,47 @@ write_secrets_json() {
     chmod 600 "$file"
 }
 
+# ── Boot auto-start (systemd) ─────────────────────────────────────────────────
+# Install + enable a systemd unit that brings the whole Homebox stack up in
+# order on boot. Needed because Docker Desktop / WSL has no docker.service to
+# order against and container restart policies alone don't reliably recover the
+# stack after a reboot. Linux + systemd-as-PID1 only; a quiet no-op elsewhere.
+install_boot_unit() {
+    if [ "$PLATFORM" != "linux" ]; then
+        info "Boot unit: skipped (auto-start is Linux/systemd only)."
+        return 0
+    fi
+    if ! command -v systemctl >/dev/null 2>&1 || [ "$(ps -p 1 -o comm= 2>/dev/null)" != "systemd" ]; then
+        warn "Boot unit: systemd is not PID 1 — skipping auto-start install."
+        warn "  Homebox will still rely on container restart policies; for reliable"
+        warn "  boot, enable systemd in WSL (/etc/wsl.conf: [boot] systemd=true)."
+        return 0
+    fi
+    if [ "$(id -u)" -ne 0 ]; then
+        warn "Boot unit: needs root to install — re-run with sudo (or 'make enable-boot')."
+        return 0
+    fi
+
+    local src_dir dest_dir unit
+    src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # host-provisioner/ in the repo
+    dest_dir="${HOMEBOX_BASE_DIR}/host-provisioner"
+    unit="/etc/systemd/system/homebox.service"
+
+    mkdir -p "$dest_dir"
+    cp "$src_dir/homebox-boot.sh" "$dest_dir/homebox-boot.sh"
+    chmod +x "$dest_dir/homebox-boot.sh"
+
+    sed "s#__HOMEBOX_BASE_DIR__#${HOMEBOX_BASE_DIR}#g" \
+        "$src_dir/homebox.service" > "$unit"
+
+    systemctl daemon-reload
+    if systemctl enable homebox.service >/dev/null 2>&1; then
+        info "Boot unit installed + enabled: $unit (runs $dest_dir/homebox-boot.sh on boot)."
+    else
+        warn "Boot unit written to $unit but 'systemctl enable' failed."
+    fi
+}
+
 # ── Initialize ───────────────────────────────────────────────────────────────
 detect_platform
 set_base_dirs

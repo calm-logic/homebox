@@ -1,0 +1,26 @@
+# Homebox boot unit — brings the whole stack up in order after a reboot.
+#
+# This is a TEMPLATE for reference. The installer (configure.sh /
+# `make enable-boot`) writes the real unit to /etc/systemd/system/homebox.service
+# with __HOMEBOX_BASE_DIR__ substituted for the actual base dir, then runs
+# `systemctl daemon-reload && systemctl enable homebox.service`.
+#
+# Note: on Docker Desktop + WSL there is no docker.service to order against, so
+# the ExecStart script polls for the daemon itself. We still order After=network
+# and run at multi-user.target.
+
+[Unit]
+Description=Homebox self-hosted PaaS (Traefik + admin + tunnel)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=HOMEBOX_BASE_DIR=__HOMEBOX_BASE_DIR__
+ExecStart=__HOMEBOX_BASE_DIR__/host-provisioner/homebox-boot.sh
+# Give Docker Desktop's WSL integration time to attach on a cold boot.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

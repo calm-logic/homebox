@@ -29,7 +29,7 @@ from ..auth import issue_session, require_session_api, _read_session
 from ..config import settings
 from ..crypto import encrypt
 from ..db import get_session
-from ..models import Identity, Organization
+from ..models import Identity, Organization, Setting
 from ..orgs import sync_org_repos
 
 router = APIRouter(prefix="/api/oauth")
@@ -37,18 +37,32 @@ router = APIRouter(prefix="/api/oauth")
 OAUTH_STATE_COOKIE = "homebox_oauth_state"
 OAUTH_STATE_TTL_SEC = 600  # 10 minutes
 LOGIN_PROVIDERS = ("github", "google")
+ADMIN_DOMAIN_KEY = "admin_domain"  # Setting written by onboarding (routes/onboarding.py)
 
 
 def _state_serializer() -> URLSafeTimedSerializer:
     return URLSafeTimedSerializer(settings.app_secret, salt="homebox-oauth-state")
 
 
-def _installation_url(request: Request) -> str:
+async def _installation_url(request: Request, session: AsyncSession) -> str:
     """The public origin of this install — the proxy redirects the browser back
-    here on /oauth/callback. Built from the forwarded Host (we sit behind Traefik
-    + Cloudflare)."""
+    here on /oauth/callback, so it MUST be the externally reachable URL.
+
+    Prefer the canonical admin hostname chosen during onboarding. The raw `Host`
+    header is unreliable here: depending on the tunnel/proxy hops, the request
+    can arrive with `Host: 127.0.0.1:7765` (the admin's localhost bind), which
+    would send the OAuth callback to a dead address. Fall back to the forwarded
+    host, then the raw Host, only when onboarding hasn't set a domain yet."""
+    row = (
+        await session.execute(select(Setting).where(Setting.key == ADMIN_DOMAIN_KEY))
+    ).scalar_one_or_none()
+    domain = row.value if row else None
+    if isinstance(domain, str) and domain.strip():
+        return f"https://{domain.strip().strip('/')}"
+
     fwd_proto = request.headers.get("x-forwarded-proto", "https")
-    host = request.headers.get("host") or ""
+    fwd_host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    host = fwd_host.split(",")[0].strip()  # X-Forwarded-Host may be a list
     return f"{fwd_proto}://{host}"
 
 
@@ -109,22 +123,30 @@ async def connect_start(
     request: Request,
     response: Response,
     user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
 ):
     """Redirect to the proxy to connect GitHub orgs for deployment."""
     state = _state_serializer().dumps({"purpose": "connect", "provider": "github", "u": user})
-    return _proxy_redirect(response, state, "github", "connect", _installation_url(request))
+    installation = await _installation_url(request, session)
+    return _proxy_redirect(response, state, "github", "connect", installation)
 
 
 # ───── Start: passwordless login ──────────────────────────────────────────────
 
 @router.get("/login/{provider}/start")
-async def login_start(provider: str, request: Request, response: Response):
+async def login_start(
+    provider: str,
+    request: Request,
+    response: Response,
+    session: AsyncSession = Depends(get_session),
+):
     """Unauthenticated — begin a passwordless login via the given provider."""
     provider = provider.lower()
     if provider not in LOGIN_PROVIDERS:
         raise HTTPException(404, "Unknown login provider")
     state = _state_serializer().dumps({"purpose": "login", "provider": provider})
-    return _proxy_redirect(response, state, provider, "login", _installation_url(request))
+    installation = await _installation_url(request, session)
+    return _proxy_redirect(response, state, provider, "login", installation)
 
 
 # ───── Finish (unified) ───────────────────────────────────────────────────────

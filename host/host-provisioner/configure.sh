@@ -328,6 +328,7 @@ main() {
     generate_admin_env
     deploy_admin_source
     start_stacks
+    install_boot_unit
     print_summary_and_open
 }
 

@@ -116,6 +116,23 @@ class Setting(Base):
     value: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class UptimeSample(Base):
+    """One health observation for a piece of Homebox infrastructure, written by
+    the background monitor (app/monitor.py). Components: 'tunnel' (the tunnel's
+    connection state at Cloudflare's edge), 'cloudflared' / 'traefik' /
+    'docker_proxy' (local container running state), and 'admin_url' (end-to-end
+    GET of the public admin URL through the tunnel). Used to compute uptime % and
+    a status timeline on the Tunnel page."""
+    __tablename__ = "uptime_samples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    component: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(16))  # up | degraded | down | unknown
+    detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class Identity(Base):
     """A whitelisted email allowed to sign into the admin passwordlessly via
     OAuth (Google or GitHub). Login activity is tracked so the Identities page
