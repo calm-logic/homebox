@@ -252,13 +252,13 @@ class TokenBody(BaseModel):
     account_id: str | None = None
 
 
-def _tunnel_scope_hint(msg: str) -> str:
+def _missing_scope_hint(missing: list[str]) -> str:
+    items = "; ".join(missing)
     return (
-        f"This token can sign in but can't manage tunnels in the selected account ({msg}). "
-        "It's missing the 'Account · Cloudflare Tunnel · Edit' permission, or it's restricted to "
-        "a different account. Re-create the token from the pre-filled link, make sure "
-        "'Cloudflare Tunnel: Edit' is in the permission list, and set the account to 'All "
-        "accounts' (or this specific account)."
+        f"This token is missing required Cloudflare permission(s): {items}. "
+        "Cloudflare's pre-filled token link doesn't reliably include the Tunnel scope, so add the "
+        "missing rows by hand on the Create Token page, set Account Resources to 'All accounts' "
+        "(or this account), then paste the new token again."
     )
 
 
@@ -307,18 +307,29 @@ async def set_cloudflare_token(
         state["account_name"] = accounts[0].get("name") or ""
     # If multiple accounts and none chosen, leave unset — UI will prompt.
 
-    # Probe tunnel management on the resolved account BEFORE persisting. The
-    # checks above (verify + list_accounts) pass with read-only scopes, so this
-    # listing is what actually proves the token can do step 2 (create a tunnel) —
-    # otherwise a token missing 'Cloudflare Tunnel: Edit' or scoped to another
-    # account would be accepted here and only fail later, mid-onboarding.
+    # Probe the scopes Homebox actually needs BEFORE persisting. verify +
+    # list_accounts above pass with read-only scopes, so without this a token
+    # missing 'Cloudflare Tunnel: Edit' or 'Zone: Read' is accepted here and only
+    # fails later, mid-onboarding. (DNS: Edit can't be read-probed without a
+    # write, so it's surfaced in the UI checklist instead.)
     if state.get("account_id"):
+        missing: list[str] = []
+
+        def _is_auth(e: cf.CloudflareError) -> bool:
+            return e.status in (401, 403) or "auth" in str(e).lower()
+
         try:
             await cf.list_tunnels(token, state["account_id"])
         except cf.CloudflareError as e:
-            if e.status in (401, 403) or "auth" in str(e).lower():
-                raise HTTPException(400, _tunnel_scope_hint(str(e)))
-            # Non-auth (transient / rate limit): don't block the connect on it.
+            if _is_auth(e):
+                missing.append("Account · Cloudflare Tunnel · Edit")
+        try:
+            await cf.list_zones(token, account_id=state["account_id"])
+        except cf.CloudflareError as e:
+            if _is_auth(e):
+                missing.append("Zone · Zone · Read")
+        if missing:
+            raise HTTPException(400, _missing_scope_hint(missing))
 
     await cf.save_state(session, state)
 

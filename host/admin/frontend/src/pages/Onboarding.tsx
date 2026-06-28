@@ -220,26 +220,38 @@ function Step1Connect() {
   // ── Revealed: paste the token → it connects + tests automatically ──
   return (
     <form onSubmit={e => { e.preventDefault(); connectWith(token); }}>
+      <div className="btn-row" style={{ marginBottom: "0.75rem" }}>
+        <a className="btn" href={CF_TOKEN_TEMPLATE_URL} target="_blank" rel="noopener">
+          <ExternalLink size={14} /> Generate token on Cloudflare
+        </a>
+        <span className="dim">opens the Create Token page</span>
+      </div>
+
+      <div className="field">
+        <div className="lbl">Required permissions — confirm all four before creating the token</div>
+        <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.1rem", display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "0.85rem" }}>
+          <li><code>Account · Cloudflare Tunnel · Edit</code> <span className="dim">— the pre-fill often drops this one, add it manually</span></li>
+          <li><code>Zone · DNS · Edit</code></li>
+          <li><code>Zone · Zone · Read</code></li>
+          <li><code>Account · Account Settings · Read</code></li>
+        </ul>
+        <span className="hint">Set <strong>Account Resources</strong> to <em>All accounts</em> (or your account).</span>
+      </div>
+
       <div className="field">
         <label className="lbl">Cloudflare API token</label>
         <input
           type="password" value={token} autoFocus
           onChange={e => setToken(e.target.value)} onPaste={onPaste}
-          placeholder="Paste your scoped token — it connects automatically"
+          placeholder="Paste your scoped token — it connects and verifies automatically"
           disabled={submit.isPending}
         />
         <span className="hint">
           {submit.isPending
-            ? "Verifying token with Cloudflare…"
-            : <>Stored encrypted at rest. Scopes: <code>Tunnel:Edit</code>, <code>DNS:Edit</code>, <code>Zone:Read</code>, <code>Account Settings:Read</code>.</>}
+            ? "Verifying scopes with Cloudflare…"
+            : "Stored encrypted at rest. We check the scopes the moment you paste — if any are missing you'll see exactly which."}
         </span>
-      </div>
-      <div className="btn-row">
-        <a className="btn" href={CF_TOKEN_TEMPLATE_URL} target="_blank" rel="noopener">
-          <ExternalLink size={14} /> Generate token on Cloudflare
-        </a>
-        <span className="dim">opens a tab with the right scopes pre-filled</span>
-        {submit.isPending && <><span className="spacer" /><span className="spinner" /></>}
+        {submit.isPending && <span className="spinner" />}
       </div>
     </form>
   );
