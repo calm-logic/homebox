@@ -12,6 +12,7 @@ import { Overview } from "./pages/Overview";
 import { Tunnel } from "./pages/Tunnel";
 import { Projects } from "./pages/Projects";
 import { ProjectDetail } from "./pages/ProjectDetail";
+import { Integrations } from "./pages/Integrations";
 import { CICD } from "./pages/CICD";
 import { Identities } from "./pages/Identities";
 import { Onboarding } from "./pages/Onboarding";
@@ -58,13 +59,14 @@ export function App() {
             <Route element={<RequireAuth><RequireOnboarded><Layout /></RequireOnboarded></RequireAuth>}>
               <Route path="/" element={<Overview />} />
               <Route path="/tunnel" element={<Tunnel />} />
+              <Route path="/integrations" element={<Integrations />} />
               <Route path="/projects" element={<Projects />} />
-              <Route path="/projects/:repoId" element={<ProjectDetail />} />
+              <Route path="/projects/:projectId" element={<ProjectDetail />} />
               <Route path="/cicd" element={<CICD />} />
               <Route path="/identities" element={<Identities />} />
               {/* Legacy routes — pages were merged into the parents above. */}
               <Route path="/domains" element={<Navigate to="/tunnel" replace />} />
-              <Route path="/github" element={<Navigate to="/projects" replace />} />
+              <Route path="/github" element={<Navigate to="/integrations" replace />} />
               <Route path="/runner" element={<Navigate to="/cicd" replace />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

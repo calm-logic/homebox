@@ -56,14 +56,13 @@ export function Domains() {
       {domains && domains.length > 0 ? (
         <table className="data-table">
           <thead>
-            <tr><th>Domain</th><th>Mode</th><th>Bound project</th><th>Primary</th><th>Routed</th><th className="right">Actions</th></tr>
+            <tr><th>Domain</th><th>Mode</th><th>Primary</th><th>Routed</th><th className="right">Actions</th></tr>
           </thead>
           <tbody>
             {domains.map(d => (
               <tr key={d.id}>
                 <td><strong>{d.name}</strong></td>
                 <td>{d.mode === "wildcard" ? <span className="badge info plain">Wildcard</span> : <span className="badge plain">Dedicated</span>}</td>
-                <td>{d.project_slug || "—"}</td>
                 <td>{d.is_primary && <span className="badge ok">Primary</span>}</td>
                 <td>{d.cloudflare_routed ? <span className="badge ok plain">CF</span> : <span className="dim">manual</span>}</td>
                 <td className="actions">
@@ -102,15 +101,14 @@ function AddDomainModal({ open, onClose }: { open: boolean; onClose: () => void 
   const toast = useToast();
   const [name, setName] = useState("");
   const [mode, setMode] = useState<"wildcard" | "dedicated">("wildcard");
-  const [project, setProject] = useState("");
   const [primary, setPrimary] = useState(false);
 
   const add = useMutation({
-    mutationFn: () => api.post("/api/domains", { name, mode, project: project || null, primary }),
+    mutationFn: () => api.post("/api/domains", { name, mode, primary }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["domains"] });
       toast.show("Domain added — click Apply ingress on the Routes page to route it.", "ok");
-      setName(""); setProject(""); setPrimary(false); setMode("wildcard");
+      setName(""); setPrimary(false); setMode("wildcard");
       onClose();
     },
     onError: (e) => toast.show(String(e), "fail"),
@@ -144,12 +142,6 @@ function AddDomainModal({ open, onClose }: { open: boolean; onClose: () => void 
             <span className={`chip ${mode === "dedicated" ? "active" : ""}`} onClick={() => setMode("dedicated")}>Dedicated (one project)</span>
           </div>
         </div>
-        {mode === "dedicated" && (
-          <div className="field">
-            <label className="lbl">Bound project slug</label>
-            <input value={project} onChange={e => setProject(e.target.value)} placeholder="myapp" />
-          </div>
-        )}
         <div className="field">
           <label style={{ display: "flex", gap: "0.5rem", alignItems: "center", textTransform: "none", letterSpacing: 0, color: "var(--text)" }}>
             <input type="checkbox" checked={primary} onChange={e => setPrimary(e.target.checked)} style={{ width: "auto" }} />
@@ -168,7 +160,6 @@ function ConnectCloudflareDomainModal({ open, onClose }: { open: boolean; onClos
   const toast = useToast();
   const [zoneId, setZoneId] = useState("");
   const [mode, setMode] = useState<"wildcard" | "dedicated">("wildcard");
-  const [project, setProject] = useState("");
   const [primary, setPrimary] = useState(false);
 
   const { data: zones, isFetching, error } = useQuery<CloudflareZone[]>({
@@ -183,13 +174,13 @@ function ConnectCloudflareDomainModal({ open, onClose }: { open: boolean; onClos
 
   const connect = useMutation({
     mutationFn: () => api.post("/api/domains/connect-cloudflare", {
-      zone_id: zoneId, mode, project: project || null, primary,
+      zone_id: zoneId, mode, primary,
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["domains"] });
       qc.invalidateQueries({ queryKey: ["tunnel"] });
       toast.show("Domain connected — DNS and ingress updated", "ok");
-      setZoneId(""); setProject(""); setPrimary(false); setMode("wildcard");
+      setZoneId(""); setPrimary(false); setMode("wildcard");
       onClose();
     },
     onError: (e) => toast.show(String(e), "fail"),
@@ -235,12 +226,6 @@ function ConnectCloudflareDomainModal({ open, onClose }: { open: boolean; onClos
             <span className={`chip ${mode === "dedicated" ? "active" : ""}`} onClick={() => setMode("dedicated")}>Dedicated (one project)</span>
           </div>
         </div>
-        {mode === "dedicated" && (
-          <div className="field">
-            <label className="lbl">Bound project slug</label>
-            <input value={project} onChange={e => setProject(e.target.value)} placeholder="myapp" />
-          </div>
-        )}
         <div className="field">
           <label style={{ display: "flex", gap: "0.5rem", alignItems: "center", textTransform: "none", letterSpacing: 0, color: "var(--text)" }}>
             <input type="checkbox" checked={primary} onChange={e => setPrimary(e.target.checked)} style={{ width: "auto" }} />

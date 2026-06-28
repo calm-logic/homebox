@@ -84,7 +84,7 @@ async def set_admin_domain(
 ):
     """Wire up <subdomain>.<zone> as the admin's public URL:
         - Create CNAME → tunnel target
-        - Insert Domain row (mode=dedicated, project_slug=None — it's admin infra, not a project)
+        - Insert Domain row (mode=dedicated — it's admin infra, not a project)
         - Push tunnel ingress so the new host is recognized
         - Write Traefik dynamic_conf.yml with a Host(<admin>) → homebox-admin route
         - Persist admin_domain Setting (the wizard reads this back via /state)
@@ -129,11 +129,10 @@ async def set_admin_domain(
     ).scalar_one_or_none()
     if existing:
         existing.mode = "dedicated"
-        existing.project_slug = None
         existing.cloudflare_routed = True
     else:
         session.add(Domain(
-            name=hostname, mode="dedicated", project_slug=None,
+            name=hostname, mode="dedicated",
             is_primary=False, cloudflare_routed=True,
         ))
     await session.commit()

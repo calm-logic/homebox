@@ -17,9 +17,9 @@ export function Overview() {
   const steps: { text: string; done: boolean; href: string }[] = [
     { text: "Add a domain — pick a wildcard root or a dedicated project domain.", done: data.domain_count > 0, href: "/tunnel" },
     { text: "Verify the Cloudflare tunnel is connected.", done: data.domain_count > 0, href: "/tunnel" },
-    { text: "Connect a GitHub organization.", done: data.org_count > 0, href: "/projects" },
+    { text: "Connect a GitHub organization.", done: data.integration_count > 0, href: "/integrations" },
     { text: "Register a self-hosted runner so deploys land on this host.", done: data.runner.container_count > 0, href: "/cicd" },
-    { text: "Bind a repository to a project slug and deploy.", done: data.repo_count > 0, href: "/projects" },
+    { text: "Adopt a repository to deploy it as a project.", done: data.managed_count > 0, href: "/projects" },
   ];
 
   return (
@@ -29,8 +29,8 @@ export function Overview() {
 
       <div className="metric-grid">
         <Metric label="Routes" value={data.domain_count} link="/tunnel" />
-        <Metric label="Organizations" value={data.org_count} link="/projects" />
-        <Metric label="Projects" value={data.repo_count} link="/projects" />
+        <Metric label="Integrations" value={data.integration_count} link="/integrations" />
+        <Metric label="Projects" value={`${data.managed_count}/${data.project_count}`} link="/projects" />
         <Metric
           label="Runner"
           value={data.runner.container_count > 0 ? <span className="badge ok">{data.runner.container_count} active</span> : <span className="badge warn">Not set up</span>}

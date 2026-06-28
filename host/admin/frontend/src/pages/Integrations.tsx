@@ -1,20 +1,26 @@
 import { FormEvent, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Github, RefreshCw, Plug, ExternalLink } from "lucide-react";
+import { Github, RefreshCw, Plug, ExternalLink, Cloud } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
-import type { OAuthSettings, OrgItem } from "../lib/types";
+import type { IntegrationItem, OAuthSettings } from "../lib/types";
 
-export function GitHub() {
+/**
+ * Integrations — every connection to an external system (GitHub orgs +
+ * Cloudflare). GitHub is connected here (OAuth or PAT); Cloudflare is connected
+ * on the Routes page but listed here too.
+ */
+export function Integrations() {
   const qc = useQueryClient();
   const toast = useToast();
   const [openConnect, setOpenConnect] = useState(false);
-  const [disconnectTarget, setDisconnectTarget] = useState<string | null>(null);
+  const [disconnectTarget, setDisconnectTarget] = useState<IntegrationItem | null>(null);
 
-  const { data: orgs } = useQuery<OrgItem[]>({
-    queryKey: ["orgs"],
-    queryFn: () => api.get<OrgItem[]>("/api/organizations"),
+  const { data: integrations } = useQuery<IntegrationItem[]>({
+    queryKey: ["integrations"],
+    queryFn: () => api.get<IntegrationItem[]>("/api/integrations"),
   });
   const { data: oauth } = useQuery<OAuthSettings>({
     queryKey: ["oauth-settings"],
@@ -22,15 +28,15 @@ export function GitHub() {
   });
 
   const sync = useMutation({
-    mutationFn: (login: string) => api.post(`/api/organizations/${login}/sync`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["repos"] }); toast.show("Synced", "ok"); },
+    mutationFn: (id: number) => api.post(`/api/integrations/${id}/sync`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["projects"] }); toast.show("Synced repositories", "ok"); },
     onError: (e) => toast.show(String(e), "fail"),
   });
   const disconnect = useMutation({
-    mutationFn: (login: string) => api.del(`/api/organizations/${login}`),
+    mutationFn: (id: number) => api.del(`/api/integrations/${id}`),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["orgs"] });
-      qc.invalidateQueries({ queryKey: ["repos"] });
+      qc.invalidateQueries({ queryKey: ["integrations"] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
       toast.show("Disconnected", "ok");
       setDisconnectTarget(null);
     },
@@ -38,15 +44,22 @@ export function GitHub() {
   });
 
   function startOAuth() {
-    // The backend produces a redirect URL that includes a signed state and
-    // the proxy URL — we simply navigate to it.
     window.location.href = "/api/oauth/github/start";
   }
 
+  const github = (integrations ?? []).filter(i => i.provider === "github");
+  const others = (integrations ?? []).filter(i => i.provider !== "github");
+
   return (
     <>
-      <div className="row" style={{ marginTop: "0.5rem" }}>
-        <h2 style={{ margin: 0 }}>Source</h2>
+      <h1>Integrations</h1>
+      <p className="lede">
+        Connections to the systems Homebox builds on — GitHub organizations for source,
+        Cloudflare for routing. Credentials are encrypted at rest on this host.
+      </p>
+
+      <div className="row" style={{ marginTop: "1rem" }}>
+        <h2 style={{ margin: 0 }}>GitHub</h2>
         <div className="spacer" />
         {oauth?.configured && (
           <button className="btn primary" onClick={startOAuth}>
@@ -57,35 +70,35 @@ export function GitHub() {
           <Plug size={14} /> Use a token
         </button>
       </div>
-      <p className="dim" style={{ marginTop: "0.4rem", marginBottom: "1rem" }}>Connect GitHub organizations to deploy their repositories. Tokens are encrypted at rest on this host.</p>
 
       {!oauth?.configured && (
-        <div className="card" style={{ marginBottom: "1rem", borderColor: "var(--border-strong)" }}>
+        <div className="card" style={{ marginTop: "0.75rem", borderColor: "var(--border-strong)" }}>
           <div className="row">
             <span className="badge warn">OAuth proxy unreachable</span>
-            <span className="dim">Falling back to personal-access-token connect. See <a href="https://homebox.sh" target="_blank" rel="noopener">homebox.sh</a> for setup.</span>
+            <span className="dim">Falling back to personal-access-token connect.</span>
           </div>
         </div>
       )}
 
-      {orgs && orgs.length > 0 ? (
-        <table className="data-table">
-          <thead><tr><th>Organization</th><th>Source</th><th>Connected</th><th className="right">Actions</th></tr></thead>
+      {github.length > 0 ? (
+        <table className="data-table" style={{ marginTop: "0.75rem" }}>
+          <thead><tr><th>Organization</th><th>Source</th><th>Projects</th><th>Status</th><th className="right">Actions</th></tr></thead>
           <tbody>
-            {orgs.map(o => (
-              <tr key={o.id}>
+            {github.map(i => (
+              <tr key={i.id}>
                 <td>
-                  <strong>{o.login}</strong>
-                  <div className="dim">github.com/{o.login}</div>
+                  <strong>{i.account_login}</strong>
+                  <div className="dim">github.com/{i.account_login}</div>
                 </td>
-                <td>{o.source === "oauth" ? <span className="badge info plain">OAuth</span> : <span className="badge plain">PAT</span>}</td>
-                <td><span className="badge ok">Active</span> <span className="dim">since {new Date(o.created_at).toLocaleDateString()}</span></td>
+                <td>{i.source === "oauth" ? <span className="badge info plain">OAuth</span> : <span className="badge plain">PAT</span>}</td>
+                <td><span className="dim">{i.project_count}</span></td>
+                <td><span className="badge ok">Connected</span></td>
                 <td className="actions">
-                  <button className="btn small" disabled={sync.isPending} onClick={() => sync.mutate(o.login)}>
+                  <button className="btn small" disabled={sync.isPending} onClick={() => sync.mutate(i.id)}>
                     <RefreshCw size={12} /> Sync repos
                   </button>{" "}
                   <button className="btn small danger" disabled={disconnect.isPending}
-                    onClick={() => setDisconnectTarget(o.login)}>
+                    onClick={() => setDisconnectTarget(i)}>
                     Disconnect
                   </button>
                 </td>
@@ -93,33 +106,57 @@ export function GitHub() {
             ))}
           </tbody>
         </table>
-      ) : orgs ? (
-        <div className="empty-state">
-          <h3>No organizations connected</h3>
-          <p>Connect your first GitHub org to start deploying repositories from it.</p>
+      ) : integrations ? (
+        <div className="empty-state" style={{ marginTop: "0.75rem" }}>
+          <h3>No GitHub organizations connected</h3>
+          <p>Connect your first org to start deploying its repositories.</p>
           {oauth?.configured && (
             <button className="btn primary" onClick={startOAuth}><Github size={14} /> Connect with GitHub</button>
           )}
         </div>
       ) : <span className="spinner" />}
 
+      <h2 style={{ marginTop: "2rem" }}>Cloudflare</h2>
+      {others.length > 0 ? (
+        <table className="data-table" style={{ marginTop: "0.75rem" }}>
+          <thead><tr><th>Provider</th><th>Account</th><th>Status</th><th className="right">Manage</th></tr></thead>
+          <tbody>
+            {others.map(i => (
+              <tr key={i.id}>
+                <td><strong style={{ textTransform: "capitalize" }}>{i.provider}</strong></td>
+                <td className="dim">{i.name || i.account_id || "—"}</td>
+                <td>{i.status === "connected" ? <span className="badge ok">Connected</span> : <span className="badge warn">{i.status}</span>}</td>
+                <td className="actions"><Link className="btn small ghost" to="/tunnel">Routes <ExternalLink size={12} /></Link></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="card" style={{ marginTop: "0.75rem" }}>
+          <div className="row">
+            <span className="badge warn"><Cloud size={12} /> Not connected</span>
+            <span className="dim">Connect Cloudflare on the <Link to="/tunnel">Routes</Link> page to publish projects.</span>
+          </div>
+        </div>
+      )}
+
       <ConnectPatModal open={openConnect} onClose={() => setOpenConnect(false)} />
 
       <Modal
         open={disconnectTarget !== null}
         onClose={() => setDisconnectTarget(null)}
-        title={`Disconnect ${disconnectTarget ?? ""}?`}
+        title={`Disconnect ${disconnectTarget?.account_login ?? ""}?`}
         footer={<>
           <span className="spacer" />
           <button className="btn" type="button" onClick={() => setDisconnectTarget(null)}>Cancel</button>
           <button className="btn danger" type="button" disabled={disconnect.isPending}
-            onClick={() => disconnectTarget && disconnect.mutate(disconnectTarget)}>
+            onClick={() => disconnectTarget && disconnect.mutate(disconnectTarget.id)}>
             {disconnect.isPending ? <span className="spinner" /> : "Disconnect"}
           </button>
         </>}
       >
         <p>
-          This removes the GitHub connection for <strong>{disconnectTarget}</strong> and
+          This removes the GitHub connection for <strong>{disconnectTarget?.account_login}</strong> and
           <strong> stops all of its managed project containers</strong> on this host.
         </p>
         <p className="dim">
@@ -138,9 +175,10 @@ function ConnectPatModal({ open, onClose }: { open: boolean; onClose: () => void
   const [pat, setPat] = useState("");
 
   const connect = useMutation({
-    mutationFn: () => api.post(`/api/organizations/connect-pat`, { login, pat }),
+    mutationFn: () => api.post(`/api/integrations/github/connect-pat`, { login, pat }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["orgs"] });
+      qc.invalidateQueries({ queryKey: ["integrations"] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
       toast.show("Connected", "ok");
       setLogin(""); setPat("");
       onClose();

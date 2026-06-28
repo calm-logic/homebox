@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import github
 from .config import settings
 from .crypto import decrypt, encrypt
-from .models import Organization, Repository, Setting
-from .orgs import decrypted_pat
+from .models import Integration, Project, Setting
+from .integrations_lib import decrypted_token
 
 WEBHOOK_SETTING_KEY = "webhook"
 
@@ -39,32 +39,32 @@ def webhook_url() -> str | None:
     return f"https://{domain}/api/webhooks/github"
 
 
-async def sync_repo_webhook(session: AsyncSession, repo: Repository) -> tuple[bool, str]:
-    """Bring the repo's GitHub push webhook in line with repo.managed. Registers
-    when managed (idempotent), removes when not. Best-effort — returns a status
-    string; never raises so it can't break the bind call."""
+async def sync_project_webhook(session: AsyncSession, project: Project) -> tuple[bool, str]:
+    """Bring the project's GitHub push webhook in line with project.managed.
+    Registers when managed (idempotent), removes when not. Best-effort — returns
+    a status string; never raises so it can't break the adopt call."""
     url = webhook_url()
     if not url:
         return False, "Auto-deploy on push is disabled until the admin has a public URL (ADMIN_DOMAIN)."
-    if not repo.organization_id:
-        return False, "Repository has no organization."
-    org = await session.get(Organization, repo.organization_id)
-    if not org:
-        return False, "Organization not found."
+    if not project.integration_id:
+        return False, "Project has no source-control integration."
+    integration = await session.get(Integration, project.integration_id)
+    if not integration:
+        return False, "Integration not found."
 
-    token = decrypted_pat(org)
+    token = decrypted_token(integration)
     try:
-        hooks = await github.list_repo_webhooks(token, repo.full_name)
+        hooks = await github.list_repo_webhooks(token, project.repo_full_name)
         ours = [h for h in hooks if (h.get("config") or {}).get("url") == url]
-        if repo.managed:
+        if project.managed and project.auto_deploy:
             if ours:
                 return True, "Webhook already registered."
             secret = await get_or_create_webhook_secret(session)
-            await github.create_repo_webhook(token, repo.full_name, url, secret)
+            await github.create_repo_webhook(token, project.repo_full_name, url, secret)
             return True, "Webhook registered."
         else:
             for h in ours:
-                await github.delete_repo_webhook(token, repo.full_name, h["id"])
+                await github.delete_repo_webhook(token, project.repo_full_name, h["id"])
             return True, "Webhook removed."
     except httpx.HTTPStatusError as e:
         # 403 most likely = token lacks admin:repo_hook.

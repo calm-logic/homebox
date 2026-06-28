@@ -64,7 +64,7 @@ def _tunnel_metadata(install_id: str) -> dict[str, str]:
 def _serialize_domain(d: Domain) -> dict[str, Any]:
     return {
         "id": d.id, "name": d.name, "mode": d.mode,
-        "project_slug": d.project_slug, "is_primary": d.is_primary,
+        "is_primary": d.is_primary,
         "cloudflare_routed": d.cloudflare_routed,
     }
 

@@ -5,8 +5,9 @@ export interface Me {
 }
 
 export interface MetricsSummary {
-  org_count: number;
-  repo_count: number;
+  integration_count: number;
+  project_count: number;
+  managed_count: number;
   domain_count: number;
   runner: {
     installed: boolean;
@@ -18,37 +19,109 @@ export interface DomainItem {
   id: number;
   name: string;
   mode: "wildcard" | "dedicated";
-  project_slug: string | null;
   is_primary: boolean;
   cloudflare_routed: boolean;
 }
 
-export interface OrgItem {
-  id: number;
-  login: string;
-  created_at: string;
-  source: "pat" | "oauth";
-}
-
 export type DeploymentStatus =
-  | "queued" | "cloning" | "building" | "starting" | "running" | "failed" | "stopped";
+  | "queued" | "cloning" | "dissecting" | "building" | "starting" | "running" | "failed" | "stopped";
 
 export interface DeploymentInfo {
+  id: number;
   status: DeploymentStatus;
-  url: string | null;
   commit_sha: string | null;
   error: string | null;
   trigger: "manual" | "webhook";
   updated_at: string | null;
 }
 
-export interface RepoItem {
+// ── Integrations / Projects / Services / Environments ──────────────────────────
+
+export interface IntegrationItem {
   id: number;
-  full_name: string;
-  default_branch: string;
-  project_slug: string | null;
-  managed: boolean;
+  provider: string;             // github | gitlab | cloudflare
+  account_login: string | null;
+  account_id: string | null;
+  name: string | null;
+  status: string;
+  source: string;               // oauth | pat | token
+  project_count: number;
+  created_at: string | null;
+  last_verified_at: string | null;
+}
+
+export interface IntegrationRef {
+  id: number;
+  provider: string;
+  account_login: string | null;
+}
+
+export interface ServiceInstanceInfo {
+  service_name: string;
+  url: string | null;
+  status: string;
+  container_name: string | null;
+}
+
+export interface EnvironmentInfo {
+  id: number;
+  name: string;
+  kind: "production" | "dev" | "preview";
+  branch: string | null;
+  slug_suffix: string;
+  is_default: boolean;
   deployment: DeploymentInfo | null;
+  instances: ServiceInstanceInfo[];
+}
+
+export interface DetectedStackEntry {
+  name: string;
+  kind: string;
+  public: boolean;
+  label: string;
+}
+
+export interface ProjectItem {
+  id: number;
+  repo_full_name: string;
+  name: string;
+  default_branch: string;
+  managed: boolean;
+  auto_deploy: boolean;
+  domain_id: number | null;
+  domain: string | null;
+  description: string | null;
+  dissected_at: string | null;
+  detected_stack: { services?: DetectedStackEntry[] };
+  integration: IntegrationRef | null;
+  environments: EnvironmentInfo[];
+}
+
+export interface EnvVarItem {
+  id: number;
+  key: string;
+  value: string;
+  source: "auto" | "user";
+  is_secret: boolean;
+  environment_id: number | null;
+}
+
+export interface ServiceItem {
+  id: number;
+  name: string;
+  kind: string;
+  source_type: string;
+  source_ref: string | null;
+  is_public: boolean;
+  subdomain_label: string;
+  internal_port: number | null;
+  depends_on: string[];
+  env_template: Record<string, string>;
+  env_vars: EnvVarItem[];
+}
+
+export interface ProjectDetailData extends ProjectItem {
+  services: ServiceItem[];
 }
 
 export interface ProjectWorkflowRun {

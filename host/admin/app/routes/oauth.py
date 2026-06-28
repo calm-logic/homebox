@@ -7,8 +7,8 @@ redirects back to https://<this host>/oauth/callback?code=<access_token>&state=�
 on the SPA route). The SPA then POSTs to /api/oauth/finish.
 
 Purposes:
-  connect — enumerate the user's GitHub orgs and store one Organization row per
-            org (access_token encrypted at rest). Requires an existing session.
+  connect — enumerate the user's GitHub orgs and store one github Integration
+            row per org (access_token encrypted at rest). Requires a session.
   login   — resolve a verified email from the provider and match it against the
             `identities` whitelist. No prior session (this *is* the sign-in). On
             a match we issue an admin session bound to that email; otherwise the
@@ -29,8 +29,8 @@ from ..auth import issue_session, require_session_api, _read_session
 from ..config import settings
 from ..crypto import encrypt
 from ..db import get_session
-from ..models import Identity, Organization, Setting
-from ..orgs import sync_org_repos
+from ..models import Identity, Integration, Setting
+from ..integrations_lib import sync_github_projects
 
 router = APIRouter(prefix="/api/oauth")
 
@@ -212,7 +212,7 @@ async def _finish_connect(access_token: str, request: Request, session: AsyncSes
     if not _read_session(request.cookies.get(settings.session_cookie)):
         raise HTTPException(401, "Sign in before connecting a GitHub organization.")
 
-    # Fetch the user's organizations + add each as an Organization row.
+    # Fetch the user's organizations + add each as a github Integration row.
     async with httpx.AsyncClient(timeout=15) as c:
         headers = {
             "Accept": "application/vnd.github+json",
@@ -229,26 +229,33 @@ async def _finish_connect(access_token: str, request: Request, session: AsyncSes
 
     encrypted = encrypt(f"oauth:{access_token}")
     added = []
-    org_rows: list[Organization] = []
+    integ_rows: list[Integration] = []
     for o in orgs:
         login = o.get("login")
         if not login:
             continue
-        existing = (await session.execute(select(Organization).where(Organization.login == login))).scalar_one_or_none()
+        existing = (await session.execute(
+            select(Integration).where(Integration.provider == "github", Integration.account_login == login)
+        )).scalar_one_or_none()
         if existing:
-            existing.pat_encrypted = encrypted
+            existing.secret_encrypted = encrypted
+            existing.status = "connected"
+            existing.updated_at = datetime.utcnow()
         else:
-            existing = Organization(login=login, pat_encrypted=encrypted)
+            existing = Integration(
+                provider="github", account_login=login, account_id=str(o.get("id") or ""),
+                name=login, secret_encrypted=encrypted, status="connected",
+            )
             session.add(existing)
-        org_rows.append(existing)
+        integ_rows.append(existing)
         added.append(login)
     await session.commit()
 
     # Auto-sync repos for each connected org so projects show up immediately.
-    # Best-effort per org — a single failure shouldn't sink the whole connect.
-    for org in org_rows:
+    # Best-effort per integration — a single failure shouldn't sink the connect.
+    for integ in integ_rows:
         try:
-            await sync_org_repos(session, org)
+            await sync_github_projects(session, integ)
             await session.commit()
         except httpx.HTTPStatusError:
             await session.rollback()

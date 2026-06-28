@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 
 from . import metrics, monitor
 from .auth import RequiresLogin
@@ -16,14 +16,14 @@ from .models import Domain, Deployment, Identity
 from .routes import (
     auth as auth_routes,
     dashboard,
-    deploy as deploy_routes,
     domains,
     identities as identities_routes,
+    integrations,
     oauth as oauth_routes,
     onboarding,
-    organizations,
-    repositories,
+    projects,
     runner,
+    services,
     theme,
     webhooks,
     workflows,
@@ -32,7 +32,7 @@ from .routes import (
 
 # Deployment statuses that are not terminal — a process must be actively driving
 # them. Any left behind after a restart was interrupted and can never resume.
-_ACTIVE_DEPLOY_STATUSES = ("queued", "cloning", "building", "starting")
+_ACTIVE_DEPLOY_STATUSES = ("queued", "cloning", "dissecting", "building", "starting")
 
 
 async def _seed_primary_domain() -> None:
@@ -56,15 +56,6 @@ async def _seed_primary_domain() -> None:
             d.is_primary = False
         session.add(Domain(name=root, mode="wildcard", is_primary=True, cloudflare_routed=True))
         await session.commit()
-
-
-async def _ensure_columns() -> None:
-    """create_all() only creates missing *tables* — it never adds columns to an
-    existing one. Backfill columns added to pre-existing tables here. Idempotent."""
-    async with engine.begin() as conn:
-        await conn.execute(text(
-            "ALTER TABLE repositories ADD COLUMN IF NOT EXISTS managed BOOLEAN DEFAULT FALSE"
-        ))
 
 
 async def _seed_identities() -> None:
@@ -107,7 +98,6 @@ async def _fail_interrupted_deployments() -> None:
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    await _ensure_columns()
     settings.projects_host_dir.mkdir(parents=True, exist_ok=True)
     await _fail_interrupted_deployments()
     await _seed_primary_domain()
@@ -129,9 +119,9 @@ app = FastAPI(title="Homebox Admin", lifespan=lifespan, docs_url="/api/docs", op
 app.include_router(auth_routes.router)
 app.include_router(dashboard.router)
 app.include_router(domains.router)
-app.include_router(organizations.router)
-app.include_router(repositories.router)
-app.include_router(deploy_routes.router)
+app.include_router(integrations.router)
+app.include_router(projects.router)
+app.include_router(services.router)
 app.include_router(webhooks.router)
 app.include_router(runner.router)
 app.include_router(workflows.router)

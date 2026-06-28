@@ -6,8 +6,8 @@ import httpx
 
 from ..auth import require_session_api
 from ..db import get_session
-from ..models import Organization
-from ..orgs import decrypted_pat
+from ..models import Integration
+from ..integrations_lib import decrypted_token
 from ..github import get_org_runner_token, list_org_runners
 from ..host import (
     list_runner_containers,
@@ -25,14 +25,18 @@ async def runner_summary(
     session: AsyncSession = Depends(get_session),
 ):
     containers = list_runner_containers()
-    orgs = (await session.execute(select(Organization).order_by(Organization.login))).scalars().all()
+    orgs = (await session.execute(
+        select(Integration).where(Integration.provider == "github").order_by(Integration.account_login)
+    )).scalars().all()
     org_runners: dict[str, list] = {}
     for o in orgs:
+        if not o.account_login:
+            continue
         try:
-            data = await list_org_runners(decrypted_pat(o), o.login)
-            org_runners[o.login] = data.get("runners", [])
+            data = await list_org_runners(decrypted_token(o), o.account_login)
+            org_runners[o.account_login] = data.get("runners", [])
         except httpx.HTTPStatusError:
-            org_runners[o.login] = []
+            org_runners[o.account_login] = []
     return {
         "containers": containers,
         "org_runners": org_runners,
@@ -50,12 +54,14 @@ async def install_runner(
     session: AsyncSession = Depends(get_session),
 ):
     login = body.org.strip()
-    org = (await session.execute(select(Organization).where(Organization.login == login))).scalar_one_or_none()
+    org = (await session.execute(
+        select(Integration).where(Integration.provider == "github", Integration.account_login == login)
+    )).scalar_one_or_none()
     if not org:
         raise HTTPException(404, "Organization not connected")
 
     try:
-        token = await get_org_runner_token(decrypted_pat(org), login)
+        token = await get_org_runner_token(decrypted_token(org), login)
     except httpx.HTTPStatusError as e:
         detail = (e.response.json().get("message") if e.response.headers.get("content-type", "").startswith("application/json") else e.response.text) or ""
         hint = ""

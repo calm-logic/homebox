@@ -15,7 +15,6 @@ router = APIRouter(prefix="/api/domains")
 class AddDomainBody(BaseModel):
     name: str
     mode: str = "wildcard"
-    project: str | None = None
     primary: bool = False
 
 
@@ -24,7 +23,6 @@ def _serialize(d: Domain) -> dict:
         "id": d.id,
         "name": d.name,
         "mode": d.mode,
-        "project_slug": d.project_slug,
         "is_primary": d.is_primary,
         "cloudflare_routed": d.cloudflare_routed,
     }
@@ -36,7 +34,7 @@ async def _sync_to_disk(session: AsyncSession) -> None:
     cloudflared config — there is no local config any more."""
     rows = (await session.execute(select(Domain).order_by(Domain.is_primary.desc(), Domain.name))).scalars().all()
     write_domains([
-        {"name": d.name, "mode": d.mode, "project": d.project_slug, "primary": d.is_primary}
+        {"name": d.name, "mode": d.mode, "primary": d.is_primary}
         for d in rows
     ])
 
@@ -79,14 +77,12 @@ async def add_domain(
     existing = (await session.execute(select(Domain).where(Domain.name == name))).scalar_one_or_none()
     if existing:
         existing.mode = body.mode
-        existing.project_slug = body.project or None
         if body.primary:
             existing.is_primary = True
         result = existing
     else:
         result = Domain(
             name=name, mode=body.mode,
-            project_slug=body.project or None,
             is_primary=body.primary,
         )
         session.add(result)
@@ -125,7 +121,6 @@ async def delete_domain(
 class ConnectCloudflareBody(BaseModel):
     zone_id: str
     mode: str = "wildcard"
-    project: str | None = None
     primary: bool = False
 
 
@@ -179,7 +174,6 @@ async def connect_cloudflare_domain(
     ).scalar_one_or_none()
     if existing:
         existing.mode = body.mode
-        existing.project_slug = body.project or None
         existing.cloudflare_routed = True
         if body.primary:
             existing.is_primary = True
@@ -187,7 +181,6 @@ async def connect_cloudflare_domain(
     else:
         result = Domain(
             name=name, mode=body.mode,
-            project_slug=body.project or None,
             is_primary=body.primary,
             cloudflare_routed=True,
         )

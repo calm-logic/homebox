@@ -13,6 +13,7 @@ Token scopes the UI suggests:
   Zone    · Zone · Read
 """
 
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -20,38 +21,51 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .crypto import decrypt, encrypt
-from .models import Setting
+from .models import Integration
 
 API = "https://api.cloudflare.com/client/v4"
-SETTING_KEY = "cloudflare"
+PROVIDER = "cloudflare"
 
 
 # ───── DB-backed credentials/state ────────────────────────────────────────────
+#
+# Cloudflare creds + tunnel state live as the single Integration(provider=
+# 'cloudflare') row. The `state` dict (token_encrypted, account_id, tunnel_id,
+# connector_token_encrypted…) is persisted in Integration.config, and a few
+# non-secret bits are mirrored to columns for the Integrations UI. The dict API
+# below is unchanged, so tunnel.py / onboarding.py / monitor.py are unaffected.
+
+
+async def _row(session: AsyncSession) -> Integration | None:
+    return (
+        await session.execute(select(Integration).where(Integration.provider == PROVIDER))
+    ).scalar_one_or_none()
 
 
 async def load_state(session: AsyncSession) -> dict[str, Any]:
     """Returns the current Cloudflare state (token / account / tunnel) or {}."""
-    row = (
-        await session.execute(select(Setting).where(Setting.key == SETTING_KEY))
-    ).scalar_one_or_none()
-    return dict(row.value) if row and row.value else {}
+    row = await _row(session)
+    return dict(row.config) if row and row.config else {}
 
 
 async def save_state(session: AsyncSession, state: dict[str, Any]) -> None:
-    row = (
-        await session.execute(select(Setting).where(Setting.key == SETTING_KEY))
-    ).scalar_one_or_none()
+    row = await _row(session)
     if row is None:
-        session.add(Setting(key=SETTING_KEY, value=state))
-    else:
-        row.value = state
+        row = Integration(provider=PROVIDER)
+        session.add(row)
+    row.config = state
+    # Mirror non-secret bits to columns so the Integrations page can list it.
+    row.account_id = state.get("account_id")
+    row.account_login = state.get("account_name")
+    row.name = state.get("account_name") or "Cloudflare"
+    row.secret_encrypted = state.get("token_encrypted")
+    row.status = "connected" if state.get("token_encrypted") else "disconnected"
+    row.updated_at = datetime.utcnow()
     await session.commit()
 
 
 async def clear_state(session: AsyncSession) -> None:
-    row = (
-        await session.execute(select(Setting).where(Setting.key == SETTING_KEY))
-    ).scalar_one_or_none()
+    row = await _row(session)
     if row is not None:
         await session.delete(row)
         await session.commit()

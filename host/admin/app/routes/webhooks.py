@@ -11,9 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
-from ..models import Repository
+from ..models import Environment, Project
 from ..webhooks_lib import get_or_create_webhook_secret
-from .deploy import queue_deploy
+from .projects import queue_deploy
 
 router = APIRouter(prefix="/api/webhooks")
 
@@ -51,14 +51,27 @@ async def github_webhook(
     ref = payload.get("ref") or ""
     if not full_name:
         return {"ok": True, "ignored": "no repository"}
+    if not ref.startswith("refs/heads/"):
+        return {"ok": True, "ignored": f"ref {ref}"}
+    pushed_branch = ref[len("refs/heads/"):]
 
-    repo = (await session.execute(
-        select(Repository).where(Repository.full_name == full_name)
+    project = (await session.execute(
+        select(Project).where(Project.repo_full_name == full_name)
     )).scalar_one_or_none()
-    if not repo or not repo.managed or not repo.project_slug:
-        return {"ok": True, "ignored": "repo not managed"}
-    if ref != f"refs/heads/{repo.default_branch}":
-        return {"ok": True, "ignored": f"branch {ref}"}
+    if not project or not project.managed or not project.auto_deploy:
+        return {"ok": True, "ignored": "project not managed / auto-deploy off"}
 
-    dep = await queue_deploy(session, background, repo, trigger="webhook")
-    return {"ok": True, "deployment_id": dep.id}
+    # Deploy every environment whose branch matches the push. An env with no
+    # branch set tracks the project's default branch.
+    envs = (await session.execute(
+        select(Environment).where(Environment.project_id == project.id)
+    )).scalars().all()
+    deployed = []
+    for env in envs:
+        target = env.branch or project.default_branch
+        if target == pushed_branch:
+            dep = await queue_deploy(session, background, env, trigger="webhook")
+            deployed.append({"environment": env.name, "deployment_id": dep.id})
+    if not deployed:
+        return {"ok": True, "ignored": f"no environment tracks branch {pushed_branch}"}
+    return {"ok": True, "deployed": deployed}

@@ -59,8 +59,8 @@ export function CICD() {
       ) : (
         <div className="empty-state">
           <h3>No runs yet</h3>
-          <p>Connect an organization on the <strong>Projects</strong> tab, sync repositories, then click <strong>Refresh</strong> to pull recent workflow runs from GitHub.</p>
-          <a className="btn primary" href="/projects">Go to Projects</a>
+          <p>Connect an organization on the <strong>Integrations</strong> tab, sync repositories, then click <strong>Refresh</strong> to pull recent workflow runs from GitHub.</p>
+          <a className="btn primary" href="/integrations">Go to Integrations</a>
         </div>
       )}
     </>

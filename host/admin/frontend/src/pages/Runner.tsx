@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Play, RefreshCw, Trash2, Plus } from "lucide-react";
 import { api } from "../lib/api";
 import { useToast } from "../lib/toast";
-import type { RunnerSummary, OrgItem } from "../lib/types";
+import type { RunnerSummary, IntegrationItem } from "../lib/types";
 
 export function Runner() {
   const qc = useQueryClient();
@@ -13,10 +13,13 @@ export function Runner() {
     queryFn: () => api.get<RunnerSummary>("/api/runner"),
     refetchInterval: 6000,
   });
-  const { data: orgs } = useQuery<OrgItem[]>({
-    queryKey: ["orgs"],
-    queryFn: () => api.get<OrgItem[]>("/api/organizations"),
+  const { data: integrations } = useQuery<IntegrationItem[]>({
+    queryKey: ["integrations"],
+    queryFn: () => api.get<IntegrationItem[]>("/api/integrations"),
   });
+  const orgs = (integrations ?? []).filter(
+    (i): i is IntegrationItem & { account_login: string } => i.provider === "github" && !!i.account_login
+  );
 
   const install = useMutation({
     mutationFn: (login: string) => api.post(`/api/runner/install`, { org: login }),
@@ -34,7 +37,7 @@ export function Runner() {
     onError: (e) => toast.show(String(e), "fail"),
   });
 
-  if (!runner || !orgs) return <span className="spinner" />;
+  if (!runner || !integrations) return <span className="spinner" />;
 
   const runnerByOrg: Record<string, typeof runner.containers[number] | undefined> = {};
   for (const c of runner.containers) runnerByOrg[c.org] = c;
@@ -49,17 +52,17 @@ export function Runner() {
       {orgs.length === 0 ? (
         <div className="empty-state">
           <h3>Connect a source organization first</h3>
-          <p>Once an organization is connected (Projects tab), you can install a runner that picks up jobs from every repo in it.</p>
-          <a className="btn primary" href="/projects">Go to Projects</a>
+          <p>Once an organization is connected (Integrations tab), you can install a runner that picks up jobs from every repo in it.</p>
+          <a className="btn primary" href="/integrations">Go to Integrations</a>
         </div>
       ) : orgs.map(org => {
-        const c = runnerByOrg[org.login];
+        const c = runnerByOrg[org.account_login];
         return (
           <div className="card" key={org.id}>
             <div className="card-row">
               <div className="grow">
                 <div className="row">
-                  <h3 style={{ margin: 0 }}>{org.login}</h3>
+                  <h3 style={{ margin: 0 }}>{org.account_login}</h3>
                   {c
                     ? (c.running
                         ? <span className="badge ok">Running</span>
@@ -81,7 +84,7 @@ export function Runner() {
               <div className="btn-row">
                 {!c && (
                   <button className="btn primary" disabled={install.isPending}
-                    onClick={() => install.mutate(org.login)}>
+                    onClick={() => install.mutate(org.account_login)}>
                     {install.isPending ? <span className="spinner" /> : <><Plus size={14} /> Install runner</>}
                   </button>
                 )}
@@ -92,7 +95,7 @@ export function Runner() {
                       {restart.isPending ? <span className="spinner" /> : <><RefreshCw size={14} /> Restart</>}
                     </button>
                     <button className="btn danger" disabled={remove.isPending}
-                      onClick={() => { if (confirm(`Remove runner for ${org.login}?`)) remove.mutate(c.name); }}>
+                      onClick={() => { if (confirm(`Remove runner for ${org.account_login}?`)) remove.mutate(c.name); }}>
                       <Trash2 size={14} /> Remove
                     </button>
                   </>
@@ -100,11 +103,11 @@ export function Runner() {
               </div>
             </div>
 
-            {runner.org_runners[org.login] && runner.org_runners[org.login].length > 0 && (
+            {runner.org_runners[org.account_login] && runner.org_runners[org.account_login].length > 0 && (
               <table className="data-table" style={{ marginTop: "0.75rem" }}>
                 <thead><tr><th>Name</th><th>Status</th><th>OS</th><th>Labels</th></tr></thead>
                 <tbody>
-                  {runner.org_runners[org.login].map(r => (
+                  {runner.org_runners[org.account_login].map(r => (
                     <tr key={r.id}>
                       <td><strong>{r.name}</strong></td>
                       <td>{r.status === "online" ? <span className="badge ok">Online</span> : <span className="badge warn">{r.status}</span>}</td>

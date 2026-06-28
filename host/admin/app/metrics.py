@@ -15,7 +15,7 @@ from sqlalchemy import delete, select
 
 from .db import SessionLocal
 from .host import container_stats
-from .models import Deployment, MetricSample, Repository
+from .models import Deployment, Environment, MetricSample, Project, ServiceInstance
 
 log = logging.getLogger("homebox.metrics")
 
@@ -24,37 +24,48 @@ RETENTION = timedelta(days=7)  # how long to keep samples
 PRUNE_EVERY = 40               # prune once per this many sample cycles (~10 min)
 
 
-async def _running_web_containers() -> list[tuple[int, str]]:
-    """(repository_id, web_container) for every managed repo whose latest
-    deployment is running with a known container."""
-    out: list[tuple[int, str]] = []
+async def _running_service_containers() -> list[tuple[int, int, str]]:
+    """(service_id, environment_id, container_name) for every running service
+    instance of a managed project's latest deployment per environment."""
+    out: list[tuple[int, int, str]] = []
     async with SessionLocal() as session:
-        repos = (await session.execute(
-            select(Repository).where(Repository.managed == True)  # noqa: E712
+        projects = (await session.execute(
+            select(Project).where(Project.managed == True)  # noqa: E712
         )).scalars().all()
-        for repo in repos:
-            dep = (await session.execute(
-                select(Deployment)
-                .where(Deployment.repository_id == repo.id)
-                .order_by(Deployment.created_at.desc())
-                .limit(1)
-            )).scalar_one_or_none()
-            if dep and dep.status == "running" and dep.web_container:
-                out.append((repo.id, dep.web_container))
+        for project in projects:
+            envs = (await session.execute(
+                select(Environment).where(Environment.project_id == project.id)
+            )).scalars().all()
+            for env in envs:
+                dep = (await session.execute(
+                    select(Deployment)
+                    .where(Deployment.environment_id == env.id)
+                    .order_by(Deployment.created_at.desc())
+                    .limit(1)
+                )).scalar_one_or_none()
+                if not dep or dep.status != "running":
+                    continue
+                instances = (await session.execute(
+                    select(ServiceInstance).where(ServiceInstance.deployment_id == dep.id)
+                )).scalars().all()
+                for inst in instances:
+                    if inst.service_id and inst.container_name:
+                        out.append((inst.service_id, env.id, inst.container_name))
     return out
 
 
 async def _sample_once() -> None:
-    targets = await _running_web_containers()
+    targets = await _running_service_containers()
     if not targets:
         return
     rows: list[MetricSample] = []
-    for repo_id, container in targets:
+    for service_id, environment_id, container in targets:
         stats = await asyncio.to_thread(container_stats, container)
         if not stats:
             continue
         rows.append(MetricSample(
-            repository_id=repo_id,
+            service_id=service_id,
+            environment_id=environment_id,
             cpu_pct=stats["cpu_pct"],
             mem_used=stats["mem_used"],
             mem_limit=stats["mem_limit"],

@@ -1,20 +1,20 @@
-"""Project deploy engine.
+"""Project deploy engine (multi-service, multi-environment).
 
-A "managed" repo is deployed as its own docker-compose stack on the shared
-`traefik-net` network. Traefik's docker provider auto-discovers the web
-container via labels, routing `<slug>.<primary-domain>` to it. Backing services
-(Postgres, Redis, …) stay internal to the stack and never publish host ports, so
-two projects can both use 5432 internally without conflict.
+A deploy targets a (project, environment). Each environment runs as its own
+docker-compose stack on the shared `traefik-net` network, named
+`homebox-proj-<project>-<env>` so production and dev coexist with separate
+volumes. Public services are routed by Traefik to their derived hostnames
+(app/urls.py); backing services (db, cache, …) stay internal to the stack.
 
-Build source, in priority order:
-  1. repo has a compose file  → use it (ports stripped, traefik-net + labels added)
-  2. repo has only a Dockerfile → generate a one-service compose that builds it
-  3. neither                   → Nixpacks infers + builds an image, wrapped in a
-                                  generated compose
+Build source, in priority order (per repo):
+  1. compose file  → transform it (host ports stripped, traefik-net + per-public-
+                     service labels added, env vars injected)
+  2. Dockerfile    → generate a one-service compose that builds it
+  3. neither       → Nixpacks infers + builds an image, wrapped in a compose
 
-Everything that touches the Docker daemon runs under `projects_host_dir`, which
-is bind-mounted at the SAME path inside the admin container and on the host, so
-compose bind mounts resolve identically on both sides.
+The repo structure is re-read on every deploy via app/dissect.py, so routing +
+auto-wired connection env vars always match the current commit; user-set env
+vars (ServiceEnvVar source='user') are layered on top.
 """
 
 import asyncio
@@ -27,19 +27,22 @@ from typing import Any
 import yaml
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from .config import settings
 from .db import SessionLocal
-from .models import Deployment, Domain, Organization, Repository
-from .orgs import decrypted_pat
+from . import dissect, urls
+from .compose_utils import find_compose
+from .integrations_lib import decrypted_token
+from .models import (
+    Deployment, Domain, Environment, Project, Service, ServiceEnvVar, ServiceInstance,
+)
 
 GENERATED_COMPOSE = "docker-compose.homebox.yml"
 TRAEFIK_NET = "traefik-net"
 _BUILD_TIMEOUT = 1800  # 30 min
-# Services likely to be the public HTTP entrypoint, in preference order.
-_WEB_NAME_HINTS = ("web", "app", "frontend", "api", "server")
 
-# One lock per slug so a manual deploy and a webhook deploy can't `compose up`
+# One lock per stack so a manual deploy and a webhook deploy can't `compose up`
 # the same stack concurrently.
 _locks: dict[str, asyncio.Lock] = {}
 
@@ -48,23 +51,19 @@ class DeployError(Exception):
     """A deploy step failed; the message is surfaced to the UI."""
 
 
-def _lock_for(slug: str) -> asyncio.Lock:
-    lock = _locks.get(slug)
+def _lock_for(stack: str) -> asyncio.Lock:
+    lock = _locks.get(stack)
     if lock is None:
-        lock = _locks[slug] = asyncio.Lock()
+        lock = _locks[stack] = asyncio.Lock()
     return lock
 
 
-def project_dir(slug: str) -> Path:
-    return settings.projects_host_dir / slug
+def env_dir(project_name: str, env_name: str) -> Path:
+    return settings.projects_host_dir / project_name / env_name
 
 
-def repo_dir(slug: str) -> Path:
-    return project_dir(slug) / "repo"
-
-
-def stack_name(slug: str) -> str:
-    return f"homebox-proj-{slug}"
+def repo_dir(project_name: str, env_name: str) -> Path:
+    return env_dir(project_name, env_name) / "repo"
 
 
 def _scrub(text: str, secret: str) -> str:
@@ -91,12 +90,11 @@ def _git_env() -> dict[str, str]:
     return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
 
-async def sync_source(repo: Repository, token: str) -> str:
-    """Clone (or fetch+reset) the repo's default branch into repo_dir. Returns HEAD sha."""
-    slug = repo.project_slug or ""
-    rd = repo_dir(slug)
-    url = f"https://x-access-token:{token}@github.com/{repo.full_name}.git"
-    branch = repo.default_branch or "main"
+async def sync_source(project: Project, env: Environment, token: str) -> str:
+    """Clone (or fetch+reset) the env's branch into repo_dir. Returns HEAD sha."""
+    rd = repo_dir(project.name, env.name)
+    url = f"https://x-access-token:{token}@github.com/{project.repo_full_name}.git"
+    branch = env.branch or project.default_branch or "main"
 
     if (rd / ".git").is_dir():
         await _run(["git", "-C", str(rd), "remote", "set-url", "origin", url], env=_git_env())
@@ -118,78 +116,14 @@ async def sync_source(repo: Repository, token: str) -> str:
     return sha.strip() if code == 0 else ""
 
 
-# ── Build-mode detection + compose generation ────────────────────────────────
+# ── Compose transform helpers ────────────────────────────────────────────────
 
-_COMPOSE_NAMES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
-
-
-def _find_compose(rd: Path) -> Path | None:
-    for name in _COMPOSE_NAMES:
-        if (rd / name).is_file():
-            return rd / name
-    return None
-
-
-def detect_build_mode(rd: Path) -> str:
-    if _find_compose(rd):
-        return "compose"
-    if (rd / "Dockerfile").is_file():
-        return "dockerfile"
-    return "buildpack"
-
-
-def _label_value(svc: dict[str, Any], key: str) -> str | None:
-    labels = svc.get("labels")
-    if isinstance(labels, dict):
-        v = labels.get(key)
-        return str(v) if v is not None else None
-    if isinstance(labels, list):
-        for item in labels:
-            if isinstance(item, str) and item.startswith(f"{key}="):
-                return item.split("=", 1)[1]
-    return None
-
-
-def _pick_web_service(services: dict[str, dict]) -> str:
-    # 1. explicit opt-in
-    for name, svc in services.items():
-        if (_label_value(svc or {}, "homebox.expose") or "").lower() == "true":
-            return name
-    # 2. conventional name
-    for hint in _WEB_NAME_HINTS:
-        if hint in services:
-            return hint
-    # 3. first service that publishes/exposes a port
-    for name, svc in services.items():
-        if (svc or {}).get("ports") or (svc or {}).get("expose"):
-            return name
-    # 4. first service
-    return next(iter(services))
-
-
-def _detect_port(svc: dict[str, Any]) -> int:
-    explicit = _label_value(svc, "homebox.port")
-    if explicit and explicit.isdigit():
-        return int(explicit)
-    # First exposed container port.
-    for expose in (svc.get("expose") or []):
-        s = str(expose).split("/")[0]
-        if s.isdigit():
-            return int(s)
-    # First published port's container side ("8080:80" -> 80, "80" -> 80).
-    for p in (svc.get("ports") or []):
-        s = str(p).rsplit(":", 1)[-1].split("/")[0]
-        if s.isdigit():
-            return int(s)
-    return 80
-
-
-def _traefik_labels(slug: str, web_host: str, port: int) -> dict[str, str]:
+def _traefik_labels(router: str, host: str, port: int) -> dict[str, str]:
     return {
         "traefik.enable": "true",
-        f"traefik.http.routers.{slug}.rule": f"Host(`{web_host}`)",
-        f"traefik.http.routers.{slug}.entrypoints": "web",
-        f"traefik.http.services.{slug}.loadbalancer.server.port": str(port),
+        f"traefik.http.routers.{router}.rule": f"Host(`{host}`)",
+        f"traefik.http.routers.{router}.entrypoints": "web",
+        f"traefik.http.services.{router}.loadbalancer.server.port": str(port),
     }
 
 
@@ -204,9 +138,7 @@ def _apply_labels(svc: dict[str, Any], new: dict[str, str]) -> None:
 
 
 def _attach_network(svc: dict[str, Any]) -> None:
-    """Add traefik-net to a service WITHOUT dropping its existing networks. A
-    service with no `networks` key implicitly joins `default`; once we add an
-    explicit list it would lose that, so re-add `default` too."""
+    """Add traefik-net to a service WITHOUT dropping its existing networks."""
     nets = svc.get("networks")
     if nets is None:
         names = ["default"]
@@ -219,10 +151,52 @@ def _attach_network(svc: dict[str, Any]) -> None:
     svc["networks"] = names
 
 
-def neutralize_compose(rd: Path, slug: str, web_host: str) -> tuple[Path, str]:
-    """Transform the user's compose into a Homebox-routable one. Returns
-    (generated_path, web_service_name)."""
-    src = _find_compose(rd)
+def _merge_env(svc: dict[str, Any], extra: dict[str, str]) -> None:
+    """Merge env vars into a compose service, normalizing to the dict form."""
+    if not extra:
+        return
+    env = svc.get("environment")
+    merged: dict[str, str] = {}
+    if isinstance(env, dict):
+        merged = {str(k): ("" if v is None else str(v)) for k, v in env.items()}
+    elif isinstance(env, list):
+        for item in env:
+            if isinstance(item, str) and "=" in item:
+                k, v = item.split("=", 1)
+                merged[k] = v
+            elif isinstance(item, str):
+                merged[item] = ""
+    merged.update(extra)
+    svc["environment"] = merged
+
+
+def _router_name(project_name: str, label: str) -> str:
+    return f"{project_name}-{label}" if label else project_name
+
+
+def _route_plan(project: Project, env: Environment, domain_name: str,
+                detected: list[dissect.DetectedService]) -> dict[str, dict]:
+    """Map compose-service-name -> {public, host, port, label} for this env."""
+    plan: dict[str, dict] = {}
+    for d in detected:
+        host = None
+        if d.is_public:
+            label = d.subdomain_label
+            host = f"{urls.host_label(project.name, label, env.slug_suffix)}.{domain_name}"
+        plan[d.name] = {
+            "public": d.is_public,
+            "host": host,
+            "port": d.internal_port or 80,
+            "label": d.subdomain_label,
+        }
+    return plan
+
+
+def _transform_compose(rd: Path, project: Project, env: Environment, domain_name: str,
+                       detected: list[dissect.DetectedService],
+                       user_env: dict[str, dict[str, str]]) -> tuple[Path, dict[str, dict]]:
+    """Rewrite the user's compose into a Homebox-routable one for this env."""
+    src = find_compose(rd)
     if not src:
         raise DeployError("no compose file found")
     data = yaml.safe_load(src.read_text()) or {}
@@ -230,16 +204,20 @@ def neutralize_compose(rd: Path, slug: str, web_host: str) -> tuple[Path, str]:
     if not services:
         raise DeployError("compose file declares no services")
 
-    web = _pick_web_service(services)
-    port = _detect_port(services[web] or {})
+    plan = _route_plan(project, env, domain_name, detected)
+    auto_by_name = {d.name: d.auto_env for d in detected}
 
-    for svc in services.values():
-        if isinstance(svc, dict):
-            svc.pop("ports", None)  # never publish host ports — avoids conflicts
-
-    web_svc = services[web]
-    _attach_network(web_svc)
-    _apply_labels(web_svc, _traefik_labels(slug, web_host, port))
+    for name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        svc.pop("ports", None)  # never publish host ports — avoids conflicts
+        # inject env: auto-wired connection vars first, then user overrides
+        _merge_env(svc, auto_by_name.get(name, {}))
+        _merge_env(svc, user_env.get(name, {}))
+        info = plan.get(name)
+        if info and info["public"] and info["host"]:
+            _attach_network(svc)
+            _apply_labels(svc, _traefik_labels(_router_name(project.name, info["label"]), info["host"], info["port"]))
 
     top = data.get("networks") or {}
     top[TRAEFIK_NET] = {"external": True}
@@ -248,50 +226,36 @@ def neutralize_compose(rd: Path, slug: str, web_host: str) -> tuple[Path, str]:
 
     out = rd / GENERATED_COMPOSE
     out.write_text(yaml.safe_dump(data, sort_keys=False))
-    return out, web
+    return out, plan
 
 
-def _write_generated(rd: Path, data: dict) -> Path:
+def _generate_compose(rd: Path, project: Project, env: Environment, domain_name: str,
+                      detected: list[dissect.DetectedService],
+                      user_env: dict[str, dict[str, str]], *, image: str | None) -> tuple[Path, dict[str, dict]]:
+    """Generate a one-service compose for Dockerfile/buildpack repos."""
+    d = detected[0]
+    port = d.internal_port or 8080
+    host = f"{urls.host_label(project.name, '', env.slug_suffix)}.{domain_name}"
+    web: dict[str, Any] = {
+        "restart": "unless-stopped",
+        "environment": {"PORT": str(port)},
+        "networks": ["default", TRAEFIK_NET],
+        "labels": _traefik_labels(_router_name(project.name, ""), host, port),
+    }
+    if image:
+        web["image"] = image
+    else:
+        web["build"] = d.source_ref or "."
+    _merge_env(web, user_env.get(d.name, {}))
+    data = {"services": {d.name: web}, "networks": {TRAEFIK_NET: {"external": True}}}
     out = rd / GENERATED_COMPOSE
     out.write_text(yaml.safe_dump(data, sort_keys=False))
-    return out
+    plan = {d.name: {"public": True, "host": host, "port": port, "label": ""}}
+    return out, plan
 
 
-def generate_compose_for_dockerfile(rd: Path, slug: str, web_host: str, port: int = 8080) -> tuple[Path, str]:
-    data = {
-        "services": {
-            "web": {
-                "build": ".",
-                "restart": "unless-stopped",
-                "environment": {"PORT": str(port)},
-                "networks": ["default", TRAEFIK_NET],
-                "labels": _traefik_labels(slug, web_host, port),
-            }
-        },
-        "networks": {TRAEFIK_NET: {"external": True}},
-    }
-    return _write_generated(rd, data), "web"
-
-
-def generate_compose_for_image(rd: Path, slug: str, image: str, web_host: str, port: int = 8080) -> tuple[Path, str]:
-    data = {
-        "services": {
-            "web": {
-                "image": image,
-                "restart": "unless-stopped",
-                "environment": {"PORT": str(port)},
-                "networks": ["default", TRAEFIK_NET],
-                "labels": _traefik_labels(slug, web_host, port),
-            }
-        },
-        "networks": {TRAEFIK_NET: {"external": True}},
-    }
-    return _write_generated(rd, data), "web"
-
-
-async def buildpack_build(rd: Path, slug: str) -> str:
-    """Build an image with Nixpacks. Returns the image tag."""
-    image = f"homebox-proj-{slug}-web:latest"
+async def _buildpack_build(rd: Path, project: Project, env: Environment) -> str:
+    image = f"homebox-proj-{project.name}-{env.name}:latest".lower()
     code, out = await _run(["nixpacks", "build", str(rd), "--name", image])
     if code:
         raise DeployError(
@@ -303,8 +267,10 @@ async def buildpack_build(rd: Path, slug: str) -> str:
 
 # ── Container discovery ──────────────────────────────────────────────────────
 
-async def _discover_web_container(stack: str, service: str) -> str:
+async def _discover_containers(stack: str) -> dict[str, str]:
+    """service name -> container name for a running stack."""
     code, out = await _run(["docker", "compose", "-p", stack, "ps", "--format", "json"], timeout=30)
+    mapping: dict[str, str] = {}
     if code == 0 and out.strip():
         rows: list[dict] = []
         try:
@@ -319,10 +285,9 @@ async def _discover_web_container(stack: str, service: str) -> str:
                     except json.JSONDecodeError:
                         pass
         for r in rows:
-            if r.get("Service") == service and r.get("Name"):
-                return r["Name"]
-    # Fallback to compose's default naming.
-    return f"{stack}-{service}-1"
+            if r.get("Service") and r.get("Name"):
+                mapping[r["Service"]] = r["Name"]
+    return mapping
 
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
@@ -333,24 +298,39 @@ def _touch(dep: Deployment, **fields: Any) -> None:
     dep.updated_at = datetime.utcnow()
 
 
+async def _user_env_by_service(session: AsyncSession, project: Project, env: Environment) -> dict[str, dict[str, str]]:
+    """User-set env vars (source='user'), keyed by service name, scoped to this
+    env or all envs."""
+    rows = (await session.execute(
+        select(ServiceEnvVar, Service.name)
+        .join(Service, ServiceEnvVar.service_id == Service.id)
+        .where(
+            Service.project_id == project.id,
+            ServiceEnvVar.source == "user",
+            (ServiceEnvVar.environment_id == None) | (ServiceEnvVar.environment_id == env.id),  # noqa: E711
+        )
+    )).all()
+    out: dict[str, dict[str, str]] = {}
+    for var, svc_name in rows:
+        out.setdefault(svc_name, {})[var.key] = var.value
+    return out
+
+
 async def run_deploy(deployment_id: int, *, trigger: str = "manual") -> None:
-    """Background entrypoint. Owns its OWN session — the request-scoped session is
-    already closed by the time this runs. Never raises."""
+    """Background entrypoint. Owns its OWN session. Never raises."""
     async with SessionLocal() as session:
         dep = await session.get(Deployment, deployment_id)
         if not dep:
             return
-        repo = await session.get(Repository, dep.repository_id)
-        org = await session.get(Organization, repo.organization_id) if repo and repo.organization_id else None
-        if not repo or not repo.project_slug or not org:
-            _touch(dep, status="failed", error="Repository, slug, or organization missing.")
+        env = await session.get(Environment, dep.environment_id)
+        project = await session.get(Project, env.project_id) if env else None
+        if not env or not project:
+            _touch(dep, status="failed", error="Environment or project missing.")
             await session.commit()
             return
-
-        slug = repo.project_slug
-        async with _lock_for(slug):
+        async with _lock_for(dep.stack_name):
             try:
-                await _do_deploy(session, dep, repo, org, slug)
+                await _do_deploy(session, dep, project, env)
             except DeployError as e:
                 _touch(dep, status="failed", error=str(e)[:8000])
                 await session.commit()
@@ -359,36 +339,49 @@ async def run_deploy(deployment_id: int, *, trigger: str = "manual") -> None:
                 await session.commit()
 
 
-async def _do_deploy(session: AsyncSession, dep: Deployment, repo: Repository,
-                     org: Organization, slug: str) -> None:
+async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, env: Environment) -> None:
+    # Resolve domain + integration explicitly (relationships aren't eagerly
+    # loaded on the background-task session, and async can't lazy-load them).
     primary = (await session.execute(
         select(Domain).where(Domain.is_primary == True)  # noqa: E712
     )).scalar_one_or_none()
-    if not primary:
-        raise DeployError("No primary domain configured. Add one under Domains first.")
-    web_host = f"{slug}.{primary.name}"
+    domain_obj = await session.get(Domain, project.domain_id) if project.domain_id else None
+    domain_name = domain_obj.name if domain_obj else (primary.name if primary else None)
+    if not domain_name:
+        raise DeployError("No domain configured. Set a primary domain (Routes) or assign one to this project.")
+    if not project.integration_id:
+        raise DeployError("Project has no source-control integration.")
+    integration = await _load_integration(session, project)
+    if not integration:
+        raise DeployError("Source-control integration not found.")
 
-    _touch(dep, status="cloning", url=f"https://{web_host}", error=None)
+    _touch(dep, status="cloning", error=None)
     await session.commit()
 
-    sha = await sync_source(repo, decrypted_pat(org))
-    rd = repo_dir(slug)
-    _touch(dep, status="building", commit_sha=sha)
+    token = decrypted_token(integration)
+    sha = await sync_source(project, env, token)
+    rd = repo_dir(project.name, env.name)
+
+    _touch(dep, status="dissecting", commit_sha=sha)
+    await session.commit()
+    detected = dissect.dissect(rd)
+    user_env = await _user_env_by_service(session, project, env)
+
+    _touch(dep, status="building")
     await session.commit()
 
-    mode = detect_build_mode(rd)
-    if mode == "compose":
-        compose_path, web_service = neutralize_compose(rd, slug, web_host)
-    elif mode == "dockerfile":
-        compose_path, web_service = generate_compose_for_dockerfile(rd, slug, web_host)
+    if find_compose(rd):
+        compose_path, plan = _transform_compose(rd, project, env, domain_name, detected, user_env)
+    elif (rd / "Dockerfile").is_file():
+        compose_path, plan = _generate_compose(rd, project, env, domain_name, detected, user_env, image=None)
     else:
-        image = await buildpack_build(rd, slug)
-        compose_path, web_service = generate_compose_for_image(rd, slug, image, web_host)
+        image = await _buildpack_build(rd, project, env)
+        compose_path, plan = _generate_compose(rd, project, env, domain_name, detected, user_env, image=image)
 
     _touch(dep, status="starting")
     await session.commit()
 
-    stack = stack_name(slug)
+    stack = dep.stack_name
     code, out = await _run(
         ["docker", "compose", "-p", stack, "-f", str(compose_path),
          "up", "-d", "--build", "--remove-orphans"],
@@ -398,14 +391,38 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, repo: Repository,
     if code:
         raise DeployError(f"docker compose up failed:\n{tail}")
 
-    web_container = await _discover_web_container(stack, web_service)
-    _touch(dep, status="running", web_container=web_container, log_tail=tail, error=None)
+    # Record per-service instances (container + URL).
+    containers = await _discover_containers(stack)
+    await session.execute(
+        ServiceInstance.__table__.delete().where(ServiceInstance.deployment_id == dep.id)
+    )
+    svc_rows = {
+        s.name: s for s in (await session.execute(
+            select(Service).where(Service.project_id == project.id)
+        )).scalars()
+    }
+    for name, info in plan.items():
+        url = f"https://{info['host']}" if info.get("public") and info.get("host") else None
+        session.add(ServiceInstance(
+            deployment_id=dep.id,
+            service_id=svc_rows[name].id if name in svc_rows else None,
+            service_name=name,
+            container_name=containers.get(name),
+            url=url,
+            status="running",
+        ))
+    _touch(dep, status="running", log_tail=tail, error=None)
     await session.commit()
 
 
-async def teardown_stack(slug: str) -> tuple[bool, str]:
-    """Stop + remove a project's containers and networks. Keeps named volumes
-    (no -v) so data survives a reconnect/redeploy. Best-effort."""
-    stack = stack_name(slug)
+async def _load_integration(session: AsyncSession, project: Project):
+    from .models import Integration
+    return await session.get(Integration, project.integration_id)
+
+
+async def teardown_stack(project_name: str, env_name: str) -> tuple[bool, str]:
+    """Stop + remove an environment's containers/networks. Keeps named volumes
+    (no -v) so data survives a redeploy. Best-effort."""
+    stack = f"homebox-proj-{project_name}-{env_name}".lower()
     code, out = await _run(["docker", "compose", "-p", stack, "down", "--remove-orphans"], timeout=120)
     return code == 0, out[-2000:]
