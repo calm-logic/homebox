@@ -252,6 +252,16 @@ class TokenBody(BaseModel):
     account_id: str | None = None
 
 
+def _tunnel_scope_hint(msg: str) -> str:
+    return (
+        f"This token can sign in but can't manage tunnels in the selected account ({msg}). "
+        "It's missing the 'Account · Cloudflare Tunnel · Edit' permission, or it's restricted to "
+        "a different account. Re-create the token from the pre-filled link, make sure "
+        "'Cloudflare Tunnel: Edit' is in the permission list, and set the account to 'All "
+        "accounts' (or this specific account)."
+    )
+
+
 @router.post("/token")
 async def set_cloudflare_token(
     body: TokenBody,
@@ -296,6 +306,19 @@ async def set_cloudflare_token(
         state["account_id"] = accounts[0].get("id")
         state["account_name"] = accounts[0].get("name") or ""
     # If multiple accounts and none chosen, leave unset — UI will prompt.
+
+    # Probe tunnel management on the resolved account BEFORE persisting. The
+    # checks above (verify + list_accounts) pass with read-only scopes, so this
+    # listing is what actually proves the token can do step 2 (create a tunnel) —
+    # otherwise a token missing 'Cloudflare Tunnel: Edit' or scoped to another
+    # account would be accepted here and only fail later, mid-onboarding.
+    if state.get("account_id"):
+        try:
+            await cf.list_tunnels(token, state["account_id"])
+        except cf.CloudflareError as e:
+            if e.status in (401, 403) or "auth" in str(e).lower():
+                raise HTTPException(400, _tunnel_scope_hint(str(e)))
+            # Non-auth (transient / rate limit): don't block the connect on it.
 
     await cf.save_state(session, state)
 
