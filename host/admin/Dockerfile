@@ -6,6 +6,12 @@ RUN npm install --no-audit --no-fund --legacy-peer-deps
 COPY frontend /build
 RUN npm run build
 
+# ---- cloudflared (browser "Connect with Cloudflare" login flow) ----
+# We drive `cloudflared tunnel login` as a subprocess to run Cloudflare's own
+# browser authorize→cert.pem transfer, then extract the embedded API token
+# (see app/cf_login.py). Official static binary, copied into the runtime below.
+FROM cloudflare/cloudflared:latest AS cloudflared
+
 # ---- Python runtime ----
 FROM python:3.12-slim AS runtime
 
@@ -50,6 +56,8 @@ RUN pip install --no-cache-dir \
     "bcrypt>=4.2" \
     "itsdangerous>=2.2" \
     "pyyaml>=6.0"
+
+COPY --from=cloudflared /usr/local/bin/cloudflared /usr/local/bin/cloudflared
 
 COPY app /srv/app
 COPY --from=frontend /build/dist /srv/static_spa

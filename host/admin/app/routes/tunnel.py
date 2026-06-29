@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import cloudflare as cf
+from .. import cf_login
 from ..auth import require_session_api
 from ..db import get_session
 from ..models import Domain, Setting, UptimeSample
@@ -262,13 +263,14 @@ def _missing_scope_hint(missing: list[str]) -> str:
     )
 
 
-@router.post("/token")
-async def set_cloudflare_token(
-    body: TokenBody,
-    user: str = Depends(require_session_api),
-    session: AsyncSession = Depends(get_session),
-):
-    token = body.token.strip()
+async def _validate_and_store_token(
+    session: AsyncSession, token: str, account_id: str | None = None,
+) -> dict[str, Any]:
+    """Verify a Cloudflare token, resolve its account, probe the scopes Homebox
+    needs, and persist it. Shared by the paste endpoint and the browser-login
+    completion (the cert.pem token is a normal account-scoped token). Raises
+    HTTPException with a precise message on any problem."""
+    token = token.strip()
     if not token:
         raise HTTPException(400, "API token is required")
 
@@ -276,7 +278,6 @@ async def set_cloudflare_token(
         verify = await cf.verify_token(token)
     except cf.CloudflareError as e:
         raise HTTPException(400, f"Token rejected by Cloudflare: {e}")
-
     if (verify.get("status") or "").lower() != "active":
         raise HTTPException(400, "Token is not active. Generate a new token in the Cloudflare dashboard.")
 
@@ -288,14 +289,12 @@ async def set_cloudflare_token(
             f"Token can't list accounts ({e}). Ensure the token has 'Account Settings: Read' "
             "in addition to Tunnel and DNS permissions.",
         )
-
     if not accounts:
         raise HTTPException(400, "Token has no accessible Cloudflare accounts.")
 
     state = await cf.load_state(session)
     cf.store_token(state, token)
 
-    account_id = body.account_id
     if account_id:
         match = next((a for a in accounts if a.get("id") == account_id), None)
         if not match:
@@ -339,6 +338,75 @@ async def set_cloudflare_token(
         "account_id": state.get("account_id"),
         "account_name": state.get("account_name"),
     }
+
+
+@router.post("/token")
+async def set_cloudflare_token(
+    body: TokenBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    return await _validate_and_store_token(session, body.token, body.account_id)
+
+
+# ───── Browser "Connect with Cloudflare" (cloudflared login) ──────────────────
+
+
+@router.get("/cloudflare/login/available")
+async def cf_login_available(user: str = Depends(require_session_api)):
+    """Whether the browser-login flow can run (cloudflared binary present)."""
+    return {"available": cf_login.available()}
+
+
+@router.post("/cloudflare/login/start")
+async def cf_login_start(user: str = Depends(require_session_api)):
+    """Begin the browser flow: returns the Cloudflare authorize URL to open.
+    cloudflared keeps polling Cloudflare for the cert in the background."""
+    try:
+        return await cf_login.start()
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+
+
+class LoginPollBody(BaseModel):
+    session_id: str
+
+
+@router.post("/cloudflare/login/poll")
+async def cf_login_poll(
+    body: LoginPollBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Poll the in-flight browser login. On 'ready', extract the token from the
+    delivered cert.pem, validate + persist it (same path as a pasted token), and
+    return the connected account."""
+    result = await cf_login.poll(body.session_id)
+    status = result.get("status")
+    if status != "ready":
+        return result  # unknown | pending | failed | expired
+
+    parsed = cf.parse_cert_token(result.get("cert_pem") or "")
+    if not parsed:
+        cf_login.cancel(body.session_id)
+        raise HTTPException(500, "Cloudflare returned a certificate without an API token.")
+
+    try:
+        persisted = await _validate_and_store_token(
+            session, parsed["apiToken"], parsed.get("accountID")
+        )
+    finally:
+        cf_login.finalize(body.session_id)
+
+    return {"status": "connected", **persisted}
+
+
+@router.post("/cloudflare/login/cancel")
+async def cf_login_cancel(
+    body: LoginPollBody,
+    user: str = Depends(require_session_api),
+):
+    return cf_login.cancel(body.session_id)
 
 
 @router.delete("/token")

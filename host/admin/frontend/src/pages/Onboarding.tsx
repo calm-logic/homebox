@@ -15,6 +15,7 @@ import { useNavigate } from "react-router-dom";
 import { Cloud, ExternalLink, CheckCircle2, ArrowRight, AlertTriangle } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { useToast } from "../lib/toast";
+import { useCloudflareLogin } from "../lib/useCloudflareLogin";
 import { Logo } from "../components/Logo";
 import type {
   CloudflareAccount,
@@ -147,44 +148,41 @@ function Step({
 function Step1Connect() {
   const qc = useQueryClient();
   const toast = useToast();
-  const [revealed, setRevealed] = useState(false);
+  const [mode, setMode] = useState<"choose" | "token">("choose");
   const [token, setToken] = useState("");
   const [accounts, setAccounts] = useState<CloudflareAccount[]>([]);
   const [accountId, setAccountId] = useState("");
+
+  const onConnected = () => {
+    qc.invalidateQueries({ queryKey: ["onboarding"] });
+    qc.invalidateQueries({ queryKey: ["tunnel"] });
+    toast.show("Cloudflare connected", "ok");
+  };
+
+  const browser = useCloudflareLogin(onConnected);
 
   const submit = useMutation({
     mutationFn: (body: { token: string; account_id?: string }) =>
       api.post<SetTokenResponse>("/api/tunnel/token", body),
     onSuccess: (resp) => {
-      if (resp.account_id) {
-        qc.invalidateQueries({ queryKey: ["onboarding"] });
-        qc.invalidateQueries({ queryKey: ["tunnel"] });
-        toast.show("Cloudflare connected", "ok");
-      } else {
-        setAccounts(resp.accounts);
-        toast.show("Pick which Cloudflare account to use", "ok");
-      }
+      if (resp.account_id) onConnected();
+      else { setAccounts(resp.accounts); toast.show("Pick which Cloudflare account to use", "ok"); }
     },
     onError: (e) => toast.show(String(e), "fail"),
   });
 
-  // Connect + test as soon as a token is provided (on paste, or Enter).
   function connectWith(raw: string) {
     const t = raw.trim();
     if (!t || submit.isPending) return;
     setToken(t);
     submit.mutate({ token: t });
   }
-
   function onPaste(e: React.ClipboardEvent<HTMLInputElement>) {
     const pasted = e.clipboardData.getData("text");
-    if (pasted.trim()) {
-      e.preventDefault();
-      connectWith(pasted);
-    }
+    if (pasted.trim()) { e.preventDefault(); connectWith(pasted); }
   }
 
-  // ── Account picker (token accepted but the token sees >1 account) ──
+  // ── Account picker (token sees >1 account) ──
   if (accounts.length > 0) {
     return (
       <form onSubmit={e => { e.preventDefault(); submit.mutate({ token, account_id: accountId || undefined }); }}>
@@ -208,54 +206,95 @@ function Step1Connect() {
     );
   }
 
-  // ── Initial: a single button, nothing else ──
-  if (!revealed) {
+  // ── Browser flow in progress ──
+  if (browser.phase === "starting" || browser.phase === "waiting" || browser.phase === "connected") {
+    return <BrowserLoginWaiting browser={browser} />;
+  }
+
+  // ── Token paste fallback ──
+  if (mode === "token") {
     return (
-      <div className="btn-row">
-        <button className="btn primary" type="button" onClick={() => setRevealed(true)}>
-          <Cloud size={14} /> Connect with Cloudflare
-        </button>
-      </div>
+      <form onSubmit={e => { e.preventDefault(); connectWith(token); }}>
+        <div className="btn-row" style={{ marginBottom: "0.75rem" }}>
+          <a className="btn" href={CF_TOKEN_TEMPLATE_URL} target="_blank" rel="noopener">
+            <ExternalLink size={14} /> Generate token on Cloudflare
+          </a>
+          <span className="dim">opens the Create Token page</span>
+        </div>
+        <div className="field">
+          <div className="lbl">Required permissions — confirm all four before creating the token</div>
+          <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.1rem", display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "0.85rem" }}>
+            <li><code>Account · Cloudflare Tunnel · Edit</code> <span className="dim">— the pre-fill often drops this one, add it manually</span></li>
+            <li><code>Zone · DNS · Edit</code></li>
+            <li><code>Zone · Zone · Read</code></li>
+            <li><code>Account · Account Settings · Read</code></li>
+          </ul>
+          <span className="hint">Set <strong>Account Resources</strong> to <em>All accounts</em> (or your account).</span>
+        </div>
+        <div className="field">
+          <label className="lbl">Cloudflare API token</label>
+          <input
+            type="password" value={token} autoFocus
+            onChange={e => setToken(e.target.value)} onPaste={onPaste}
+            placeholder="Paste your scoped token — it connects and verifies automatically"
+            disabled={submit.isPending}
+          />
+          <span className="hint">
+            {submit.isPending
+              ? "Verifying scopes with Cloudflare…"
+              : "Stored encrypted at rest. We check the scopes the moment you paste."}
+          </span>
+          {submit.isPending && <span className="spinner" />}
+        </div>
+        <div className="btn-row" style={{ marginTop: "0.5rem" }}>
+          <button className="btn ghost" type="button" onClick={() => setMode("choose")}>← Back</button>
+        </div>
+      </form>
     );
   }
 
-  // ── Revealed: paste the token → it connects + tests automatically ──
+  // ── Initial: one button (browser flow), token paste offered as a fallback ──
   return (
-    <form onSubmit={e => { e.preventDefault(); connectWith(token); }}>
-      <div className="btn-row" style={{ marginBottom: "0.75rem" }}>
-        <a className="btn" href={CF_TOKEN_TEMPLATE_URL} target="_blank" rel="noopener">
-          <ExternalLink size={14} /> Generate token on Cloudflare
-        </a>
-        <span className="dim">opens the Create Token page</span>
+    <div>
+      <div className="btn-row">
+        <button className="btn primary" type="button" onClick={() => browser.start()}>
+          <Cloud size={14} /> Connect with Cloudflare
+        </button>
       </div>
+      <p className="dim" style={{ marginTop: "0.6rem", marginBottom: 0 }}>
+        Opens Cloudflare in a new tab to authorize — no token to create or paste.{" "}
+        <a href="#" onClick={e => { e.preventDefault(); setMode("token"); }}>Paste an API token instead</a>
+      </p>
+      {browser.phase === "error" && (
+        <p className="dim" style={{ marginTop: "0.5rem", color: "var(--fail, #d33)" }}>
+          {browser.error} <a href="#" onClick={e => { e.preventDefault(); setMode("token"); }}>Use a token instead</a>
+        </p>
+      )}
+    </div>
+  );
+}
 
-      <div className="field">
-        <div className="lbl">Required permissions — confirm all four before creating the token</div>
-        <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.1rem", display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "0.85rem" }}>
-          <li><code>Account · Cloudflare Tunnel · Edit</code> <span className="dim">— the pre-fill often drops this one, add it manually</span></li>
-          <li><code>Zone · DNS · Edit</code></li>
-          <li><code>Zone · Zone · Read</code></li>
-          <li><code>Account · Account Settings · Read</code></li>
-        </ul>
-        <span className="hint">Set <strong>Account Resources</strong> to <em>All accounts</em> (or your account).</span>
+function BrowserLoginWaiting({ browser }: { browser: ReturnType<typeof useCloudflareLogin> }) {
+  return (
+    <div className="card">
+      <div className="row">
+        <span className="spinner" />
+        <strong>Waiting for you to authorize in Cloudflare…</strong>
       </div>
-
-      <div className="field">
-        <label className="lbl">Cloudflare API token</label>
-        <input
-          type="password" value={token} autoFocus
-          onChange={e => setToken(e.target.value)} onPaste={onPaste}
-          placeholder="Paste your scoped token — it connects and verifies automatically"
-          disabled={submit.isPending}
-        />
-        <span className="hint">
-          {submit.isPending
-            ? "Verifying scopes with Cloudflare…"
-            : "Stored encrypted at rest. We check the scopes the moment you paste — if any are missing you'll see exactly which."}
-        </span>
-        {submit.isPending && <span className="spinner" />}
+      <p className="dim" style={{ margin: "0.6rem 0 0.75rem" }}>
+        A Cloudflare tab should have opened. Pick the account/zone and click <strong>Authorize</strong> —
+        this page connects automatically once you do.
+      </p>
+      <div className="btn-row">
+        {browser.url && (
+          <a className="btn primary" href={browser.url} target="_blank" rel="noopener">
+            <ExternalLink size={14} /> Open Cloudflare authorize page
+          </a>
+        )}
+        <span className="spacer" />
+        <button className="btn ghost" type="button" onClick={() => browser.reset()}>Cancel</button>
       </div>
-    </form>
+    </div>
   );
 }
 

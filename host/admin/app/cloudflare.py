@@ -13,6 +13,8 @@ Token scopes the UI suggests:
   Zone    · Zone · Read
 """
 
+import base64
+import json
 from datetime import datetime
 from typing import Any
 
@@ -25,6 +27,43 @@ from .models import Integration
 
 API = "https://api.cloudflare.com/client/v4"
 PROVIDER = "cloudflare"
+
+
+# ───── cloudflared cert.pem token extraction ──────────────────────────────────
+#
+# `cloudflared tunnel login` writes a cert.pem whose `ARGO TUNNEL TOKEN` PEM
+# block is base64-encoded JSON: {"zoneID", "accountID", "apiToken"}. The apiToken
+# is a normal account-scoped Bearer token (verified by spike to be a drop-in for
+# every REST call we make), so the browser-login flow reuses the same state as a
+# pasted token — see app/cf_login.py + routes/tunnel.py.
+
+_TOKEN_BEGIN = "BEGIN ARGO TUNNEL TOKEN-----"
+_TOKEN_END = "-----END ARGO TUNNEL TOKEN"
+
+
+def parse_cert_token(pem_text: str) -> dict[str, Any] | None:
+    """Extract {apiToken, accountID, zoneID} from a cloudflared cert.pem, or None
+    if the block/token isn't present."""
+    start = pem_text.find(_TOKEN_BEGIN)
+    if start == -1:
+        return None
+    start = pem_text.find("\n", start) + 1
+    end = pem_text.find(_TOKEN_END, start)
+    if end == -1:
+        return None
+    b64 = "".join(pem_text[start:end].split())
+    try:
+        data = json.loads(base64.b64decode(b64))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    token = data.get("apiToken") or data.get("api_token")
+    if not token:
+        return None
+    return {
+        "apiToken": token,
+        "accountID": data.get("accountID") or data.get("account_id"),
+        "zoneID": data.get("zoneID") or data.get("zone_id"),
+    }
 
 
 # ───── DB-backed credentials/state ────────────────────────────────────────────
