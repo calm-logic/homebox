@@ -11,7 +11,9 @@ else
 SUDO :=
 endif
 
-.PHONY: help host configure reset-password admin admin-logs admin-down admin-reset boot enable-boot cli init
+.PHONY: help host configure reset-password admin admin-logs admin-down admin-reset reonboard boot enable-boot cli init
+
+DB_CONTAINER := homebox-admin-db
 
 help:
 	@echo "Homebox targets:"
@@ -22,6 +24,7 @@ help:
 	@echo "  make admin-logs  Tail admin app logs"
 	@echo "  make admin-down  Stop the admin app stack"
 	@echo "  make admin-reset WIPES the admin DB (down -v) then rebuilds — you re-onboard after"
+	@echo "  make reonboard   Clear the Cloudflare connection so onboarding runs again (keeps projects/identities)"
 	@echo "  make boot        Bring the whole stack up now (same script systemd runs on boot)"
 	@echo "  make enable-boot Install + enable the systemd unit so Homebox auto-starts on boot"
 	@echo "  make cli         Install the developer CLI from ./homebox-infra/cli"
@@ -61,6 +64,15 @@ admin-reset:
 	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' homebox-infra/admin/ /opt/homebox/admin/
 	$(SUDO) bash -c 'cd /opt/homebox/admin && docker compose --env-file .env down -v && docker compose --env-file .env up -d --build'
 	@echo ">>> Admin reset complete. Sign in and re-run onboarding."
+
+reonboard:
+	@echo ">>> Clearing the Cloudflare connection so the onboarding wizard runs again."
+	@echo "    (Keeps GitHub integrations, projects, and identities. The Cloudflare-side"
+	@echo "     tunnel is left in place and re-adopted on the next onboarding run.)"
+	$(SUDO) docker exec $(DB_CONTAINER) psql -U homebox_admin -d homebox_admin -c \
+	  "DELETE FROM integrations WHERE provider='cloudflare'; DELETE FROM settings WHERE key='admin_domain';"
+	-$(SUDO) docker rm -f homebox-cloudflared
+	@echo ">>> Done. Reload the admin UI — onboarding will reappear."
 
 boot:
 	$(SUDO) bash $(PROVISIONER_DIR)/homebox-boot.sh
