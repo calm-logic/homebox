@@ -470,7 +470,7 @@ function ConnectTokenModal({ open, onClose }: { open: boolean; onClose: () => vo
             <Cloud size={14} /> Connect with Cloudflare
           </button>
           <p className="dim" style={{ marginTop: "0.6rem", marginBottom: 0 }}>
-            Opens Cloudflare in a new tab to authorize — no token to create or paste.{" "}
+            Opens Cloudflare in a new tab to authorize.{" "}
             <a href="#" onClick={e => { e.preventDefault(); setShowToken(true); }}>Paste an API token instead</a>
           </p>
           {browser.phase === "error" && (
