@@ -96,8 +96,9 @@ async def dissect_project(session: AsyncSession, project: Project) -> list[disse
             session.add(svc)
             await session.flush()
         svc.kind = d.kind
-        svc.source_type = d.source_type
-        svc.source_ref = d.source_ref
+        # source_type = how it's built; source_ref = build dir (for display).
+        svc.source_type = d.build_type or d.origin
+        svc.source_ref = d.build_dir
         svc.is_public = d.is_public
         svc.subdomain_label = d.subdomain_label
         svc.internal_port = d.internal_port
