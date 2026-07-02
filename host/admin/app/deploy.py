@@ -282,7 +282,9 @@ async def _assemble_stack(
 async def _generate_build_service(
     rd: Path, project: Project, env: Environment, d: dissect.DetectedService,
 ) -> dict[str, Any]:
-    """Produce the compose service dict for a build-origin (source) app."""
+    """Produce the compose service dict for a build-origin (source) app. Every
+    non-static app gets PORT=<assigned> injected and Traefik routes to that same
+    port (apps are assumed to read $PORT), so no port guessing is needed."""
     svc: dict[str, Any] = {"restart": "unless-stopped"}
     bt = d.build_type
     if bt == "image" and d.image:
@@ -296,7 +298,9 @@ async def _generate_build_service(
             svc["build"]["dockerfile"] = d.dockerfile
     else:  # nixpacks — pre-built into an image tag
         svc["image"] = await _nixpacks_build(rd, project, env, d)
-        svc["environment"] = {"PORT": str(d.internal_port or 8080)}
+    # nginx (static) is fixed on 80; everything else listens on its assigned PORT.
+    if bt != "static" and d.internal_port:
+        svc["environment"] = {"PORT": str(d.internal_port)}
     if d.command:
         svc["command"] = d.command
     return svc

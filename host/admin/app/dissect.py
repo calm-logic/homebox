@@ -81,6 +81,7 @@ class DetectedService:
     build_command: str | None = None
     build_image: str | None = None  # builder base image for static (default node)
     command: str | None = None
+    port_explicit: bool = False     # port came from the manifest, not assigned
 
     @property
     def is_app(self) -> bool:
@@ -211,6 +212,7 @@ def _from_manifest(m: mf.ManifestService) -> DetectedService:
         is_public=bool(m.public) if m.public is not None else False,
         subdomain_label=(m.subdomain or ""),
         internal_port=m.port or (80 if build_type == "static" else None),
+        port_explicit=m.port is not None,
         depends_on=m.depends_on, env_template=m.env,
         build_type=build_type, build_dir=m.dir, dockerfile=m.dockerfile,
         image=m.image, static_dir=m.static_dir, build_command=m.build_command,
@@ -309,6 +311,27 @@ def _assign_public(services: dict[str, DetectedService], manifest: mf.Manifest |
             used.add(s.subdomain_label)
 
 
+_PORT_BASE = 8080
+
+
+def _assign_ports(services: dict[str, DetectedService]) -> None:
+    """Assign each source-built app service a canonical listen port and let the
+    deploy engine inject PORT=<that> (apps are assumed to honour $PORT). Static
+    SPAs are always served by nginx on 80. Manifest-specified ports are kept.
+    Compose-origin services keep their own declared ports."""
+    nxt = _PORT_BASE
+    for s in services.values():
+        if s.origin != "build":
+            continue
+        if s.build_type == "static":
+            s.internal_port = 80
+            continue
+        if s.port_explicit and s.internal_port:
+            continue
+        s.internal_port = nxt
+        nxt += 1
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def dissect(rd: Path) -> list[DetectedService]:
@@ -340,4 +363,5 @@ def dissect(rd: Path) -> list[DetectedService]:
 
     _wire_env(services)
     _assign_public(services, manifest)
+    _assign_ports(services)
     return list(services.values())
