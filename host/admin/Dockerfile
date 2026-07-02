@@ -22,9 +22,11 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /srv
 
 # curl/ca-certificates/git: base + cloning project repos.
-# Docker CLI + compose plugin: the admin shells out to `docker compose` against
-# the mounted socket to deploy projects (see app/deploy.py). Debian ships neither
-# the v2 compose plugin nor a client-only docker package, so install both from
+# Docker CLI + compose + buildx plugins: the admin shells out to `docker compose`
+# and (via Nixpacks) `docker build` against the mounted socket to deploy projects
+# (see app/deploy.py). Both use BuildKit, so the buildx plugin is required —
+# without it Nixpacks/compose builds fail with "BuildKit is enabled but the
+# buildx component is missing". Debian ships none of these, so install from
 # Docker's official apt repo. We need only the CLIENT — the daemon is the host's,
 # reached via the bind-mounted /var/run/docker.sock.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
@@ -35,7 +37,7 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
         > /etc/apt/sources.list.d/docker.list \
     && apt-get update -qq \
-    && apt-get install -y -qq --no-install-recommends docker-ce-cli docker-compose-plugin \
+    && apt-get install -y -qq --no-install-recommends docker-ce-cli docker-compose-plugin docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
 # Nixpacks: infers a build (Dockerfile + image) for repos that ship neither a
