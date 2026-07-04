@@ -420,6 +420,9 @@ async def initial_sync(session: AsyncSession, state: dict[str, Any]) -> bool:
         state["last_sync_at"] = datetime.utcnow().isoformat()
         await save_cluster(session, state)
         log.info("initial cluster sync from %s complete: %s", peer["peer_url"], summary)
+        # admin_domain just synced in — rewrite the Traefik file so THIS node
+        # serves the admin hostname too (tunnel traffic can land on any node).
+        await ensure_peer_route(session)
         await reconcile_deployments(session, export)
         return True
     return False
@@ -595,6 +598,10 @@ async def cluster_loop() -> None:
                     elif cycle % RECONCILE_EVERY == 0:
                         await reconcile_from_peers(session, state)
                         await ensure_db_replication(session, state)
+                        # Keep the admin/peer Traefik routes current (cheap,
+                        # idempotent — heals a route file written before
+                        # admin_domain was known).
+                        await ensure_peer_route(session)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — the loop must survive anything

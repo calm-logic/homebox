@@ -311,6 +311,9 @@ async def _assemble_stack(
         if d.origin == "compose":
             svc = dict(compose_services.get(d.name) or {})
             svc.pop("ports", None)  # never publish host ports
+            # PaaS default: stacks must survive daemon restarts. Only an
+            # explicit user-set policy overrides this.
+            svc.setdefault("restart", "unless-stopped")
         else:
             svc = await _generate_build_service(rd, project, env, d)
 
