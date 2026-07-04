@@ -520,7 +520,15 @@ async def ensure_db_replication(session: AsyncSession, state: dict[str, Any]) ->
         rd = repo_dir(project.name, env.name)
         if not cluster_db.cluster_db_enabled(rd):
             continue
+        secret = cluster_secret(state)
         for info in cluster_db.infos_from_compose(rd):
+            # The compose env carries the password derived at deploy time; the
+            # cluster secret may have changed since (cluster re-created).
+            # Always reconcile against the CURRENT derivation — 1b in
+            # ensure_replication rotates the local role to match.
+            info["repl_password"] = cluster_db.derive_repl_password(
+                secret, project.name, env.name, info["service"],
+            )
             try:
                 res = await cluster_db.ensure_replication(
                     stack=stack, info=info, state=state, self_node_id=node_id,
@@ -529,6 +537,9 @@ async def ensure_db_replication(session: AsyncSession, state: dict[str, Any]) ->
                     log.info("cluster db reconcile %s/%s: +tables %s +subs %s",
                              project.name, env.name,
                              res["tables_added"], res["subs_created"])
+                for err in res.get("errors") or []:
+                    log.warning("cluster db reconcile %s/%s: %s",
+                                project.name, env.name, err)
             except Exception:  # noqa: BLE001
                 log.exception("cluster db reconcile failed for %s", stack)
 

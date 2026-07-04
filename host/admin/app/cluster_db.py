@@ -384,6 +384,18 @@ async def ensure_replication(
         result["errors"].append(f"spock node not ready on {container}: {out[:200]}")
         return result
 
+    # 1b. keep the local replication role's password at the CURRENT derived
+    # value — the cluster secret can change (cluster re-created / migrated),
+    # and the init script only sets it on first boot. Peers derive the same
+    # value, so their subscription DSNs authenticate once this converges.
+    code, out = await _psql(
+        container, admin, pw, db,
+        f"ALTER ROLE \"{info['repl_user']}\" WITH LOGIN REPLICATION "
+        f"PASSWORD '{info['repl_password']}';",
+    )
+    if code != 0:
+        result["errors"].append(f"repl role rotate: {out[:200]}")
+
     # 2. add public tables to the replication set (PK tables → default,
     #    PK-less tables → insert-only)
     # spock.tables lists every table; set_name is NULL until it joins a repset.
