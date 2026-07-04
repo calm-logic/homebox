@@ -8,19 +8,21 @@ from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import select, update
 
-from . import metrics, monitor
+from . import clusterlib, metrics, monitor
 from .auth import RequiresLogin
 from .config import settings
 from .db import Base, engine, SessionLocal
 from .models import Domain, Deployment, Identity
 from .routes import (
     auth as auth_routes,
+    cluster as cluster_routes,
     dashboard,
     domains,
     identities as identities_routes,
     integrations,
     oauth as oauth_routes,
     onboarding,
+    peer as peer_routes,
     projects,
     runner,
     services,
@@ -128,6 +130,9 @@ async def lifespan(app: FastAPI):
         await conn.exec_driver_sql(
             "ALTER TABLE domains ADD COLUMN IF NOT EXISTS name_servers JSON"
         )
+        await conn.exec_driver_sql(
+            "ALTER TABLE deployments ADD COLUMN IF NOT EXISTS node_id VARCHAR(64)"
+        )
     settings.projects_host_dir.mkdir(parents=True, exist_ok=True)
     await _fail_interrupted_deployments()
     await _seed_primary_domain()
@@ -136,11 +141,14 @@ async def lifespan(app: FastAPI):
     # The monitor's first cycle runs immediately (no initial sleep), so starting
     # it here also does the post-restart reconcile (relaunch cloudflared, etc.).
     health = monitor.start()
+    # Cluster heartbeat/sync loop (no-op while the node isn't in a cluster).
+    cluster_task = clusterlib.start()
     try:
         yield
     finally:
         await metrics.stop(sampler)
         await monitor.stop(health)
+        await clusterlib.stop(cluster_task)
 
 
 app = FastAPI(title="Homebox Admin", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")
@@ -160,6 +168,8 @@ app.include_router(oauth_routes.router)
 app.include_router(onboarding.router)
 app.include_router(identities_routes.router)
 app.include_router(theme.router)
+app.include_router(cluster_routes.router)
+app.include_router(peer_routes.router)
 
 
 @app.get("/api/healthz")

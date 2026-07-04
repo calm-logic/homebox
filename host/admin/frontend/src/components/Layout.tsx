@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LogOut, Moon, Sun, Globe, Boxes, Workflow, Users, Plug, Activity } from "lucide-react";
+import { LogOut, Moon, Sun, Globe, Boxes, Workflow, Users, Plug, Activity, Network } from "lucide-react";
 
 import { Logo } from "./Logo";
 import { Modal } from "./Modal";
@@ -43,6 +43,7 @@ export function Layout() {
           <NavLink to="/projects"><Boxes size={15} aria-hidden /> <span className="nav-label">Projects</span></NavLink>
           <NavLink to="/cicd"><Workflow size={15} aria-hidden /> <span className="nav-label">CI/CD</span></NavLink>
           <NavLink to="/identities"><Users size={15} aria-hidden /> <span className="nav-label">Identities</span></NavLink>
+          <NavLink to="/cluster"><Network size={15} aria-hidden /> <span className="nav-label">Cluster</span></NavLink>
           <NavLink to="/system"><Activity size={15} aria-hidden /> <span className="nav-label">System</span></NavLink>
         </nav>
         <div className="app-user">

@@ -351,10 +351,19 @@ def run_cloudflared_remote(
     return False, f"start failed: {code} {body[:200]!r}"
 
 
+# Internal hostname LAN peers use to reach this node's admin (the peer API)
+# through Traefik's already-exposed :80 — no extra published ports. Requests
+# carry this as their Host header; it resolves nowhere publicly.
+PEER_HOST = "homebox-peer.internal"
+
+
 def write_traefik_dynamic(routes: list[dict[str, Any]]) -> Path:
     """Rewrite /opt/homebox/traefik/dynamic_conf.yml with the admin route plus
     any additional `routes` from the admin DB. Each route is
-    {host, service_url, name}."""
+    {host, service_url, name}. The cluster peer-API route is always included."""
+    routes = [r for r in routes if r["name"] != "homebox-peer"] + [
+        {"name": "homebox-peer", "host": PEER_HOST, "service_url": "http://homebox-admin:8000"},
+    ]
     dyn = settings.homebox_base_dir / "traefik" / "dynamic_conf.yml"
     dyn.parent.mkdir(parents=True, exist_ok=True)
     lines = [

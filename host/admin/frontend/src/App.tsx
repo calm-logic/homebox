@@ -18,6 +18,7 @@ import { ServiceDetail } from "./pages/ServiceDetail";
 import { Integrations } from "./pages/Integrations";
 import { IntegrationDetail } from "./pages/IntegrationDetail";
 import { CICD } from "./pages/CICD";
+import { Cluster } from "./pages/Cluster";
 import { Identities } from "./pages/Identities";
 import { Onboarding } from "./pages/Onboarding";
 import { OAuthCallback } from "./pages/OAuthCallback";
@@ -43,7 +44,11 @@ function RequireOnboarded({ children }: { children: React.ReactNode }) {
   });
   // Render nothing during the first probe to avoid a redirect flicker.
   if (isLoading) return null;
-  if (data && !data.complete && location.pathname !== "/onboarding") {
+  // /cluster stays reachable pre-onboarding: a fresh node can join an existing
+  // cluster instead of being onboarded from scratch (it inherits the cluster's
+  // tunnel, domains and projects through the join sync).
+  const exempt = location.pathname === "/onboarding" || location.pathname === "/cluster";
+  if (data && !data.complete && !exempt) {
     return <Navigate to="/onboarding" replace />;
   }
   return <>{children}</>;
@@ -71,6 +76,7 @@ export function App() {
               <Route path="/projects/:projectId/deployments/:deploymentId" element={<DeploymentDetail />} />
               <Route path="/projects/:projectId/services/:serviceId" element={<ServiceDetail />} />
               <Route path="/cicd" element={<CICD />} />
+              <Route path="/cluster" element={<Cluster />} />
               <Route path="/identities" element={<Identities />} />
               {/* Legacy routes — pages were merged into the parents above. */}
               <Route path="/tunnel" element={<Navigate to="/domains" replace />} />

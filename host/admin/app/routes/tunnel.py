@@ -6,7 +6,6 @@ API. Set up by the admin's onboarding wizard; this module exposes the status
 + lifecycle endpoints the UI calls into.
 """
 
-import secrets
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -28,23 +27,14 @@ from ..host import (
 
 router = APIRouter(prefix="/api/tunnel")
 
-INSTALL_ID_KEY = "install_id"
-
 
 async def _get_install_id(session: AsyncSession) -> str:
-    """Return this Homebox install's stable random identifier, generating it
-    on first call. Used as `metadata.homebox_install_id` on every tunnel we
-    create so we can recognize our own on re-runs."""
-    row = (await session.execute(select(Setting).where(Setting.key == INSTALL_ID_KEY))).scalar_one_or_none()
-    if row and isinstance(row.value, dict) and row.value.get("value"):
-        return str(row.value["value"])
-    new_id = secrets.token_urlsafe(16)
-    if row is None:
-        session.add(Setting(key=INSTALL_ID_KEY, value={"value": new_id}))
-    else:
-        row.value = {"value": new_id}
-    await session.commit()
-    return new_id
+    """This install's stable random identifier — used as
+    `metadata.homebox_install_id` on every tunnel we create so we can recognize
+    our own on re-runs. Shared with clusterlib, where it doubles as the
+    cluster node id."""
+    from ..clusterlib import get_node_id
+    return await get_node_id(session)
 
 
 def _is_ours(tunnel: dict[str, Any], install_id: str) -> bool:

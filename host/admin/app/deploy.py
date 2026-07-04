@@ -456,15 +456,25 @@ async def run_deploy(deployment_id: int, *, trigger: str = "manual") -> None:
             _touch(dep, status="failed", error="Environment or project missing.")
             await session.commit()
             return
+        from . import clusterlib
+        dep.node_id = await clusterlib.get_node_id(session)
         async with _lock_for(dep.stack_name):
             try:
                 await _do_deploy(session, dep, project, env)
             except DeployError as e:
                 _touch(dep, status="failed", error=str(e)[:8000])
                 await session.commit()
+                return
             except Exception as e:  # noqa: BLE001 — never let a deploy crash the task
                 _touch(dep, status="failed", error=f"Unexpected error: {e}"[:8000])
                 await session.commit()
+                return
+        # Fan the deploy out to cluster peers — but never re-fan a deploy that
+        # itself arrived from a peer (that's how loops would start).
+        if dep.trigger != "cluster":
+            asyncio.get_event_loop().create_task(
+                clusterlib.fanout_deploy(project.name, env.name, dep.commit_sha)
+            )
 
 
 async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, env: Environment) -> None:

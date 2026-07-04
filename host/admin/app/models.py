@@ -208,6 +208,9 @@ class Deployment(Base):
     # blocked (checks failed/timed out — never built)
     status: Mapped[str] = mapped_column(String(32), default="queued")
     stack_name: Mapped[str] = mapped_column(String(255))
+    # Which cluster node ran this deploy (= install_id). Null on rows that
+    # predate clustering; single-node installs just see their own id.
+    node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     log_tail: Mapped[str | None] = mapped_column(Text, nullable=True)
