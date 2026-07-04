@@ -256,11 +256,14 @@ async def _nixpacks_build(rd: Path, project: Project, env: Environment, d: disse
 async def _assemble_stack(
     rd: Path, project: Project, env: Environment, domain_name: str,
     detected: list[dissect.DetectedService], user_env: dict[str, dict[str, str]],
+    cluster_ctx: dict[str, Any] | None = None,
 ) -> tuple[Path, dict[str, dict]]:
     """Build a single compose for the (project, env): compose-origin backing
     services reused as-is (ports stripped, joined to traefik-net), build-origin
     app services generated/built from source. Public services get Traefik labels
-    routing their derived host. Returns (compose_path, plan)."""
+    routing their derived host. With a cluster_ctx and a homebox.yaml cluster
+    opt-in, Postgres services are transformed for active-active replication
+    (app/cluster_db.py). Returns (compose_path, plan)."""
     apps = [d for d in detected if d.is_app]
     if not any(d.is_public for d in apps):
         raise DeployError(
@@ -302,6 +305,16 @@ async def _assemble_stack(
         else:
             svc = await _generate_build_service(rd, project, env, d)
 
+        cluster_db_info = None
+        if cluster_ctx and d.kind == "database" and d.origin == "compose":
+            from . import cluster_db
+            cluster_db_info = cluster_db.transform_db_service(
+                svc=svc, svc_name=d.name, rd=rd,
+                project_name=project.name, env_name=env.name,
+                state=cluster_ctx["state"], self_node_id=cluster_ctx["node_id"],
+                cluster_secret=cluster_ctx["secret"], top_volumes=top_volumes,
+            )
+
         _attach_network(svc)
         _merge_env(svc, d.auto_env)
         _merge_env(svc, user_env.get(d.name, {}))
@@ -322,6 +335,8 @@ async def _assemble_stack(
 
         services_out[d.name] = svc
         plan[d.name] = {"public": d.is_public, "host": host, "port": port, "label": d.subdomain_label}
+        if cluster_db_info:
+            plan[d.name]["cluster_db"] = cluster_db_info
 
     data: dict[str, Any] = {"services": services_out, "networks": {TRAEFIK_NET: {"external": True}}}
     if top_volumes:
@@ -510,9 +525,24 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
     _touch(dep, status="building")
     await session.commit()
 
+    # Cluster context: only when this node is in a synced cluster AND the repo
+    # opts in via homebox.yaml `cluster.enabled` — then Postgres services get
+    # the active-active treatment.
+    from . import cluster_db, clusterlib
+    cluster_ctx = None
+    cluster_state = await clusterlib.load_cluster(session)
+    if cluster_state and cluster_state.get("initial_sync_done") and cluster_db.cluster_db_enabled(rd):
+        cluster_ctx = {
+            "state": cluster_state,
+            "node_id": await clusterlib.get_node_id(session),
+            "secret": clusterlib.cluster_secret(cluster_state),
+        }
+
     # Assemble one stack: compose backing services + apps built from source
     # (Nixpacks/Dockerfile/static). Raises if no public app was detected.
-    compose_path, plan = await _assemble_stack(rd, project, env, domain_name, detected, user_env)
+    compose_path, plan = await _assemble_stack(
+        rd, project, env, domain_name, detected, user_env, cluster_ctx,
+    )
 
     _touch(dep, status="starting")
     await session.commit()
@@ -568,6 +598,22 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
         ))
     await session.commit()
     await verify_instances(session, dep.id)
+
+    # Wire replicated DBs into the cluster mesh (repset membership + peer
+    # subscriptions). Best-effort here — the cluster reconcile loop retries.
+    if cluster_ctx:
+        for name, info in plan.items():
+            if not info.get("cluster_db"):
+                continue
+            try:
+                res = await cluster_db.ensure_replication(
+                    stack=stack, info=info["cluster_db"],
+                    state=cluster_ctx["state"], self_node_id=cluster_ctx["node_id"],
+                )
+                if res.get("errors"):
+                    tail = (tail + f"\n[cluster] {name}: " + "; ".join(res["errors"]))[-8000:]
+            except Exception as e:  # noqa: BLE001
+                tail = (tail + f"\n[cluster] {name}: wiring error {e}")[-8000:]
 
     _touch(dep, status="running", log_tail=tail, error=None)
     # This deploy replaced the env's containers — older "running" rows are

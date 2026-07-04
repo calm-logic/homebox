@@ -497,6 +497,42 @@ async def reconcile_from_peers(session: AsyncSession, state: dict[str, Any]) -> 
         return
 
 
+async def ensure_db_replication(session: AsyncSession, state: dict[str, Any]) -> None:
+    """Re-ensure Spock wiring (repset tables + peer subscriptions) for every
+    running cluster-enabled stack. Heals ordering: a peer that deployed after
+    us couldn't be subscribed to at our deploy time — this catches it up."""
+    from . import cluster_db
+    from .deploy import repo_dir
+    from .urls import stack_name as make_stack_name
+    node_id = await get_node_id(session)
+    rows = (await session.execute(
+        select(Deployment, Environment, Project)
+        .join(Environment, Deployment.environment_id == Environment.id)
+        .join(Project, Environment.project_id == Project.id)
+        .where(Deployment.status == "running")
+    )).all()
+    seen: set[str] = set()
+    for dep, env, project in rows:
+        stack = make_stack_name(project, env)
+        if stack in seen:
+            continue
+        seen.add(stack)
+        rd = repo_dir(project.name, env.name)
+        if not cluster_db.cluster_db_enabled(rd):
+            continue
+        for info in cluster_db.infos_from_compose(rd):
+            try:
+                res = await cluster_db.ensure_replication(
+                    stack=stack, info=info, state=state, self_node_id=node_id,
+                )
+                if res.get("subs_created") or res.get("tables_added"):
+                    log.info("cluster db reconcile %s/%s: +tables %s +subs %s",
+                             project.name, env.name,
+                             res["tables_added"], res["subs_created"])
+            except Exception:  # noqa: BLE001
+                log.exception("cluster db reconcile failed for %s", stack)
+
+
 async def fanout_deploy(project_name: str, env_name: str, commit_sha: str | None) -> None:
     """After a successful LOCAL deploy, tell every peer to deploy the same
     (project, env). Peers pull config from us first, so env-var/domain changes
@@ -541,6 +577,7 @@ async def cluster_loop() -> None:
                         await initial_sync(session, state)
                     elif cycle % RECONCILE_EVERY == 0:
                         await reconcile_from_peers(session, state)
+                        await ensure_db_replication(session, state)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — the loop must survive anything
