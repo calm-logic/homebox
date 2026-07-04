@@ -26,9 +26,22 @@ cluster:
   enabled: true
 ```
 
+Added 2026-07-04 (evening):
+- **Leave & disconnect**: peers drop their subscriptions to the leaver (WAL
+  slots released), local subs dropped, tunnel connector stopped + token
+  forgotten, optional stack teardown, deregister. Eviction for dead nodes;
+  the reconcile loop drops subs to any ordinal no longer in the roster.
+- **Permanent node ordinals** assigned by the control plane (never reused);
+  sub names follow the database's baked spock identity so leave+rejoin
+  can't duplicate subscriptions.
+- **Account-based UX**: link a node to a homebox.sh account once; from any
+  node see all linked nodes + clusters, create/join with one click, and
+  invite other nodes (directive delivered on their next poll → auto-join).
+  Join tokens remain as the manual fallback.
+
 Not yet: WireGuard mesh (cross-network clusters), CF Load Balancer Mode 2,
 admin-DB Spock replication, deletion propagation, lease-serialized deploys,
-volume/object storage, Stripe entitlements.
+volume/object storage, Stripe entitlements, cluster-key rotation on leave.
 
 ---
 
