@@ -1,6 +1,36 @@
 # 🕸️ Homebox Clusters — Architecture & Implementation Plan
 
-Status: **DESIGN PROPOSAL** (2026-07)
+Status: **PHASE 1 SLICE IMPLEMENTED** (2026-07-04) — see §0 below. Original design follows.
+
+---
+
+## 0. What's implemented (EOD slice, 2026-07-04)
+
+A working 2-node-LAN slice of Phases 1–3, cut for speed (deviations noted):
+
+| Piece | Where | Deviation from the design below |
+|---|---|---|
+| Control plane (registry, join tokens, heartbeats/rendezvous, grants, dev licenses) | `control-plane/` | Accounts are dev-stubbed (any bearer token); Stripe + license JWTs later |
+| Node identity + sealed key exchange | `admin/app/clusterlib.py`, `crypto.py` | X25519 sealed box exactly as designed; cluster keys land in `/opt/homebox/admin/cluster-keys.json` + self-restart instead of mTLS CA (CA later) |
+| Peer API | `admin/app/routes/peer.py` | Routed through Traefik :80 via Host `homebox-peer.internal` — no WireGuard mesh yet (LAN-only trust, HMAC bearer) |
+| Config replication | `admin/app/cluster_sync.py` | API-based natural-key sync (full/deploy/update modes) instead of Spock-on-admin-DB; deletions don't propagate yet |
+| Deploy fan-out + catch-up | `deploy.py` + `clusterlib.reconcile_deployments` | Receiving node coordinates (no lease service yet); peers pull config with the deploy |
+| Ingress Mode 1 (shared tunnel) | free via config sync | connector token syncs in the Integration row; each node's monitor launches cloudflared |
+| App-DB active-active (pgEdge Spock) | `admin/app/cluster_db.py` | DDL replication OFF by design — every node deploys+migrates the same app, only DML replicates. PK-less tables → insert-only repset. Serial PKs unsupported (use UUIDs/snowflake) |
+| Cluster UI | `admin/frontend/src/pages/Cluster.tsx` | create/join/mint-token/roster/leave; reachable pre-onboarding for fresh joiners |
+
+Opt-in per project via `homebox.yaml`:
+
+```yaml
+cluster:
+  enabled: true
+```
+
+Not yet: WireGuard mesh (cross-network clusters), CF Load Balancer Mode 2,
+admin-DB Spock replication, deletion propagation, lease-serialized deploys,
+volume/object storage, Stripe entitlements.
+
+---
 
 Extend Homebox from a single-node internal PaaS to an **active-active cluster**: multiple
 Homebox nodes (on one LAN or across networks) that all serve the same applications, with
