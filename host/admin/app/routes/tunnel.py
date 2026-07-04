@@ -230,6 +230,22 @@ async def _resync_dns(state: dict[str, Any], session: AsyncSession) -> dict[str,
             if (r.get("type") == "CNAME" and name in hosts_in_zone
                     and "cfargotunnel.com" in (r.get("content") or "")
                     and r.get("content") != target):
+                # Only repoint records aimed at DEAD tunnels. A record whose
+                # target tunnel has live connections is deliberate — e.g. a
+                # developer's own cloudflared exposing a dev server on a
+                # hostname a project once served. Repointing it once broke a
+                # `make up` dev flow for days.
+                other_id = (r.get("content") or "").split(".", 1)[0]
+                try:
+                    other = await cf.get_tunnel(token, account_id, other_id)
+                    if other.get("connections"):
+                        result["skipped"].append({
+                            "hostname": name,
+                            "reason": f"points at live tunnel {other.get('name') or other_id}",
+                        })
+                        continue
+                except cf.CloudflareError:
+                    pass  # can't inspect it (foreign account / deleted) — treat as dead
                 try:
                     await cf.upsert_cname(token, z["id"], name, target, proxied=True)
                     result["updated"].append(name)
