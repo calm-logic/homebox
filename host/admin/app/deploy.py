@@ -458,8 +458,11 @@ async def verify_instances(session: AsyncSession, deployment_id: int, *, attempt
     """Probe each public instance URL end-to-end and mark it running or
     unreachable. ANY response from the app counts as up — an API with no
     route at / legitimately 404s (e.g. it only serves /api/*). Down means:
-    network/edge errors, 5xx, or Traefik's own no-router 404 fallback
-    (exact body "404 page not found"). Returns True when every URL answered."""
+    network/edge errors, 5xx, Traefik's no-router 404 fallback (exact body
+    "404 page not found"), or the Cloudflare tunnel ingress catch-all's
+    EMPTY-body 404 (the hostname isn't in the tunnel config at all — the app
+    was previously reported green while unreachable from any browser).
+    Returns True when every URL answered."""
     rows = (await session.execute(
         select(ServiceInstance).where(ServiceInstance.deployment_id == deployment_id)
     )).scalars().all()
@@ -472,10 +475,12 @@ async def verify_instances(session: AsyncSession, deployment_id: int, *, attempt
             for i in range(attempts):
                 try:
                     r = await client.get(inst.url)
-                    traefik_no_router = (
-                        r.status_code == 404 and r.text.strip() == "404 page not found"
+                    body = r.text.strip()
+                    infra_404 = r.status_code == 404 and (
+                        body == "404 page not found"  # traefik: no router
+                        or body == ""                 # tunnel ingress catch-all
                     )
-                    if r.status_code < 500 and not traefik_no_router:
+                    if r.status_code < 500 and not infra_404:
                         ok = True
                         break
                 except httpx.HTTPError:
