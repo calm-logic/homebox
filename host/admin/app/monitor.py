@@ -29,8 +29,9 @@ from sqlalchemy import delete, select
 
 from . import cloudflare as cf
 from .db import SessionLocal
+from .deploy import verify_instances
 from .host import container_status, restart_container, run_cloudflared_remote
-from .models import Setting, UptimeSample
+from .models import Deployment, Domain, Setting, UptimeSample
 
 log = logging.getLogger("homebox.monitor")
 
@@ -47,6 +48,76 @@ ADMIN_DOMAIN_KEY = "admin_domain"
 async def _get_setting(session, key: str):
     row = (await session.execute(select(Setting).where(Setting.key == key))).scalar_one_or_none()
     return row.value if row else None
+
+
+async def _set_setting(session, key: str, value) -> None:
+    row = (await session.execute(select(Setting).where(Setting.key == key))).scalar_one_or_none()
+    if row is None:
+        session.add(Setting(key=key, value=value))
+    else:
+        row.value = value
+    await session.commit()
+
+
+async def _finish_pending_zones(session, state: dict) -> None:
+    """Domains whose Cloudflare zone was created by Homebox sit in
+    zone_status='pending' until the registrar NS change lands. Poll, and the
+    moment Cloudflare reports the zone active, finish the wiring (DNS records +
+    ingress) without the user coming back."""
+    pending = (await session.execute(
+        select(Domain).where(Domain.zone_status == "pending")
+    )).scalars().all()
+    if not pending:
+        return
+    token = cf.get_token(state)
+    tunnel_id = state.get("tunnel_id")
+    if not token:
+        return
+    for d in pending:
+        try:
+            zone = await cf.get_zone(token, d.zone_id) if d.zone_id else None
+        except cf.CloudflareError:
+            continue
+        if not zone or (zone.get("status") or "").lower() != "active":
+            continue
+        log.info("zone %s is active — finishing DNS + ingress wiring", d.name)
+        if tunnel_id:
+            target = cf.tunnel_target(tunnel_id)
+            try:
+                await cf.upsert_cname(token, d.zone_id, d.name, target, proxied=True)
+                if d.mode == "wildcard":
+                    await cf.upsert_cname(token, d.zone_id, f"*.{d.name}", target, proxied=True)
+                d.cloudflare_routed = True
+            except cf.CloudflareError as e:
+                log.warning("zone %s active but DNS wiring failed: %s", d.name, e)
+                continue
+        d.zone_status = "active"
+        await session.commit()
+        try:
+            from .routes.domains import _push_remote_ingress
+            await _push_remote_ingress(session)
+        except cf.CloudflareError as e:
+            log.warning("ingress push after zone activation failed: %s", e)
+
+
+async def _dns_drift_check(session, state: dict) -> tuple[str, str | None]:
+    """Hourly: auto-repair stale tunnel CNAMEs (same logic as the manual Repair)
+    and persist a summary the Domains page shows as a banner only when broken."""
+    from .routes.tunnel import _resync_dns
+    result = await _resync_dns(state, session)
+    issues = [f"{e['hostname']}: {e['error']}" for e in result.get("errors", [])]
+    repaired = result.get("updated", [])
+    await _set_setting(session, "dns_status", {
+        "checked_at": datetime.utcnow().isoformat(),
+        "in_sync": not issues,
+        "repaired": repaired,
+        "issues": issues,
+    })
+    if issues:
+        return "down", f"{len(issues)} record(s) cannot be repaired"
+    if repaired:
+        return "degraded", f"repointed {len(repaired)} stale record(s)"
+    return "up", None
 
 
 def _running(name: str) -> bool:
@@ -117,7 +188,7 @@ async def _probe_admin_url(admin_domain: str) -> tuple[str, str | None, int | No
         return "down", f"{type(e).__name__}: {str(e)[:160]}", None
 
 
-async def _cycle() -> None:
+async def _cycle(cycle: int = 0) -> None:
     async with SessionLocal() as session:
         state = await cf.load_state(session)
         admin_domain = await _get_setting(session, ADMIN_DOMAIN_KEY)
@@ -140,8 +211,56 @@ async def _cycle() -> None:
                 component="admin_url", status=a_status, detail=a_detail, latency_ms=latency,
             ))
 
+        # NS-pending zones: poll every ~5 min; drift check hourly (and on boot).
+        if cycle % 10 == 0:
+            try:
+                await _finish_pending_zones(session, state)
+            except Exception:  # noqa: BLE001
+                log.exception("pending-zone check failed")
+        if cycle % 120 == 0 and cf.get_token(state) and state.get("tunnel_id"):
+            try:
+                d_status, d_detail = await _dns_drift_check(session, state)
+                samples.append(UptimeSample(component="dns", status=d_status, detail=d_detail))
+            except Exception:  # noqa: BLE001
+                log.exception("dns drift check failed")
+
         session.add_all(samples)
         await session.commit()
+
+        # Re-verify the public URLs of live deployments each cycle so instance
+        # status (and the UI's Down state) tracks reality, not just the last
+        # deploy-time check.
+        running = (await session.execute(
+            select(Deployment.id).where(Deployment.status == "running")
+        )).scalars().all()
+        for dep_id in running:
+            await verify_instances(session, dep_id, attempts=1)
+
+        # Check-gated deploys that never resolved (hung workflow, lost webhook
+        # delivery) shouldn't wait forever.
+        stale_cutoff = datetime.utcnow() - timedelta(minutes=30)
+        stuck = (await session.execute(
+            select(Deployment).where(
+                Deployment.status == "pending_checks",
+                Deployment.created_at < stale_cutoff,
+            )
+        )).scalars().all()
+        for d in stuck:
+            d.status = "blocked"
+            d.error = "Checks did not complete within 30 minutes."
+        promo_cutoff = datetime.utcnow() - timedelta(minutes=60)
+        stuck_promo = (await session.execute(
+            select(Deployment).where(
+                Deployment.status.in_(("pending_promotion", "pending_e2e")),
+                Deployment.created_at < promo_cutoff,
+            )
+        )).scalars().all()
+        for d in stuck_promo:
+            d.status = "blocked"
+            d.error = ("Promotion did not complete within 60 minutes "
+                       "(source deploy or e2e workflow never finished).")
+        if stuck or stuck_promo:
+            await session.commit()
 
 
 async def _prune() -> None:
@@ -155,7 +274,7 @@ async def monitor_loop() -> None:
     cycle = 0
     while True:
         try:
-            await _cycle()
+            await _cycle(cycle)
             cycle += 1
             if cycle % PRUNE_EVERY == 0:
                 await _prune()

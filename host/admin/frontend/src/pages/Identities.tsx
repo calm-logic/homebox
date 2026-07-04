@@ -53,12 +53,9 @@ export function Identities() {
 
   return (
     <>
-      <div className="row" style={{ marginTop: "0.5rem" }}>
-        <h2 style={{ margin: 0 }}>Identities</h2>
-      </div>
-      <p className="dim" style={{ marginTop: "0.4rem", marginBottom: "1rem" }}>
-        Whitelisted emails that can sign into Homebox passwordlessly via Google or GitHub.
-        Anyone signing in with an email not listed here (or disabled) is denied.
+      <h1>Identities</h1>
+      <p className="lede">
+        Emails allowed to sign in via Google or GitHub. Anyone else is denied.
       </p>
 
       <form className="row" onSubmit={submit} style={{ marginBottom: "1rem" }}>
@@ -71,7 +68,7 @@ export function Identities() {
           required
         />
         <button className="btn primary" type="submit" disabled={add.isPending}>
-          {add.isPending ? <span className="spinner" /> : <><UserPlus size={14} /> Add identity</>}
+          {add.isPending ? <span className="spinner" /> : <><UserPlus size={14} /> Add</>}
         </button>
       </form>
 
@@ -79,7 +76,7 @@ export function Identities() {
         <table className="data-table">
           <thead>
             <tr>
-              <th>Email</th><th>Status</th><th>Last login</th><th>Logins</th><th className="right">Actions</th>
+              <th>Email</th><th>Status</th><th>Last login</th><th>Logins</th><th className="right" />
             </tr>
           </thead>
           <tbody>
@@ -106,8 +103,9 @@ export function Identities() {
                   <button className="btn small" disabled={toggle.isPending} onClick={() => toggle.mutate(i)}>
                     {i.enabled ? "Disable" : "Enable"}
                   </button>{" "}
-                  <button className="btn small danger" disabled={remove.isPending} onClick={() => setDeleteTarget(i)}>
-                    <Trash2 size={12} /> Remove
+                  <button className="btn small danger" aria-label={`Remove ${i.email}`} title="Remove"
+                    disabled={remove.isPending} onClick={() => setDeleteTarget(i)}>
+                    <Trash2 size={12} />
                   </button>
                 </td>
               </tr>
@@ -127,7 +125,7 @@ export function Identities() {
         title={`Remove ${deleteTarget?.email ?? ""}?`}
         footer={<>
           <span className="spacer" />
-          <button className="btn" type="button" onClick={() => setDeleteTarget(null)}>Cancel</button>
+          <button className="btn ghost" type="button" onClick={() => setDeleteTarget(null)}>Cancel</button>
           <button className="btn danger" type="button" disabled={remove.isPending}
             onClick={() => deleteTarget && remove.mutate(deleteTarget)}>
             {remove.isPending ? <span className="spinner" /> : "Remove"}
@@ -135,8 +133,7 @@ export function Identities() {
         </>}
       >
         <p style={{ margin: 0 }}>
-          <strong>{deleteTarget?.email}</strong> will no longer be able to sign in via OAuth.
-          You can add it again later.
+          <strong>{deleteTarget?.email}</strong> can no longer sign in. You can re-add it later.
         </p>
       </Modal>
     </>

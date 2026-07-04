@@ -15,6 +15,7 @@ from .models import Integration, Project, Setting
 from .integrations_lib import decrypted_token
 
 WEBHOOK_SETTING_KEY = "webhook"
+ADMIN_DOMAIN_KEY = "admin_domain"  # Setting written by onboarding (routes/onboarding.py)
 
 
 async def get_or_create_webhook_secret(session: AsyncSession) -> str:
@@ -31,9 +32,14 @@ async def get_or_create_webhook_secret(session: AsyncSession) -> str:
     return secret
 
 
-def webhook_url() -> str | None:
-    """Public URL GitHub should POST to. Requires a known admin FQDN."""
-    domain = (settings.admin_domain or "").strip().strip("/")
+async def webhook_url(session: AsyncSession) -> str | None:
+    """Public URL GitHub should POST to. Reads the admin FQDN the onboarding
+    wizard stored in the settings table, falling back to the ADMIN_DOMAIN env."""
+    row = (
+        await session.execute(select(Setting).where(Setting.key == ADMIN_DOMAIN_KEY))
+    ).scalar_one_or_none()
+    domain = row.value if row and isinstance(row.value, str) else ""
+    domain = (domain or settings.admin_domain or "").strip().strip("/")
     if not domain:
         return None
     return f"https://{domain}/api/webhooks/github"
@@ -43,9 +49,9 @@ async def sync_project_webhook(session: AsyncSession, project: Project) -> tuple
     """Bring the project's GitHub push webhook in line with project.managed.
     Registers when managed (idempotent), removes when not. Best-effort — returns
     a status string; never raises so it can't break the adopt call."""
-    url = webhook_url()
+    url = await webhook_url(session)
     if not url:
-        return False, "Auto-deploy on push is disabled until the admin has a public URL (ADMIN_DOMAIN)."
+        return False, "Auto-deploy on push is disabled until the admin has a public URL (set one in onboarding)."
     if not project.integration_id:
         return False, "Project has no source-control integration."
     integration = await session.get(Integration, project.integration_id)
@@ -58,6 +64,13 @@ async def sync_project_webhook(session: AsyncSession, project: Project) -> tuple
         ours = [h for h in hooks if (h.get("config") or {}).get("url") == url]
         if project.managed and project.auto_deploy:
             if ours:
+                # Upgrade hooks created before check-gated deploys existed.
+                missing = set(github.WEBHOOK_EVENTS) - set(ours[0].get("events") or [])
+                if missing:
+                    await github.update_repo_webhook_events(
+                        token, project.repo_full_name, ours[0]["id"], github.WEBHOOK_EVENTS
+                    )
+                    return True, "Webhook updated."
                 return True, "Webhook already registered."
             secret = await get_or_create_webhook_secret(session)
             await github.create_repo_webhook(token, project.repo_full_name, url, secret)

@@ -51,6 +51,9 @@ class ManifestService:
     port: int | None = None
     public: bool | None = None
     subdomain: str | None = None
+    # Also route <main host><path_prefix> to this service (e.g. "/api" so the
+    # SPA can call same-origin /api). "" disables the auto heuristic.
+    path_prefix: str | None = None
     env: dict[str, str] = field(default_factory=dict)
     depends_on: list[str] = field(default_factory=list)
 
@@ -101,6 +104,7 @@ def _coerce_service(name: str, raw: dict[str, Any]) -> ManifestService:
         port=port,
         public=raw.get("public"),
         subdomain=raw.get("subdomain"),
+        path_prefix=(str(raw["path_prefix"]) if raw.get("path_prefix") is not None else None),
         env={str(k): "" if v is None else str(v) for k, v in env.items()},
         depends_on=[str(d) for d in deps],
     )

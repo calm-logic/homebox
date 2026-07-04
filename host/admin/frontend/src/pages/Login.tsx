@@ -78,7 +78,7 @@ export function Login() {
                 </button>
               )}
             </div>
-            <div className="login-divider"><span>or sign in with a password</span></div>
+            <div className="login-divider"><span>or</span></div>
           </>
         )}
 

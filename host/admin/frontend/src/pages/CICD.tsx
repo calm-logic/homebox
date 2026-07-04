@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, RefreshCw } from "lucide-react";
 import { api } from "../lib/api";
 import { useToast } from "../lib/toast";
-import { Runner } from "./Runner";
 import type { WorkflowRun } from "../lib/types";
 
 export function CICD() {
@@ -23,15 +22,13 @@ export function CICD() {
   return (
     <>
       <h1>CI/CD</h1>
-      <p className="lede">Self-hosted runners and recent workflow runs across your connected repositories.</p>
-
-      <Runner />
+      <p className="lede">Recent GitHub workflow runs across your connected repositories. Deploys are check-gated per project (see project settings).</p>
 
       <div className="row" style={{ marginTop: "2rem" }}>
         <h2 style={{ margin: 0 }}>Workflow runs</h2>
         <div className="spacer" />
-        <button className="btn primary" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
-          {refresh.isPending ? <span className="spinner" /> : <><RefreshCw size={14} /> Refresh from GitHub</>}
+        <button className="btn" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
+          {refresh.isPending ? <span className="spinner" /> : <><RefreshCw size={14} /> Refresh</>}
         </button>
       </div>
 
@@ -59,8 +56,8 @@ export function CICD() {
       ) : (
         <div className="empty-state">
           <h3>No runs yet</h3>
-          <p>Connect an organization on the <strong>Integrations</strong> tab, sync repositories, then click <strong>Refresh</strong> to pull recent workflow runs from GitHub.</p>
-          <a className="btn primary" href="/integrations">Go to Integrations</a>
+          <p>Connect an organization, then click <strong>Refresh</strong> to pull recent runs from GitHub.</p>
+          <a className="btn primary" href="/integrations">Connect GitHub</a>
         </div>
       )}
     </>
@@ -70,10 +67,11 @@ export function CICD() {
 function statusBadge(status: string, conclusion: string | null) {
   if (status === "completed") {
     if (conclusion === "success") return <span className="badge ok">Success</span>;
-    if (conclusion === "failure" || conclusion === "timed_out") return <span className="badge fail">{conclusion}</span>;
+    if (conclusion === "failure" || conclusion === "timed_out") return <span className="badge fail">Failed</span>;
     if (conclusion === "cancelled") return <span className="badge warn">Cancelled</span>;
-    return <span className="badge plain">{conclusion || "completed"}</span>;
+    return <span className="badge plain">{conclusion || "Completed"}</span>;
   }
-  if (status === "in_progress") return <span className="badge info">In progress</span>;
+  if (status === "in_progress") return <span className="badge info">Running</span>;
+  if (status === "queued") return <span className="badge info">Queued</span>;
   return <span className="badge plain">{status}</span>;
 }

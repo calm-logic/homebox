@@ -98,6 +98,36 @@ async def _fail_interrupted_deployments() -> None:
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # create_all never alters existing tables — apply additive columns here.
+        await conn.exec_driver_sql(
+            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS domain_id "
+            "INTEGER REFERENCES domains(id) ON DELETE SET NULL"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS require_checks "
+            "BOOLEAN NOT NULL DEFAULT TRUE"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS promotion_gate "
+            "BOOLEAN NOT NULL DEFAULT FALSE"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS e2e_workflow VARCHAR(255)"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS promote_from_env_id "
+            "INTEGER REFERENCES environments(id) ON DELETE SET NULL"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE domains ADD COLUMN IF NOT EXISTS zone_status "
+            "VARCHAR(16) NOT NULL DEFAULT 'active'"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE domains ADD COLUMN IF NOT EXISTS zone_id VARCHAR(64)"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE domains ADD COLUMN IF NOT EXISTS name_servers JSON"
+        )
     settings.projects_host_dir.mkdir(parents=True, exist_ok=True)
     await _fail_interrupted_deployments()
     await _seed_primary_domain()

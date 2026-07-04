@@ -50,17 +50,16 @@ services:
   # Traefik — reverse proxy & edge router
   # ---------------------------------------------------------------------------
   traefik:
-    image: traefik:v3.3
+    # v3.6+ required with Docker 29: older Traefik pins docker API v1.24
+    # internally (ignoring DOCKER_API_VERSION), and Docker 29 rejects it with
+    # 400 — the docker provider then registers zero routers (every project URL
+    # 404s while the file-provider admin route still works).
+    image: traefik:v3.6
     container_name: homebox-traefik
     restart: unless-stopped
     depends_on:
       docker-proxy:
         condition: service_healthy
-    environment:
-      # Docker 29 dropped legacy API versions; Traefik's docker client
-      # defaults to v1.24, which the daemon rejects with 400. Pin a modern
-      # version so the client doesn't try to negotiate against /v1.24.
-      DOCKER_API_VERSION: "1.45"
     command:
       - "--entrypoints.web.address=:80"
       - "--api.dashboard=true"
@@ -71,6 +70,10 @@ services:
       - "--providers.docker.endpoint=tcp://docker-proxy:2375"
       - "--providers.docker.exposedbydefault=false"
       - "--providers.docker.network=traefik-net"
+      # JSON access log on stdout — the admin's per-service request monitoring
+      # reads it via `docker logs` and filters by RouterName.
+      - "--accesslog=true"
+      - "--accesslog.format=json"
       - "--log.level=INFO"
     ports:
       - "80:80"

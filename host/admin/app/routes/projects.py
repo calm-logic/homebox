@@ -170,6 +170,10 @@ async def _serialize_env(session: AsyncSession, env: Environment) -> dict:
     return {
         "id": env.id, "name": env.name, "kind": env.kind, "branch": env.branch,
         "slug_suffix": env.slug_suffix, "is_default": env.is_default,
+        "domain_id": env.domain_id,
+        "promotion_gate": env.promotion_gate,
+        "e2e_workflow": env.e2e_workflow,
+        "promote_from_env_id": env.promote_from_env_id,
         "deployment": _dep_summary(dep),
         "instances": instances,
     }
@@ -198,6 +202,7 @@ def _serialize_project(p: Project, integration: Integration | None, domain: Doma
         "default_branch": p.default_branch,
         "managed": p.managed,
         "auto_deploy": p.auto_deploy,
+        "require_checks": p.require_checks,
         "domain_id": p.domain_id,
         "domain": domain.name if domain else None,
         "description": p.description,
@@ -317,6 +322,7 @@ class PatchBody(BaseModel):
     name: str | None = None
     domain_id: int | None = None
     auto_deploy: bool | None = None
+    require_checks: bool | None = None
 
 
 @router.patch("/{project_id}")
@@ -343,6 +349,8 @@ async def patch_project(
         p.domain_id = body.domain_id or None
     if body.auto_deploy is not None:
         p.auto_deploy = body.auto_deploy
+    if body.require_checks is not None:
+        p.require_checks = body.require_checks
     await session.commit()
     if body.auto_deploy is not None:
         await sync_project_webhook(session, p)
@@ -408,6 +416,86 @@ async def project_workflows(
         "html_url": r.html_url,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     } for r in rows]
+
+
+@router.get("/{project_id}/environments/{env_id}/deployments")
+async def environment_deployments(
+    project_id: int,
+    env_id: int,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Recent deploy history for one environment — Homebox's own runs, not
+    GitHub Actions (those are /workflows)."""
+    await _get_project(session, project_id)
+    env = await _get_env(session, project_id, env_id)
+    rows = (await session.execute(
+        select(Deployment).where(Deployment.environment_id == env.id)
+        .order_by(Deployment.created_at.desc()).limit(20)
+    )).scalars().all()
+    return [{
+        "id": d.id, "status": d.status, "commit_sha": d.commit_sha,
+        "trigger": d.trigger, "error": d.error,
+        "created_at": d.created_at.isoformat() if d.created_at else None,
+        "updated_at": d.updated_at.isoformat() if d.updated_at else None,
+    } for d in rows]
+
+
+class PatchEnvBody(BaseModel):
+    domain_id: int | None = None   # 0 clears the override (inherit project)
+    branch: str | None = None      # "" clears (track default branch)
+    promotion_gate: bool | None = None
+    e2e_workflow: str | None = None      # "" clears
+    promote_from_env_id: int | None = None  # 0 clears (auto: the dev env)
+
+
+@router.patch("/{project_id}/environments/{env_id}")
+async def patch_environment(
+    project_id: int,
+    env_id: int,
+    body: PatchEnvBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Environment-specific overrides of project settings (domain, branch)."""
+    await _get_project(session, project_id)
+    env = await _get_env(session, project_id, env_id)
+    if body.domain_id is not None:
+        env.domain_id = body.domain_id or None
+    if body.branch is not None:
+        env.branch = body.branch.strip() or None
+    if body.promotion_gate is not None:
+        env.promotion_gate = body.promotion_gate
+    if body.e2e_workflow is not None:
+        env.e2e_workflow = body.e2e_workflow.strip() or None
+    if body.promote_from_env_id is not None:
+        env.promote_from_env_id = body.promote_from_env_id or None
+    await session.commit()
+    return {"ok": True, "id": env.id, "domain_id": env.domain_id, "branch": env.branch,
+            "promotion_gate": env.promotion_gate, "e2e_workflow": env.e2e_workflow}
+
+
+@router.get("/{project_id}/deployments/{deployment_id}")
+async def deployment_detail(
+    project_id: int,
+    deployment_id: int,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """One deployment with its full log — polled by the UI while it's active."""
+    p = await _get_project(session, project_id)
+    dep = await session.get(Deployment, deployment_id)
+    env = await session.get(Environment, dep.environment_id) if dep else None
+    if not dep or not env or env.project_id != p.id:
+        raise HTTPException(404, "Deployment not found")
+    return {
+        "id": dep.id, "status": dep.status, "commit_sha": dep.commit_sha,
+        "trigger": dep.trigger, "error": dep.error, "log_tail": dep.log_tail,
+        "stack_name": dep.stack_name,
+        "environment": {"id": env.id, "name": env.name},
+        "created_at": dep.created_at.isoformat() if dep.created_at else None,
+        "updated_at": dep.updated_at.isoformat() if dep.updated_at else None,
+    }
 
 
 @router.post("/{project_id}/environments/{env_id}/stop")

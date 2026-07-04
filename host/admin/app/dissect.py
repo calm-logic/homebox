@@ -82,6 +82,8 @@ class DetectedService:
     build_image: str | None = None  # builder base image for static (default node)
     command: str | None = None
     port_explicit: bool = False     # port came from the manifest, not assigned
+    # Also route <main host><path_prefix> -> this service (same-origin /api).
+    path_prefix: str | None = None
 
     @property
     def is_app(self) -> bool:
@@ -217,6 +219,7 @@ def _from_manifest(m: mf.ManifestService) -> DetectedService:
         build_type=build_type, build_dir=m.dir, dockerfile=m.dockerfile,
         image=m.image, static_dir=m.static_dir, build_command=m.build_command,
         build_image=m.build_image, command=m.command,
+        path_prefix=m.path_prefix,
     )
 
 
@@ -364,4 +367,16 @@ def dissect(rd: Path) -> list[DetectedService]:
     _wire_env(services)
     _assign_public(services, manifest)
     _assign_ports(services)
+
+    # SPA + API convention: when the project has a main web/static service AND
+    # a separate public api service, also route <main host>/api to the api
+    # service so the frontend can call same-origin /api (matches the common
+    # local-dev proxy setup). homebox.yaml `path_prefix: ""` disables this.
+    main = next((s for s in services.values() if s.is_public and not s.subdomain_label), None)
+    if main is not None:
+        for s in services.values():
+            if (s is not main and s.is_public and s.path_prefix is None
+                    and (s.kind == "api" or s.subdomain_label == "api")):
+                s.path_prefix = "/api"
+
     return list(services.values())

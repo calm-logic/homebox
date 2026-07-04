@@ -21,10 +21,14 @@ export interface DomainItem {
   mode: "wildcard" | "dedicated";
   is_primary: boolean;
   cloudflare_routed: boolean;
+  zone_status: "active" | "pending";
+  name_servers: string[] | null;
 }
 
 export type DeploymentStatus =
-  | "queued" | "cloning" | "dissecting" | "building" | "starting" | "running" | "failed" | "stopped";
+  | "pending_checks" | "pending_promotion" | "pending_e2e"
+  | "queued" | "cloning" | "dissecting" | "building" | "starting"
+  | "running" | "failed" | "stopped" | "superseded" | "blocked";
 
 export interface DeploymentInfo {
   id: number;
@@ -33,6 +37,16 @@ export interface DeploymentInfo {
   error: string | null;
   trigger: "manual" | "webhook";
   updated_at: string | null;
+}
+
+export interface DeploymentItem extends DeploymentInfo {
+  created_at: string | null;
+}
+
+export interface DeploymentDetailData extends DeploymentItem {
+  log_tail: string | null;
+  stack_name: string;
+  environment: { id: number; name: string };
 }
 
 // ── Integrations / Projects / Services / Environments ──────────────────────────
@@ -70,6 +84,10 @@ export interface EnvironmentInfo {
   branch: string | null;
   slug_suffix: string;
   is_default: boolean;
+  domain_id: number | null;
+  promotion_gate: boolean;
+  e2e_workflow: string | null;
+  promote_from_env_id: number | null;
   deployment: DeploymentInfo | null;
   instances: ServiceInstanceInfo[];
 }
@@ -88,6 +106,7 @@ export interface ProjectItem {
   default_branch: string;
   managed: boolean;
   auto_deploy: boolean;
+  require_checks: boolean;
   domain_id: number | null;
   domain: string | null;
   description: string | null;
@@ -233,7 +252,7 @@ export interface UptimePoint {
 }
 
 export interface UptimeComponent {
-  component: "admin_url" | "tunnel" | "cloudflared" | "traefik" | "docker_proxy";
+  component: string; // admin_url | tunnel | cloudflared | traefik | docker_proxy | dns
   uptime_pct: number | null;
   current: UptimeStatus;
   detail: string | null;

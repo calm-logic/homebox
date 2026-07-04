@@ -23,7 +23,8 @@ from .. import cloudflare as cf
 from ..auth import require_session_api
 from ..db import get_session
 from ..host import write_traefik_dynamic
-from ..models import Domain, Setting
+from ..models import Domain, Project, Setting
+from ..webhooks_lib import sync_project_webhook
 
 router = APIRouter(prefix="/api/onboarding")
 
@@ -159,5 +160,13 @@ async def set_admin_domain(
 
     # 5. Setting (read back by /state and used as a UI hint).
     await _set_setting(session, ADMIN_DOMAIN_KEY, hostname)
+
+    # 6. The webhook URL just became known (or changed) — re-register push
+    # webhooks for projects adopted before this point. Best-effort by design.
+    managed = (await session.execute(
+        select(Project).where(Project.managed.is_(True))
+    )).scalars().all()
+    for p in managed:
+        await sync_project_webhook(session, p)
 
     return {"ok": True, "hostname": hostname, "url": f"https://{hostname}"}

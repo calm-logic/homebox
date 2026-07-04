@@ -9,7 +9,12 @@ const BUSY: DeploymentStatus[] = ["queued", "cloning", "dissecting", "building",
 
 function envBadge(env: EnvironmentInfo) {
   const s = env.deployment?.status;
-  if (s === "running") return <span className="badge ok">{env.name}</span>;
+  if (s === "running") {
+    const down = env.instances.some(i => i.url && i.status === "unreachable");
+    return down
+      ? <span className="badge fail" title="Public URL not responding">{env.name}</span>
+      : <span className="badge ok">{env.name}</span>;
+  }
   if (s === "failed") return <span className="badge fail" title={env.deployment?.error || undefined}>{env.name}</span>;
   if (s === "stopped") return <span className="badge muted">{env.name}</span>;
   if (s && BUSY.includes(s)) return <span className="badge info">{env.name}…</span>;
@@ -44,16 +49,14 @@ export function Projects() {
     <>
       <h1>Projects</h1>
       <p className="lede">
-        Adopt a repository to deploy it. Homebox dissects it into services and gives each one a
-        URL per environment — e.g. <code>box.x100.dev</code>, <code>box-api.x100.dev</code>, and
-        their <code>--dev</code> variants.
+        Adopt a repository to dissect it into services, each deployed with a URL per environment.
       </p>
 
       {projects.length === 0 ? (
         <div className="empty-state">
           <h3>No projects yet</h3>
-          <p>Connect a GitHub organization on the <strong>Integrations</strong> tab — its repositories appear here.</p>
-          <Link className="btn primary" to="/integrations">Go to Integrations</Link>
+          <p>Connect a GitHub organization — its repositories appear here.</p>
+          <Link className="btn primary" to="/integrations">Connect GitHub</Link>
         </div>
       ) : (
         [...groups.entries()].map(([org, items]) => (
@@ -105,15 +108,14 @@ function ProjectRow({ p }: { p: ProjectItem }) {
       </td>
       <td className="dim">{repoShort} <span className="badge muted plain">{p.default_branch}</span></td>
       <td>
-        <label className="row" style={{ cursor: "pointer", gap: "0.4rem" }}>
-          <input
-            type="checkbox"
-            checked={p.managed}
-            disabled={adopt.isPending || release.isPending}
-            onChange={e => (e.target.checked ? adopt : release).mutate()}
-          />
-          {p.managed ? "On" : "Off"}
-        </label>
+        <input
+          type="checkbox"
+          checked={p.managed}
+          disabled={adopt.isPending || release.isPending}
+          onChange={e => (e.target.checked ? adopt : release).mutate()}
+          title={p.managed ? "Release this project" : "Adopt this project"}
+          style={{ cursor: "pointer" }}
+        />
       </td>
       <td>
         {p.managed

@@ -1,36 +1,61 @@
 import { useState } from "react";
-import { Link, Navigate, useParams } from "react-router-dom";
+import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-} from "recharts";
-import { ArrowLeft, ExternalLink, RefreshCw, Rocket, Square, Settings, KeyRound } from "lucide-react";
+import { ArrowLeft, ChevronRight, ExternalLink, RefreshCw, Rocket, Square, Settings } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
 import type {
-  DeploymentStatus, DomainItem, EnvironmentInfo, MetricsResponse, ProjectDetailData,
-  ProjectWorkflowRun, ServiceItem,
+  DeploymentItem, DeploymentStatus, DomainItem, EnvironmentInfo,
+  ProjectDetailData, ProjectWorkflowRun,
 } from "../lib/types";
 
-const WINDOWS = ["1h", "6h", "24h", "7d"] as const;
-type Win = (typeof WINDOWS)[number];
-const BUSY: DeploymentStatus[] = ["queued", "cloning", "dissecting", "building", "starting"];
+export const BUSY: DeploymentStatus[] = ["queued", "cloning", "dissecting", "building", "starting"];
 
-const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(0)} KB`;
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+// Backend timestamps are naive UTC — tag them so Date() doesn't read them as local.
+export const utcDate = (iso: string) => new Date(/Z$|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z");
+
+function envDotColor(status: DeploymentStatus | undefined): string {
+  if (status === "running") return "var(--accent)";
+  if (status === "failed") return "var(--danger)";
+  if (status && BUSY.includes(status)) return "var(--info)";
+  return "var(--muted)";
 }
 
-function depBadge(status: string | undefined) {
-  if (status === "running") return <span className="badge ok">Running</span>;
+/** Current-state badge (environment card): is the env serving right now? */
+export function depBadge(status: string | undefined, unreachable = false) {
+  if (status === "running") {
+    return unreachable
+      ? <span className="badge fail">Down</span>
+      : <span className="badge info">Running</span>;
+  }
   if (status === "failed") return <span className="badge fail">Failed</span>;
+  if (status === "blocked") return <span className="badge warn">Blocked</span>;
+  if (status === "pending_checks") return <span className="badge info">Waiting for checks…</span>;
+  if (status === "pending_promotion") return <span className="badge info">Waiting for source env…</span>;
+  if (status === "pending_e2e") return <span className="badge info">Running e2e…</span>;
   if (status === "stopped") return <span className="badge muted">Stopped</span>;
+  if (status === "superseded") return <span className="badge muted plain">Skipped</span>;
   if (!status) return <span className="badge muted plain">Not deployed</span>;
   return <span className="badge info">{status[0].toUpperCase() + status.slice(1)}…</span>;
+}
+
+/** History badge (deployments list/detail): how did this deploy end? */
+export function historyBadge(status: string) {
+  if (status === "running") return <span className="badge success">Succeeded</span>;
+  if (status === "superseded") return <span className="badge muted plain">Skipped</span>;
+  if (status === "failed") return <span className="badge fail">Failed</span>;
+  if (status === "blocked") return <span className="badge warn">Blocked</span>;
+  if (status === "pending_checks") return <span className="badge info">Waiting for checks…</span>;
+  if (status === "pending_promotion") return <span className="badge info">Waiting for source env…</span>;
+  if (status === "pending_e2e") return <span className="badge info">Running e2e…</span>;
+  if (status === "stopped") return <span className="badge muted">Stopped</span>;
+  return <span className="badge info">{status[0].toUpperCase() + status.slice(1)}…</span>;
+}
+
+export function envUnreachable(env: EnvironmentInfo): boolean {
+  return env.deployment?.status === "running"
+    && env.instances.some(i => i.url && i.status === "unreachable");
 }
 
 function predictedHost(name: string, label: string, slugSuffix: string, domain: string | null): string | null {
@@ -43,9 +68,10 @@ export function ProjectDetail() {
   const { projectId } = useParams();
   const id = Number(projectId);
   const qc = useQueryClient();
+  const nav = useNavigate();
   const toast = useToast();
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [envVarsFor, setEnvVarsFor] = useState<ServiceItem | null>(null);
+  const [envTab, setEnvTab] = useState<number | null>(null);
 
   const { data: project, isError } = useQuery<ProjectDetailData>({
     queryKey: ["project", id],
@@ -96,13 +122,32 @@ export function ProjectDetail() {
         {project.dissected_at && <> · {project.services.length} service{project.services.length === 1 ? "" : "s"}</>}
       </p>
 
-      {/* ─── Environments ───────────────────────────────────────── */}
+      {/* ─── Environments (one tab per env) ─────────────────────── */}
       <h2 style={{ marginTop: "1.5rem" }}>Environments</h2>
-      <div style={{ display: "grid", gap: "1rem", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", marginTop: "0.5rem" }}>
-        {project.environments.map(env => (
-          <EnvironmentCard key={env.id} projectId={id} env={env} onChange={invalidate} />
-        ))}
-      </div>
+      {(() => {
+        const activeEnv = project.environments.find(e => e.id === envTab) ?? project.environments[0];
+        if (!activeEnv) return null;
+        return (
+          <>
+            <div className="tabs" role="tablist">
+              {project.environments.map(env => (
+                <button
+                  key={env.id}
+                  role="tab"
+                  aria-selected={env.id === activeEnv.id}
+                  className={`tab ${env.id === activeEnv.id ? "active" : ""}`}
+                  onClick={() => setEnvTab(env.id)}
+                >
+                  <span className="tab-dot" style={{ background: envUnreachable(env) ? "var(--danger)" : envDotColor(env.deployment?.status) }} />
+                  <span style={{ textTransform: "capitalize" }}>{env.name}</span>
+                </button>
+              ))}
+            </div>
+            <EnvironmentCard key={activeEnv.id} projectId={id} env={activeEnv} onChange={invalidate} />
+            <Deployments projectId={id} envId={activeEnv.id} />
+          </>
+        );
+      })()}
 
       {/* ─── Services ───────────────────────────────────────────── */}
       <h2 style={{ marginTop: "2rem" }}>Services</h2>
@@ -112,29 +157,24 @@ export function ProjectDetail() {
         </div>
       ) : (
         <table className="data-table" style={{ marginTop: "0.5rem" }}>
-          <thead><tr><th>Service</th><th>Kind</th><th>Exposure</th><th>Hostname (prod)</th><th>Env vars</th><th className="right" /></tr></thead>
+          <thead><tr><th>Service</th><th>Kind</th><th>Exposure</th><th>Hostname</th><th>Env</th><th className="right" /></tr></thead>
           <tbody>
             {project.services.map(s => {
               const host = s.is_public ? predictedHost(project.name, s.subdomain_label, "", project.domain) : null;
               return (
-                <tr key={s.id}>
+                <tr key={s.id} className="clickable" onClick={() => nav(`/projects/${id}/services/${s.id}`)}>
                   <td><strong>{s.name}</strong>{s.internal_port && <span className="dim"> :{s.internal_port}</span>}</td>
                   <td><span className="badge plain">{s.kind}</span></td>
-                  <td>{s.is_public ? <span className="badge ok">public</span> : <span className="badge muted plain">internal</span>}</td>
+                  <td>{s.is_public ? <span className="badge ok">Public</span> : <span className="badge muted plain">Internal</span>}</td>
                   <td className="dim">{host ? <code>{host}</code> : "—"}</td>
                   <td className="dim">{s.env_vars.length}{s.env_vars.some(v => v.source === "auto") && <span className="badge info plain" style={{ marginLeft: 6 }}>auto</span>}</td>
-                  <td className="actions">
-                    <button className="btn small ghost" onClick={() => setEnvVarsFor(s)}><KeyRound size={12} /> Env</button>
-                  </td>
+                  <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       )}
-
-      {/* ─── Metrics ────────────────────────────────────────────── */}
-      <Metrics services={project.services} />
 
       {/* ─── CI/CD runs ─────────────────────────────────────────── */}
       <div className="row" style={{ marginTop: "2rem" }}>
@@ -166,7 +206,6 @@ export function ProjectDetail() {
       )}
 
       {settingsOpen && <SettingsModal project={project} onClose={() => { setSettingsOpen(false); invalidate(); }} />}
-      {envVarsFor && <EnvVarsModal service={envVarsFor} onClose={() => { setEnvVarsFor(null); invalidate(); }} />}
     </>
   );
 }
@@ -190,18 +229,27 @@ function EnvironmentCard({ projectId, env, onChange }: { projectId: number; env:
   return (
     <div className="card">
       <div className="row">
-        {depBadge(dep?.status)}
+        {depBadge(dep?.status, envUnreachable(env))}
         <strong style={{ textTransform: "capitalize" }}>{env.name}</strong>
         <span className="dim">{env.branch ? `branch ${env.branch}` : "default branch"}</span>
       </div>
       <div style={{ marginTop: "0.6rem", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
         {env.instances.filter(i => i.url).length > 0
-          ? env.instances.filter(i => i.url).map(i => (
-              <div key={i.service_name} className="row" style={{ justifyContent: "space-between" }}>
-                <span className="dim">{i.service_name}</span>
-                <a href={i.url!} target="_blank" rel="noopener">{i.url!.replace("https://", "")} <ExternalLink size={11} /></a>
-              </div>
-            ))
+          ? env.instances.filter(i => i.url).map(i => {
+              const down = i.status === "unreachable";
+              return (
+                <div key={i.service_name} className="row" style={{ justifyContent: "space-between" }}>
+                  <span className="dim">{i.service_name}</span>
+                  <a
+                    href={i.url!} target="_blank" rel="noopener"
+                    style={down ? { color: "var(--danger)" } : undefined}
+                    title={down ? "URL did not respond on the last check" : undefined}
+                  >
+                    {i.url!.replace("https://", "")} <ExternalLink size={11} />
+                  </a>
+                </div>
+              );
+            })
           : <span className="dim">No public URLs yet — deploy to create them.</span>}
       </div>
       {dep?.status === "failed" && dep.error && (
@@ -222,76 +270,51 @@ function EnvironmentCard({ projectId, env, onChange }: { projectId: number; env:
   );
 }
 
-function Metrics({ services }: { services: ServiceItem[] }) {
-  const [serviceId, setServiceId] = useState<number | null>(services[0]?.id ?? null);
-  const [win, setWin] = useState<Win>("1h");
-  const sid = serviceId ?? services[0]?.id;
-
-  const { data } = useQuery<MetricsResponse>({
-    queryKey: ["service-metrics", sid, win],
-    queryFn: () => api.get<MetricsResponse>(`/api/services/${sid}/metrics?window=${win}`),
-    refetchInterval: 15000,
-    enabled: !!sid,
+function Deployments({ projectId, envId }: { projectId: number; envId: number }) {
+  const nav = useNavigate();
+  const { data: deps } = useQuery<DeploymentItem[]>({
+    queryKey: ["env-deployments", envId],
+    queryFn: () => api.get<DeploymentItem[]>(`/api/projects/${projectId}/environments/${envId}/deployments`),
+    refetchInterval: 6000,
   });
-  if (services.length === 0) return null;
-  const points = data?.points ?? [];
+
+  if (!deps) return <span className="spinner" />;
+  if (deps.length === 0) return null;
 
   return (
     <>
-      <div className="row" style={{ marginTop: "2rem" }}>
-        <h2 style={{ margin: 0 }}>Monitoring</h2>
-        <div className="spacer" />
-        <select value={sid} onChange={e => setServiceId(Number(e.target.value))} style={{ width: "auto" }}>
-          {services.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
-        <div className="mode-chips">
-          {WINDOWS.map(w => <span key={w} className={`chip ${win === w ? "active" : ""}`} onClick={() => setWin(w)}>{w}</span>)}
-        </div>
-      </div>
-      {points.length === 0 ? (
-        <div className="card" style={{ marginTop: "0.5rem" }}><span className="dim">No samples yet — metrics appear within a minute of a running deploy.</span></div>
-      ) : (
-        <div style={{ display: "grid", gap: "1rem", marginTop: "0.5rem" }}>
-          <ChartCard title="CPU">
-            <ResponsiveContainer width="100%" height={180}>
-              <LineChart data={points}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                <XAxis dataKey="ts" tickFormatter={fmtTime} stroke="var(--muted)" fontSize={11} />
-                <YAxis unit="%" stroke="var(--muted)" fontSize={11} />
-                <Tooltip labelFormatter={(l: any) => fmtTime(l)} formatter={(v: any) => [`${v}%`, "CPU"]} />
-                <Line type="monotone" dataKey="cpu_pct" stroke="var(--accent)" dot={false} isAnimationActive={false} />
-              </LineChart>
-            </ResponsiveContainer>
-          </ChartCard>
-          <ChartCard title="Memory">
-            <ResponsiveContainer width="100%" height={180}>
-              <AreaChart data={points}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                <XAxis dataKey="ts" tickFormatter={fmtTime} stroke="var(--muted)" fontSize={11} />
-                <YAxis tickFormatter={fmtBytes} stroke="var(--muted)" fontSize={11} width={70} />
-                <Tooltip labelFormatter={(l: any) => fmtTime(l)} formatter={(v: any) => [fmtBytes(v), "Memory"]} />
-                <Area type="monotone" dataKey="mem_used" stroke="var(--accent)" fill="var(--accent-glow)" isAnimationActive={false} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </ChartCard>
-        </div>
-      )}
+      <h3>Deployments</h3>
+      <table className="data-table" style={{ margin: "0.25rem 0 0" }}>
+        <thead><tr><th>Status</th><th>Commit</th><th>Trigger</th><th>Started</th><th className="right" /></tr></thead>
+        <tbody>
+          {deps.map(d => (
+            <tr
+              key={d.id}
+              className="clickable"
+              onClick={() => nav(`/projects/${projectId}/deployments/${d.id}`)}
+            >
+              <td title={d.error ?? undefined}>{historyBadge(d.status)}</td>
+              <td>{d.commit_sha ? <code>{d.commit_sha.slice(0, 7)}</code> : <span className="dim">—</span>}</td>
+              <td><span className="badge plain muted" style={{ textTransform: "capitalize" }}>{d.trigger}</span></td>
+              <td className="dim">{d.created_at ? utcDate(d.created_at).toLocaleString() : "—"}</td>
+              <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </>
   );
-}
-
-function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return <div className="card"><div className="dim" style={{ marginBottom: "0.5rem", fontWeight: 500 }}>{title}</div>{children}</div>;
 }
 
 function runBadge(status: string, conclusion: string | null) {
   if (status === "completed") {
     if (conclusion === "success") return <span className="badge ok">Success</span>;
-    if (conclusion === "failure" || conclusion === "timed_out") return <span className="badge fail">{conclusion}</span>;
+    if (conclusion === "failure" || conclusion === "timed_out") return <span className="badge fail">Failed</span>;
     if (conclusion === "cancelled") return <span className="badge warn">Cancelled</span>;
-    return <span className="badge plain">{conclusion || "completed"}</span>;
+    return <span className="badge plain">{conclusion || "Completed"}</span>;
   }
-  if (status === "in_progress" || status === "queued") return <span className="badge info">{status}</span>;
+  if (status === "in_progress") return <span className="badge info">Running</span>;
+  if (status === "queued") return <span className="badge info">Queued</span>;
   return <span className="badge plain">{status}</span>;
 }
 
@@ -301,29 +324,62 @@ function SettingsModal({ project, onClose }: { project: ProjectDetailData; onClo
   const [name, setName] = useState(project.name);
   const [domainId, setDomainId] = useState<string>(project.domain_id ? String(project.domain_id) : "");
   const [autoDeploy, setAutoDeploy] = useState(project.auto_deploy);
+  const [requireChecks, setRequireChecks] = useState(project.require_checks);
+  // Per-environment domain overrides ("" = inherit the project domain).
+  const [envDomains, setEnvDomains] = useState<Record<number, string>>(
+    Object.fromEntries(project.environments.map(e => [e.id, e.domain_id ? String(e.domain_id) : ""]))
+  );
+  const [envGates, setEnvGates] = useState<Record<number, boolean>>(
+    Object.fromEntries(project.environments.map(e => [e.id, e.promotion_gate]))
+  );
+  const [envE2e, setEnvE2e] = useState<Record<number, string>>(
+    Object.fromEntries(project.environments.map(e => [e.id, e.e2e_workflow ?? ""]))
+  );
 
   const { data: domains } = useQuery<DomainItem[]>({ queryKey: ["domains"], queryFn: () => api.get<DomainItem[]>("/api/domains") });
 
+  const domainName = (id: string): string => {
+    if (id) return (domains ?? []).find(d => d.id === Number(id))?.name ?? "…";
+    return (domains ?? []).find(d => d.is_primary)?.name ?? "…";
+  };
+  const projectDomain = domainName(domainId);
+  const effectiveEnvDomain = (envId: number) => envDomains[envId] ? domainName(envDomains[envId]) : projectDomain;
+
   const save = useMutation({
-    mutationFn: () => api.patch(`/api/projects/${project.id}`, {
-      name, domain_id: domainId ? Number(domainId) : 0, auto_deploy: autoDeploy,
-    }),
-    onSuccess: () => { toast.show("Saved", "ok"); onClose(); },
+    mutationFn: async () => {
+      await api.patch(`/api/projects/${project.id}`, {
+        name, domain_id: domainId ? Number(domainId) : 0,
+        auto_deploy: autoDeploy, require_checks: requireChecks,
+      });
+      for (const env of project.environments) {
+        const body: Record<string, unknown> = {};
+        const chosen = envDomains[env.id] ?? "";
+        if (chosen !== (env.domain_id ? String(env.domain_id) : "")) body.domain_id = chosen ? Number(chosen) : 0;
+        const gate = envGates[env.id] ?? false;
+        if (gate !== env.promotion_gate) body.promotion_gate = gate;
+        const e2e = (envE2e[env.id] ?? "").trim();
+        if (e2e !== (env.e2e_workflow ?? "")) body.e2e_workflow = e2e;
+        if (Object.keys(body).length > 0) {
+          await api.patch(`/api/projects/${project.id}/environments/${env.id}`, body);
+        }
+      }
+    },
+    onSuccess: () => { toast.show("Saved — redeploy to apply hostname changes", "ok"); onClose(); },
     onError: (e) => toast.show(String(e), "fail"),
   });
 
   return (
     <Modal open onClose={onClose} title="Project settings" footer={<>
       <span className="spacer" />
-      <button className="btn" onClick={onClose}>Cancel</button>
+      <button className="btn ghost" onClick={onClose}>Cancel</button>
       <button className="btn primary" disabled={save.isPending} onClick={() => save.mutate()}>
         {save.isPending ? <span className="spinner" /> : "Save"}
       </button>
     </>}>
       <div className="field">
         <label className="lbl">Project name (URL slug)</label>
-        <input value={name} onChange={e => setName(e.target.value)} placeholder="box" />
-        <span className="hint">Used as the hostname base, e.g. <code>{name || "box"}.example.dev</code>.</span>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder={project.name} />
+        <span className="hint">Used as the hostname base, e.g. <code>{name || project.name}.{projectDomain}</code>.</span>
       </div>
       <div className="field">
         <label className="lbl">Domain</label>
@@ -332,62 +388,67 @@ function SettingsModal({ project, onClose }: { project: ProjectDetailData; onClo
           {(domains ?? []).map(d => <option key={d.id} value={d.id}>{d.name}{d.is_primary ? " (primary)" : ""}</option>)}
         </select>
       </div>
-      <label className="row" style={{ cursor: "pointer", gap: "0.4rem", marginTop: "0.5rem" }}>
+
+      <div className="lbl" style={{ marginTop: "0.75rem", marginBottom: "0.3rem" }}>Per-environment overrides</div>
+      {project.environments.map(env => (
+        <div key={env.id} className="row" style={{ gap: "0.6rem", marginBottom: "0.4rem" }}>
+          <span style={{ textTransform: "capitalize", flex: "0 0 5.5rem" }}>{env.name}</span>
+          <select
+            value={envDomains[env.id] ?? ""}
+            onChange={e => setEnvDomains({ ...envDomains, [env.id]: e.target.value })}
+            style={{ flex: 1 }}
+          >
+            <option value="">Project domain</option>
+            {(domains ?? []).map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </select>
+          <code style={{ flex: "0 0 auto" }}>{name || project.name}{env.slug_suffix}.{effectiveEnvDomain(env.id)}</code>
+        </div>
+      ))}
+      <span className="hint">Point environments at different domains, e.g. production on its own domain.</span>
+
+      <div className="lbl" style={{ marginTop: "0.85rem", marginBottom: "0.3rem" }}>Deploy pipeline</div>
+      {project.environments.map(env => {
+        const others = project.environments.filter(e => e.id !== env.id);
+        const sourceName = others.find(e => e.id === (env.promote_from_env_id ?? -1))?.name
+          ?? others.find(e => e.kind !== "production")?.name ?? "dev";
+        const gated = envGates[env.id] ?? false;
+        return (
+          <div key={env.id} className="row" style={{ gap: "0.6rem", marginBottom: "0.4rem", flexWrap: "wrap" }}>
+            <span style={{ textTransform: "capitalize", flex: "0 0 5.5rem" }}>{env.name}</span>
+            <select
+              value={gated ? "promote" : "push"}
+              onChange={e => setEnvGates({ ...envGates, [env.id]: e.target.value === "promote" })}
+              style={{ flex: "0 0 15rem" }}
+            >
+              <option value="push">Deploy on push</option>
+              <option value="promote">Promote from {sourceName} after it deploys</option>
+            </select>
+            {gated && (
+              <input
+                placeholder="e2e workflow file, e.g. e2e.yml (optional)"
+                value={envE2e[env.id] ?? ""}
+                onChange={e => setEnvE2e({ ...envE2e, [env.id]: e.target.value })}
+                style={{ flex: 1, minWidth: "12rem" }}
+              />
+            )}
+          </div>
+        );
+      })}
+      <span className="hint">
+        Promotion waits for the source environment to deploy this commit, then (if set) dispatches the
+        e2e workflow with <code>base_url</code>/<code>environment</code> inputs against it — this
+        environment deploys only when that passes.
+      </span>
+
+      <label className="row" style={{ cursor: "pointer", gap: "0.4rem", marginTop: "0.85rem" }}>
         <input type="checkbox" checked={autoDeploy} onChange={e => setAutoDeploy(e.target.checked)} />
         Auto-deploy on push to the tracked branch
       </label>
-    </Modal>
-  );
-}
-
-// ─── Env var editor ───────────────────────────────────────────────────────────
-function EnvVarsModal({ service, onClose }: { service: ServiceItem; onClose: () => void }) {
-  const toast = useToast();
-  const auto = service.env_vars.filter(v => v.source === "auto");
-  const [rows, setRows] = useState(
-    service.env_vars.filter(v => v.source === "user").map(v => ({ key: v.key, value: v.value, is_secret: v.is_secret }))
-  );
-
-  const save = useMutation({
-    mutationFn: () => api.put(`/api/services/${service.id}/env-vars`, { vars: rows.filter(r => r.key.trim()) }),
-    onSuccess: () => { toast.show("Env vars saved", "ok"); onClose(); },
-    onError: (e) => toast.show(String(e), "fail"),
-  });
-
-  return (
-    <Modal open onClose={onClose} title={`Env vars — ${service.name}`} footer={<>
-      <span className="spacer" />
-      <button className="btn" onClick={onClose}>Cancel</button>
-      <button className="btn primary" disabled={save.isPending} onClick={() => save.mutate()}>
-        {save.isPending ? <span className="spinner" /> : "Save"}
-      </button>
-    </>}>
-      {auto.length > 0 && (
-        <>
-          <div className="lbl">Auto-wired (from dissection)</div>
-          <div className="card" style={{ marginBottom: "1rem" }}>
-            {auto.map(v => (
-              <div key={v.id} className="row" style={{ justifyContent: "space-between", gap: "0.5rem" }}>
-                <code>{v.key}</code><span className="dim" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{v.value}</span>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-      <div className="lbl">Your variables (override auto values)</div>
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginTop: "0.4rem" }}>
-        {rows.map((r, i) => (
-          <div key={i} className="row" style={{ gap: "0.4rem" }}>
-            <input placeholder="KEY" value={r.key} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} style={{ flex: "0 0 35%" }} />
-            <input placeholder="value" value={r.value} type={r.is_secret ? "password" : "text"} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, value: e.target.value } : x))} />
-            <label className="row" style={{ gap: "0.2rem", cursor: "pointer" }} title="Secret">
-              <input type="checkbox" checked={r.is_secret} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, is_secret: e.target.checked } : x))} />🔒
-            </label>
-            <button className="btn small ghost" onClick={() => setRows(rows.filter((_, j) => j !== i))}>✕</button>
-          </div>
-        ))}
-        <button className="btn small" onClick={() => setRows([...rows, { key: "", value: "", is_secret: false }])}>+ Add variable</button>
-      </div>
+      <label className="row" style={{ cursor: "pointer", gap: "0.4rem", marginTop: "0.5rem" }}>
+        <input type="checkbox" checked={requireChecks} onChange={e => setRequireChecks(e.target.checked)} disabled={!autoDeploy} />
+        Wait for GitHub checks to pass before deploying
+      </label>
+      <span className="hint">Applies only when the repo has workflows; repos without CI deploy immediately.</span>
     </Modal>
   );
 }

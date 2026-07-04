@@ -84,6 +84,9 @@ class Project(Base):
     )
     managed: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_deploy: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Gate push auto-deploys on GitHub checks passing (no-op for repos with no
+    # workflows — those deploy on push immediately).
+    require_checks: Mapped[bool] = mapped_column(Boolean, default=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     detected_stack: Mapped[dict] = mapped_column(JSON, default=dict)  # last dissection snapshot
     dissected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -112,6 +115,19 @@ class Environment(Base):
     name: Mapped[str] = mapped_column(String(64))            # production | dev | <feature>
     kind: Mapped[str] = mapped_column(String(16), default="dev")  # production | dev | preview
     branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Per-env override of the project's domain (null = inherit project/primary).
+    domain_id: Mapped[int | None] = mapped_column(
+        ForeignKey("domains.id", ondelete="SET NULL"), nullable=True
+    )
+    # Staged pipeline: when True this env is NOT deployed on push. Instead it
+    # is promoted after `promote_from` (default: the project's dev env) deploys
+    # the same commit successfully — and, if `e2e_workflow` is set, after that
+    # workflow (dispatched against the source env's URL) passes too.
+    promotion_gate: Mapped[bool] = mapped_column(Boolean, default=False)
+    e2e_workflow: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    promote_from_env_id: Mapped[int | None] = mapped_column(
+        ForeignKey("environments.id", ondelete="SET NULL"), nullable=True
+    )
     slug_suffix: Mapped[str] = mapped_column(String(32), default="")
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -184,7 +200,12 @@ class Deployment(Base):
     environment_id: Mapped[int] = mapped_column(
         ForeignKey("environments.id", ondelete="CASCADE"), index=True
     )
-    # queued | cloning | dissecting | building | starting | running | failed | stopped
+    # pending_checks (waiting on GitHub checks) | pending_promotion (waiting on
+    # the source env's deploy) | pending_e2e (e2e workflow running against the
+    # source env) | queued | cloning | dissecting |
+    # building | starting | running | failed | stopped |
+    # superseded (was running, replaced by a newer successful deploy) |
+    # blocked (checks failed/timed out — never built)
     status: Mapped[str] = mapped_column(String(32), default="queued")
     stack_name: Mapped[str] = mapped_column(String(255))
     commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -267,6 +288,11 @@ class Domain(Base):
     mode: Mapped[str] = mapped_column(String(32), default="wildcard")  # wildcard | dedicated
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     cloudflare_routed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Zone lifecycle for domains created in Cloudflare by Homebox:
+    # active (default) | pending (zone created, waiting on registrar NS change)
+    zone_status: Mapped[str] = mapped_column(String(16), default="active")
+    zone_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    name_servers: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

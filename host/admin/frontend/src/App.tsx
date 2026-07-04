@@ -9,10 +9,14 @@ import { AccentProvider } from "./lib/accent";
 import { api } from "./lib/api";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
-import { Tunnel } from "./pages/Tunnel";
+import { DomainsPage } from "./pages/DomainsPage";
+import { System } from "./pages/System";
 import { Projects } from "./pages/Projects";
 import { ProjectDetail } from "./pages/ProjectDetail";
+import { DeploymentDetail } from "./pages/DeploymentDetail";
+import { ServiceDetail } from "./pages/ServiceDetail";
 import { Integrations } from "./pages/Integrations";
+import { IntegrationDetail } from "./pages/IntegrationDetail";
 import { CICD } from "./pages/CICD";
 import { Identities } from "./pages/Identities";
 import { Onboarding } from "./pages/Onboarding";
@@ -58,14 +62,18 @@ export function App() {
             <Route path="/onboarding" element={<RequireAuth><Onboarding /></RequireAuth>} />
             <Route element={<RequireAuth><RequireOnboarded><Layout /></RequireOnboarded></RequireAuth>}>
               <Route path="/" element={<Overview />} />
-              <Route path="/tunnel" element={<Tunnel />} />
+              <Route path="/domains" element={<DomainsPage />} />
+              <Route path="/system" element={<System />} />
               <Route path="/integrations" element={<Integrations />} />
+              <Route path="/integrations/:integrationId" element={<IntegrationDetail />} />
               <Route path="/projects" element={<Projects />} />
               <Route path="/projects/:projectId" element={<ProjectDetail />} />
+              <Route path="/projects/:projectId/deployments/:deploymentId" element={<DeploymentDetail />} />
+              <Route path="/projects/:projectId/services/:serviceId" element={<ServiceDetail />} />
               <Route path="/cicd" element={<CICD />} />
               <Route path="/identities" element={<Identities />} />
               {/* Legacy routes — pages were merged into the parents above. */}
-              <Route path="/domains" element={<Navigate to="/tunnel" replace />} />
+              <Route path="/tunnel" element={<Navigate to="/domains" replace />} />
               <Route path="/github" element={<Navigate to="/integrations" replace />} />
               <Route path="/runner" element={<Navigate to="/cicd" replace />} />
             </Route>

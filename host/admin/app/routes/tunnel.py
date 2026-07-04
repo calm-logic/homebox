@@ -16,10 +16,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import cloudflare as cf
-from .. import cf_login
 from ..auth import require_session_api
 from ..db import get_session
-from ..models import Domain, Setting, UptimeSample
+from ..models import Domain, ServiceInstance, Setting, UptimeSample
 from ..host import (
     container_status,
     remove_container,
@@ -104,6 +103,16 @@ async def _all_domains(session: AsyncSession) -> list[Domain]:
     return list(
         (await session.execute(select(Domain).order_by(Domain.name))).scalars().all()
     )
+
+
+async def _served_hostnames(session: AsyncSession) -> set[str]:
+    """Hostnames this install serves through the tunnel — from deployed service
+    instance URLs. Used to repair stale per-project DNS records (left by older
+    installs/tunnels) that shadow the wildcard and cause 530/1033."""
+    urls = (await session.execute(
+        select(ServiceInstance.url).where(ServiceInstance.url.is_not(None)).distinct()
+    )).scalars().all()
+    return {u.split("://", 1)[-1].split("/", 1)[0].lower() for u in urls if u}
 
 
 async def _dns_report(state: dict[str, Any], session: AsyncSession) -> dict[str, Any]:
@@ -213,6 +222,31 @@ async def _resync_dns(state: dict[str, Any], session: AsyncSession) -> dict[str,
             dirty = True
     if dirty:
         await session.commit()
+
+    # Per-project hostnames: a leftover specific record (older install, old
+    # tunnel id) shadows the wildcard and 530s just that host. Repoint any
+    # tunnel CNAME for a hostname we serve that targets a different tunnel.
+    served = await _served_hostnames(session)
+    for z in zones:
+        suffix = "." + z["name"]
+        hosts_in_zone = {h for h in served if h.endswith(suffix) or h == z["name"]}
+        if not hosts_in_zone:
+            continue
+        try:
+            records = await cf.list_dns_records(token, z["id"])
+        except cf.CloudflareError as e:
+            result["errors"].append({"hostname": f"*{suffix}", "error": str(e)})
+            continue
+        for r in records:
+            name = (r.get("name") or "").lower()
+            if (r.get("type") == "CNAME" and name in hosts_in_zone
+                    and "cfargotunnel.com" in (r.get("content") or "")
+                    and r.get("content") != target):
+                try:
+                    await cf.upsert_cname(token, z["id"], name, target, proxied=True)
+                    result["updated"].append(name)
+                except cf.CloudflareError as e:
+                    result["errors"].append({"hostname": name, "error": str(e)})
     return result
 
 
@@ -347,66 +381,6 @@ async def set_cloudflare_token(
     session: AsyncSession = Depends(get_session),
 ):
     return await _validate_and_store_token(session, body.token, body.account_id)
-
-
-# ───── Browser "Connect with Cloudflare" (cloudflared login) ──────────────────
-
-
-@router.get("/cloudflare/login/available")
-async def cf_login_available(user: str = Depends(require_session_api)):
-    """Whether the browser-login flow can run (cloudflared binary present)."""
-    return {"available": cf_login.available()}
-
-
-@router.post("/cloudflare/login/start")
-async def cf_login_start(user: str = Depends(require_session_api)):
-    """Begin the browser flow: returns the Cloudflare authorize URL to open.
-    cloudflared keeps polling Cloudflare for the cert in the background."""
-    try:
-        return await cf_login.start()
-    except RuntimeError as e:
-        raise HTTPException(500, str(e))
-
-
-class LoginPollBody(BaseModel):
-    session_id: str
-
-
-@router.post("/cloudflare/login/poll")
-async def cf_login_poll(
-    body: LoginPollBody,
-    user: str = Depends(require_session_api),
-    session: AsyncSession = Depends(get_session),
-):
-    """Poll the in-flight browser login. On 'ready', extract the token from the
-    delivered cert.pem, validate + persist it (same path as a pasted token), and
-    return the connected account."""
-    result = await cf_login.poll(body.session_id)
-    status = result.get("status")
-    if status != "ready":
-        return result  # unknown | pending | failed | expired
-
-    parsed = cf.parse_cert_token(result.get("cert_pem") or "")
-    if not parsed:
-        cf_login.cancel(body.session_id)
-        raise HTTPException(500, "Cloudflare returned a certificate without an API token.")
-
-    try:
-        persisted = await _validate_and_store_token(
-            session, parsed["apiToken"], parsed.get("accountID")
-        )
-    finally:
-        cf_login.finalize(body.session_id)
-
-    return {"status": "connected", **persisted}
-
-
-@router.post("/cloudflare/login/cancel")
-async def cf_login_cancel(
-    body: LoginPollBody,
-    user: str = Depends(require_session_api),
-):
-    return cf_login.cancel(body.session_id)
 
 
 @router.delete("/token")
@@ -706,6 +680,19 @@ async def dns_health(
     if not state.get("tunnel_id"):
         raise HTTPException(400, "No tunnel configured. Connect a tunnel first.")
     return await _dns_report(state, session)
+
+
+@router.get("/dns-status")
+async def dns_status(
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Last background DNS drift check (monitor runs it hourly). The Domains
+    page shows a banner only when this reports problems."""
+    row = (await session.execute(
+        select(Setting).where(Setting.key == "dns_status")
+    )).scalar_one_or_none()
+    return row.value if row and isinstance(row.value, dict) else {"checked_at": None, "in_sync": True, "issues": [], "repaired": []}
 
 
 @router.post("/resync-dns")

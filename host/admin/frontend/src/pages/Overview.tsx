@@ -15,27 +15,22 @@ export function Overview() {
   }
 
   const steps: { text: string; done: boolean; href: string }[] = [
-    { text: "Add a domain — pick a wildcard root or a dedicated project domain.", done: data.domain_count > 0, href: "/tunnel" },
-    { text: "Verify the Cloudflare tunnel is connected.", done: data.domain_count > 0, href: "/tunnel" },
-    { text: "Connect a GitHub organization.", done: data.integration_count > 0, href: "/integrations" },
-    { text: "Register a self-hosted runner so deploys land on this host.", done: data.runner.container_count > 0, href: "/cicd" },
-    { text: "Adopt a repository to deploy it as a project.", done: data.managed_count > 0, href: "/projects" },
+    { text: "Add a domain", done: data.domain_count > 0, href: "/domains" },
+    { text: "Connect the Cloudflare tunnel", done: data.domain_count > 0, href: "/integrations" },
+    { text: "Connect a GitHub organization", done: data.integration_count > 0, href: "/integrations" },
+    { text: "Adopt a repository", done: data.managed_count > 0, href: "/projects" },
   ];
 
   return (
     <>
       <h1>Overview</h1>
-      <p className="lede">Your self-hosted application platform. Configure domains, connect GitHub, and deploy projects from one place.</p>
+      <p className="lede">Domains, GitHub, and deploys — managed from one place.</p>
 
       <div className="metric-grid">
-        <Metric label="Routes" value={data.domain_count} link="/tunnel" />
+        <Metric label="Domains" value={data.domain_count} link="/domains" />
         <Metric label="Integrations" value={data.integration_count} link="/integrations" />
         <Metric label="Projects" value={`${data.managed_count}/${data.project_count}`} link="/projects" />
-        <Metric
-          label="Runner"
-          value={data.runner.container_count > 0 ? <span className="badge ok">{data.runner.container_count} active</span> : <span className="badge warn">Not set up</span>}
-          link="/cicd"
-        />
+        <Metric label="CI/CD" value={<span className="dim" style={{ fontSize: "1rem" }}>runs</span>} link="/cicd" />
       </div>
 
       <h2>Get started</h2>
