@@ -45,6 +45,8 @@ log = logging.getLogger("homebox.cluster")
 
 NODE_KEYS_KEY = "node_keys"
 CLUSTER_KEY = "cluster"
+ACCOUNT_KEY = "account"
+ACCOUNT_OVERVIEW_KEY = "account_overview"
 INSTALL_ID_KEY = "install_id"
 ADMIN_DOMAIN_KEY = "admin_domain"
 
@@ -379,6 +381,209 @@ def restart_self_soon(delay: float = 2.0) -> None:
     asyncio.get_event_loop().create_task(_later())
 
 
+# ───── homebox.sh account link (token-less create/join UX) ───────────────────
+#
+# A node linked to a homebox.sh account can, from its Cluster page, see every
+# other linked node and every cluster on the account, create clusters, join
+# one directly, or invite another node — the control plane delivers the
+# invite as a directive the target node picks up on its next poll and joins
+# automatically. Join tokens still work as the manual fallback.
+
+
+async def load_account(session: AsyncSession) -> dict[str, Any] | None:
+    val = await _get_setting(session, ACCOUNT_KEY)
+    return val if isinstance(val, dict) and val.get("token_encrypted") else None
+
+
+async def link_account_flow(
+    session: AsyncSession, *, control_plane_url: str, account_token_plain: str,
+    node_name: str, peer_url: str,
+) -> dict[str, Any]:
+    node_id = await get_node_id(session)
+    _, pub = await get_node_keys(session)
+    await _cp("POST", control_plane_url, "/v1/accounts/nodes",
+              token=account_token_plain,
+              body={"node_id": node_id, "name": node_name, "pubkey": pub,
+                    "peer_url": peer_url, "version": VERSION})
+    blob = {
+        "control_plane_url": control_plane_url.rstrip("/"),
+        "token_encrypted": crypto.encrypt(account_token_plain),
+        "node_name": node_name,
+        "peer_url": peer_url,
+        "linked_at": datetime.utcnow().isoformat(),
+    }
+    await _set_setting(session, ACCOUNT_KEY, blob)
+    await account_poll(session, blob)
+    return blob
+
+
+async def unlink_account(session: AsyncSession) -> None:
+    acct = await load_account(session)
+    if acct:
+        try:
+            node_id = await get_node_id(session)
+            await _cp("DELETE", acct["control_plane_url"], f"/v1/accounts/nodes/{node_id}",
+                      token=crypto.decrypt(acct["token_encrypted"]))
+        except ControlPlaneError as e:
+            log.warning("account unlink at control plane failed: %s", e)
+    await _set_setting(session, ACCOUNT_KEY, {})
+    await _set_setting(session, ACCOUNT_OVERVIEW_KEY, {})
+
+
+async def account_poll(session: AsyncSession, acct: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Refresh the account overview cache; returns it (or None when unlinked).
+    Also surfaces any pending join directive for this node."""
+    acct = acct or await load_account(session)
+    if not acct:
+        return None
+    node_id = await get_node_id(session)
+    overview = await _cp(
+        "POST", acct["control_plane_url"], "/v1/accounts/poll",
+        token=crypto.decrypt(acct["token_encrypted"]),
+        body={"node_id": node_id, "peer_url": acct.get("peer_url") or "",
+              "version": VERSION, "name": acct.get("node_name") or ""},
+    )
+    overview["polled_at"] = datetime.utcnow().isoformat()
+    await _set_setting(session, ACCOUNT_OVERVIEW_KEY, overview)
+    return overview
+
+
+async def _maybe_autojoin(session: AsyncSession, overview: dict[str, Any]) -> None:
+    """Execute a pending join directive (invite from another node)."""
+    directive = overview.get("directive")
+    if not directive:
+        return
+    if await load_cluster(session):
+        return  # already in a cluster — the directive stays pending until leave
+    acct = await load_account(session)
+    if not acct:
+        return
+    log.info("account directive: joining cluster %s (%s)",
+             directive.get("cluster_id"), directive.get("cluster_name"))
+    await join_cluster_flow(
+        session,
+        control_plane_url=acct["control_plane_url"],
+        join_token=directive["join_token"],
+        peer_url=acct.get("peer_url") or "",
+        node_name=acct.get("node_name") or "",
+    )
+
+
+# ───── leave / disconnect ─────────────────────────────────────────────────────
+
+
+async def leave_cluster_flow(
+    session: AsyncSession, *, stop_tunnel: bool = True, teardown_stacks: bool = False,
+) -> dict[str, Any]:
+    """Fully disconnect this node: tell peers (they drop their subs to us,
+    releasing our WAL slots on their side), drop our own subscriptions, stop
+    serving the shared tunnel, optionally tear down cluster-enabled stacks,
+    then deregister. Every step is best-effort — leave always completes."""
+    from . import cluster_db
+    from .deploy import repo_dir, teardown_stack
+    from .urls import stack_name as make_stack_name
+
+    state = await load_cluster(session)
+    if not state:
+        raise PeerError("This node is not part of a cluster.")
+    node_id = await get_node_id(session)
+    secret = cluster_secret(state)
+    result: dict[str, Any] = {"peers_notified": [], "subs_dropped": [],
+                              "stacks_torn_down": [], "tunnel_stopped": False}
+
+    # 1. peers drop their subscriptions to us (must happen while we're still
+    #    in their roster so our peer token verifies)
+    for peer in peers(state, node_id):
+        if not peer.get("peer_url"):
+            continue
+        try:
+            await peer_request("POST", peer["peer_url"], "/peer/node-leaving",
+                               secret=secret, self_node_id=node_id,
+                               body={"node_id": node_id}, timeout=60)
+            result["peers_notified"].append(peer.get("name") or peer["node_id"])
+        except PeerError as e:
+            log.warning("leave: peer notify failed (their reconcile will catch up): %s", e)
+
+    # 2. drop OUR subscriptions + optionally tear the stacks down
+    rows = (await session.execute(
+        select(Deployment, Environment, Project)
+        .join(Environment, Deployment.environment_id == Environment.id)
+        .join(Project, Environment.project_id == Project.id)
+        .where(Deployment.status == "running")
+    )).all()
+    seen: set[str] = set()
+    for dep, env, project in rows:
+        stack = make_stack_name(project, env)
+        if stack in seen:
+            continue
+        seen.add(stack)
+        rd = repo_dir(project.name, env.name)
+        if not cluster_db.cluster_db_enabled(rd):
+            continue
+        for info in cluster_db.infos_from_compose(rd):
+            try:
+                result["subs_dropped"] += await cluster_db.drop_subscriptions(stack=stack, info=info)
+            except Exception:  # noqa: BLE001
+                log.exception("leave: sub drop failed for %s", stack)
+        if teardown_stacks:
+            ok, _out = await teardown_stack(project.name, env.name)
+            if ok:
+                dep.status = "stopped"
+                result["stacks_torn_down"].append(stack)
+    if teardown_stacks:
+        await session.commit()
+
+    # 3. stop serving the shared tunnel: remove the connector AND forget the
+    #    connector token locally so the monitor doesn't resurrect it. (The
+    #    Cloudflare integration row itself stays — it may hold the account
+    #    token for other purposes; a single-node install keeps working.)
+    if stop_tunnel:
+        from . import cloudflare as cf
+        from .host import remove_container
+        cf_state = await cf.load_state(session)
+        if cf_state.get("connector_token_encrypted"):
+            cf_state.pop("connector_token_encrypted", None)
+            await cf.save_state(session, cf_state)
+        remove_container("homebox-cloudflared")
+        result["tunnel_stopped"] = True
+
+    # 4. deregister + forget membership
+    acct_token = account_token(state)
+    if acct_token:
+        try:
+            await _cp("DELETE", state["control_plane_url"],
+                      f"/v1/clusters/{state['cluster_id']}/nodes/{node_id}",
+                      token=acct_token)
+        except ControlPlaneError as e:
+            log.warning("leave: control-plane deregister failed: %s", e)
+    await clear_cluster(session)
+    log.info("left cluster %s: %s", state["cluster_id"], result)
+    return result
+
+
+async def evict_node(session: AsyncSession, node_id_to_evict: str) -> dict[str, Any]:
+    """Remove another (typically dead) node at the control plane. Every
+    surviving node's reconcile then drops its subscriptions to the departed
+    ordinal, releasing WAL slots."""
+    state = await load_cluster(session)
+    if not state:
+        raise PeerError("This node is not part of a cluster.")
+    acct = account_token(state) or ""
+    if not acct:
+        blob = await load_account(session)
+        acct = crypto.decrypt(blob["token_encrypted"]) if blob else ""
+    if not acct:
+        raise ControlPlaneError("No account credential on this node — evict from the founding node.")
+    resp = await _cp("DELETE", state["control_plane_url"],
+                     f"/v1/clusters/{state['cluster_id']}/nodes/{node_id_to_evict}",
+                     token=acct)
+    state["roster"] = resp.get("nodes") or state.get("roster")
+    await save_cluster(session, state)
+    # Clean up our side right away rather than waiting for the next cycle.
+    await ensure_db_replication(session, state)
+    return resp
+
+
 # ───── steady-state loop ──────────────────────────────────────────────────────
 
 
@@ -650,6 +855,15 @@ async def cluster_loop() -> None:
                         # admin_domain was known).
                         await ensure_peer_route(session)
                         await check_network_conflicts(session, state)
+                # Account link is independent of membership: keeps the
+                # overview cache fresh and executes pending join directives
+                # (an invite issued from another node).
+                try:
+                    overview = await account_poll(session)
+                    if overview:
+                        await _maybe_autojoin(session, overview)
+                except ControlPlaneError as e:
+                    log.warning("account poll failed: %s", e)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — the loop must survive anything

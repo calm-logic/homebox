@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, Network, Plus, RefreshCw, Ticket, Unplug } from "lucide-react";
+import { Copy, LogIn, Network, Plus, RefreshCw, Send, Ticket, Unplug, UserMinus } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
@@ -10,8 +10,8 @@ type ClusterNode = {
   name: string;
   peer_url: string;
   version: string;
+  ordinal?: number;
   online: boolean;
-  last_seen: number | null;
 };
 
 type ClusterStatus = {
@@ -19,113 +19,247 @@ type ClusterStatus = {
   node_id: string;
   cluster_id?: string;
   name?: string;
-  node_name?: string;
-  peer_url?: string;
-  control_plane_url?: string;
   roster?: ClusterNode[];
   license?: { valid: boolean; plan: string; max_nodes: number; node_count: number };
   initial_sync_done?: boolean;
   last_heartbeat?: string | null;
   last_sync_at?: string | null;
+  control_plane_url?: string;
+};
+
+type AccountNode = { node_id: string; name: string; peer_url: string; online: boolean };
+type AccountCluster = { cluster_id: string; name: string; nodes: ClusterNode[] };
+type AccountStatus = {
+  linked: boolean;
+  node_name?: string;
+  peer_url?: string;
+  control_plane_url?: string;
+  overview?: { nodes?: AccountNode[]; clusters?: AccountCluster[]; polled_at?: string };
 };
 
 export function Cluster() {
   const qc = useQueryClient();
   const toast = useToast();
-  const [mode, setMode] = useState<"create" | "join">("create");
-  const [name, setName] = useState("home");
-  const [accountToken, setAccountToken] = useState("");
-  const [joinToken, setJoinToken] = useState("");
-  const [peerUrl, setPeerUrl] = useState("");
-  const [nodeName, setNodeName] = useState("");
-  const [cpUrl, setCpUrl] = useState("");
   const [confirmLeave, setConfirmLeave] = useState(false);
+  const [stopTunnel, setStopTunnel] = useState(true);
+  const [teardownStacks, setTeardownStacks] = useState(false);
   const [mintedToken, setMintedToken] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
+  const [showManualJoin, setShowManualJoin] = useState(false);
+  // account link form
+  const [accountToken, setAccountToken] = useState("");
+  const [nodeName, setNodeName] = useState("");
+  const [peerUrl, setPeerUrl] = useState("");
+  const [cpUrl, setCpUrl] = useState("");
+  // create / manual join
+  const [newClusterName, setNewClusterName] = useState("home");
+  const [joinToken, setJoinToken] = useState("");
 
   const { data: status } = useQuery<ClusterStatus>({
     queryKey: ["cluster"],
     queryFn: () => api.get<ClusterStatus>("/api/cluster"),
-    // While a join restart is in flight, poll until the node comes back.
-    refetchInterval: joining ? 3000 : 30000,
+    refetchInterval: joining ? 3000 : 15000,
+    retry: true,
+  });
+  const { data: account } = useQuery<AccountStatus>({
+    queryKey: ["cluster-account"],
+    queryFn: () => api.get<AccountStatus>("/api/cluster/account"),
+    refetchInterval: 20000,
     retry: true,
   });
 
-  const create = useMutation({
-    mutationFn: () =>
-      api.post("/api/cluster/create", {
-        name, account_token: accountToken, peer_url: peerUrl,
-        node_name: nodeName, control_plane_url: cpUrl.trim() || null,
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["cluster"] });
-      toast.show("Cluster created — this node is the seed", "ok");
-    },
-    onError: (e) => toast.show(String(e), "fail"),
-  });
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["cluster"] });
+    qc.invalidateQueries({ queryKey: ["cluster-account"] });
+  };
+  const onErr = (e: unknown) => toast.show(String(e), "fail");
 
-  const join = useMutation({
-    mutationFn: () =>
-      api.post("/api/cluster/join", {
-        join_token: joinToken, peer_url: peerUrl,
-        node_name: nodeName, control_plane_url: cpUrl.trim() || null,
-      }),
-    onSuccess: () => {
-      setJoining(true);
-      toast.show("Joined! Restarting to adopt cluster keys — this page will catch up shortly.", "ok");
-    },
-    onError: (e) => toast.show(String(e), "fail"),
+  const link = useMutation({
+    mutationFn: () => api.post("/api/cluster/account/link", {
+      account_token: accountToken, node_name: nodeName, peer_url: peerUrl,
+      control_plane_url: cpUrl.trim() || null,
+    }),
+    onSuccess: () => { invalidate(); toast.show("Signed in — this node is now linked", "ok"); setAccountToken(""); },
+    onError: onErr,
   });
-
+  const unlink = useMutation({
+    mutationFn: () => api.del("/api/cluster/account"),
+    onSuccess: () => { invalidate(); toast.show("Unlinked from account", "ok"); },
+    onError: onErr,
+  });
+  const refresh = useMutation({
+    mutationFn: () => api.post("/api/cluster/account/refresh"),
+    onSuccess: () => { invalidate(); },
+    onError: onErr,
+  });
+  const createCluster = useMutation({
+    mutationFn: () => api.post("/api/cluster/account/create-cluster", { name: newClusterName }),
+    onSuccess: () => { invalidate(); toast.show("Cluster created — this node is the seed", "ok"); },
+    onError: onErr,
+  });
+  const joinCluster = useMutation({
+    mutationFn: (cluster_id: string) => api.post("/api/cluster/account/join", { cluster_id }),
+    onSuccess: () => { setJoining(true); toast.show("Joining — restarting onto the cluster keys…", "ok"); },
+    onError: onErr,
+  });
+  const inviteNode = useMutation({
+    mutationFn: (node_id: string) => api.post("/api/cluster/account/invite", { node_id }),
+    onSuccess: (_d, node_id) => toast.show(`Invited ${node_id} — it joins automatically within a minute`, "ok"),
+    onError: onErr,
+  });
+  const evict = useMutation({
+    mutationFn: (node_id: string) => api.post("/api/cluster/evict", { node_id }),
+    onSuccess: () => { invalidate(); toast.show("Node evicted — replication links are being cleaned up", "ok"); },
+    onError: onErr,
+  });
+  const manualJoin = useMutation({
+    mutationFn: () => api.post("/api/cluster/join", {
+      join_token: joinToken, peer_url: peerUrl, node_name: nodeName,
+      control_plane_url: cpUrl.trim() || null,
+    }),
+    onSuccess: () => { setJoining(true); toast.show("Joined — restarting onto the cluster keys…", "ok"); },
+    onError: onErr,
+  });
   const mint = useMutation({
     mutationFn: () => api.post<{ join_token: string }>("/api/cluster/join-token"),
     onSuccess: (d) => setMintedToken(d.join_token),
-    onError: (e) => toast.show(String(e), "fail"),
+    onError: onErr,
   });
-
   const sync = useMutation({
     mutationFn: () => api.post("/api/cluster/sync"),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["cluster"] });
-      toast.show("Sync triggered", "ok");
-    },
-    onError: (e) => toast.show(String(e), "fail"),
+    onSuccess: () => { invalidate(); toast.show("Sync triggered", "ok"); },
+    onError: onErr,
   });
-
   const leave = useMutation({
-    mutationFn: () => api.post("/api/cluster/leave"),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["cluster"] });
-      setConfirmLeave(false);
-      toast.show("Left the cluster", "ok");
-    },
-    onError: (e) => toast.show(String(e), "fail"),
+    mutationFn: () => api.post("/api/cluster/leave", { stop_tunnel: stopTunnel, teardown_stacks: teardownStacks }),
+    onSuccess: () => { invalidate(); setConfirmLeave(false); toast.show("Left the cluster (disconnected)", "ok"); },
+    onError: onErr,
   });
 
-  function submit(e: FormEvent) {
+  const overview = account?.overview ?? {};
+  const rosterIds = new Set((status?.roster ?? []).map(n => n.node_id));
+  const invitableNodes = (overview.nodes ?? []).filter(n => !rosterIds.has(n.node_id));
+
+  function submitLink(e: FormEvent) {
     e.preventDefault();
-    if (!peerUrl.trim()) {
-      toast.show("Set this node's LAN address (peers reach it there)", "fail");
-      return;
-    }
-    if (mode === "create") create.mutate();
-    else join.mutate();
+    if (!peerUrl.trim()) { toast.show("Set this node's LAN address", "fail"); return; }
+    link.mutate();
   }
 
-  if (status?.active) {
-    const roster = status.roster ?? [];
-    return (
-      <>
-        <h1>Cluster</h1>
-        <p className="lede">
-          Active-active cluster <strong>{status.name}</strong> — every node serves the same
-          apps; traffic arrives via the shared Cloudflare tunnel on whichever node is closest.
-        </p>
+  const accountSection = account?.linked ? (
+    <div className="card">
+      <div className="card-row">
+        <div className="row">
+          <span className="badge ok"><LogIn size={12} /> homebox.sh account linked</span>
+          <span className="dim">as {account.node_name || "unnamed node"} · {account.peer_url}</span>
+        </div>
+        <div className="row" style={{ gap: "0.5rem" }}>
+          <button className="ghost" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
+            <RefreshCw size={14} /> Refresh
+          </button>
+          <button className="ghost" onClick={() => unlink.mutate()}>Unlink</button>
+        </div>
+      </div>
 
+      {(overview.clusters ?? []).length > 0 && (
+        <>
+          <h3 style={{ marginTop: "0.9rem" }}>Your clusters</h3>
+          {(overview.clusters ?? []).map(cl => (
+            <div key={cl.cluster_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
+              <div className="row" style={{ gap: "0.5rem" }}>
+                <strong>{cl.name}</strong>
+                <span className="dim">{cl.cluster_id}</span>
+                <span className="badge">{cl.nodes.length} node{cl.nodes.length === 1 ? "" : "s"}</span>
+              </div>
+              {status?.active && status.cluster_id === cl.cluster_id ? (
+                <span className="chip active">this cluster</span>
+              ) : !status?.active ? (
+                <button onClick={() => joinCluster.mutate(cl.cluster_id)} disabled={joinCluster.isPending}>
+                  Join this cluster
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </>
+      )}
+
+      <h3 style={{ marginTop: "0.9rem" }}>Linked nodes</h3>
+      {(overview.nodes ?? []).map(n => (
+        <div key={n.node_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
+          <div className="row" style={{ gap: "0.5rem" }}>
+            <span className={`badge ${n.online ? "ok" : "fail"}`}>{n.online ? "online" : "offline"}</span>
+            <strong>{n.name || n.node_id}</strong>
+            {n.node_id === status?.node_id && <span className="chip active">this node</span>}
+            <span className="dim">{n.peer_url}</span>
+          </div>
+          {status?.active && !rosterIds.has(n.node_id) && (
+            <button className="ghost" onClick={() => inviteNode.mutate(n.node_id)} disabled={inviteNode.isPending}>
+              <Send size={14} /> Invite to this cluster
+            </button>
+          )}
+        </div>
+      ))}
+      {(overview.nodes ?? []).length <= 1 && (
+        <div className="dim" style={{ marginTop: "0.4rem" }}>
+          Sign in on your other homebox nodes with the same account token — they'll appear here,
+          ready to invite. No join tokens needed.
+        </div>
+      )}
+
+      {!status?.active && (
+        <div className="row" style={{ marginTop: "0.9rem", gap: "0.5rem" }}>
+          <input value={newClusterName} onChange={e => setNewClusterName(e.target.value)}
+                 placeholder="cluster name" style={{ maxWidth: 200 }} />
+          <button onClick={() => createCluster.mutate()} disabled={createCluster.isPending}>
+            <Plus size={14} /> Create cluster with this node
+          </button>
+        </div>
+      )}
+    </div>
+  ) : (
+    <div className="card">
+      <h3><LogIn size={15} /> Sign in to homebox.sh</h3>
+      <p className="dim">
+        Link this node to your account to see all your nodes and clusters from anywhere,
+        create clusters, and add nodes with one click — no join tokens.
+      </p>
+      <form onSubmit={submitLink} style={{ display: "grid", gap: "0.7rem", maxWidth: 560 }}>
+        <label>Account token
+          <input value={accountToken} onChange={e => setAccountToken(e.target.value)}
+                 placeholder="any token in dev mode" />
+        </label>
+        <label>Node name
+          <input value={nodeName} onChange={e => setNodeName(e.target.value)} placeholder="living-room-mini" />
+        </label>
+        <label>This node's LAN address (peers connect here, port 80)
+          <input value={peerUrl} onChange={e => setPeerUrl(e.target.value)} placeholder="http://192.168.1.10" />
+        </label>
+        <label>Control plane URL (leave empty for control.homebox.sh)
+          <input value={cpUrl} onChange={e => setCpUrl(e.target.value)}
+                 placeholder={account?.control_plane_url || "https://control.homebox.sh"} />
+        </label>
+        <div><button type="submit" disabled={link.isPending}>Sign in & link node</button></div>
+      </form>
+    </div>
+  );
+
+  return (
+    <>
+      <h1>Cluster</h1>
+      <p className="lede">
+        Active-active clustering: every node serves the same apps through the shared tunnel,
+        with replicated databases and automatic failover.
+      </p>
+
+      {joining && (
+        <div className="card"><span className="spinner" /> Restarting onto the cluster keys — hang tight…</div>
+      )}
+
+      {status?.active && (
         <div className="card">
           <div className="card-row">
             <div className="row">
-              <span className="badge ok"><Network size={12} /> {status.cluster_id}</span>
+              <span className="badge ok"><Network size={12} /> {status.name} · {status.cluster_id}</span>
               {status.license && (
                 <span className="badge">{status.license.node_count}/{status.license.max_nodes} nodes · {status.license.plan}</span>
               )}
@@ -136,10 +270,10 @@ export function Cluster() {
                 <RefreshCw size={14} /> Sync now
               </button>
               <button className="ghost" onClick={() => mint.mutate()} disabled={mint.isPending}>
-                <Ticket size={14} /> Mint join token
+                <Ticket size={14} /> Join token
               </button>
               <button className="ghost danger" onClick={() => setConfirmLeave(true)}>
-                <Unplug size={14} /> Leave
+                <Unplug size={14} /> Leave…
               </button>
             </div>
           </div>
@@ -147,33 +281,30 @@ export function Cluster() {
           {mintedToken && (
             <div className="card-row" style={{ marginTop: "0.75rem" }}>
               <code style={{ wordBreak: "break-all", userSelect: "all" }}>{mintedToken}</code>
-              <button
-                className="ghost"
-                onClick={() => { navigator.clipboard.writeText(mintedToken); toast.show("Copied", "ok"); }}
-              >
+              <button className="ghost"
+                onClick={() => { navigator.clipboard.writeText(mintedToken); toast.show("Copied", "ok"); }}>
                 <Copy size={14} /> Copy
               </button>
             </div>
           )}
-          {mintedToken && (
-            <div className="dim" style={{ marginTop: "0.4rem" }}>
-              Paste this on the new node's Cluster page (single use, expires in 48h).
-            </div>
-          )}
-        </div>
 
-        <div className="card">
-          <h3>Nodes</h3>
-          {roster.map((n) => (
+          <h3 style={{ marginTop: "0.9rem" }}>Nodes</h3>
+          {(status.roster ?? []).map(n => (
             <div key={n.node_id} className="row" style={{ justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", padding: "0.4rem 0" }}>
               <div className="row" style={{ gap: "0.5rem", minWidth: 0 }}>
                 <span className={`badge ${n.online ? "ok" : "fail"}`}>{n.online ? "online" : "offline"}</span>
                 <strong>{n.name || n.node_id}</strong>
+                {n.ordinal != null && <span className="dim">n{n.ordinal}</span>}
                 {n.node_id === status.node_id && <span className="chip active">this node</span>}
               </div>
               <div className="row" style={{ gap: "0.75rem" }}>
                 <span className="dim">{n.peer_url || "no peer URL"}</span>
-                <span className="dim">{n.version}</span>
+                {n.node_id !== status.node_id && (
+                  <button className="ghost danger" title="Remove this node from the cluster (for dead/unreachable nodes — use Leave on the node itself when possible)"
+                    onClick={() => evict.mutate(n.node_id)} disabled={evict.isPending}>
+                    <UserMinus size={14} /> Evict
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -181,85 +312,63 @@ export function Cluster() {
             Last heartbeat {status.last_heartbeat ?? "never"} · last config sync {status.last_sync_at ?? "never"}
           </div>
         </div>
+      )}
 
-        <Modal
-          open={confirmLeave}
-          title="Leave cluster?"
-          onClose={() => setConfirmLeave(false)}
-          footer={
-            <>
-              <button className="ghost" onClick={() => setConfirmLeave(false)}>Cancel</button>
-              <button className="danger" onClick={() => leave.mutate()} disabled={leave.isPending}>Leave cluster</button>
-            </>
-          }
-        >
-          Running app stacks stay up and keys are not rotated — this only removes the node
-          from the roster and stops config/deploy sync.
-        </Modal>
-      </>
-    );
-  }
+      {accountSection}
 
-  return (
-    <>
-      <h1>Cluster</h1>
-      <p className="lede">
-        Run this homebox as part of an active-active cluster: every node deploys the same
-        apps, shares the Cloudflare tunnel, and replicates app databases. Requires a
-        homebox.sh account.
-      </p>
-
-      {joining && (
+      {!status?.active && (
         <div className="card">
-          <span className="spinner" /> Restarting onto the cluster keys — hang tight…
+          <div className="row" style={{ justifyContent: "space-between" }}>
+            <h3 style={{ margin: 0 }}>Manual join (token fallback)</h3>
+            <button className="ghost" onClick={() => setShowManualJoin(s => !s)}>
+              {showManualJoin ? "Hide" : "Show"}
+            </button>
+          </div>
+          {showManualJoin && (
+            <form onSubmit={(e) => { e.preventDefault(); manualJoin.mutate(); }}
+                  style={{ display: "grid", gap: "0.7rem", maxWidth: 560, marginTop: "0.7rem" }}>
+              <label>Join token (minted on an existing node)
+                <input value={joinToken} onChange={e => setJoinToken(e.target.value)} placeholder="hbj.hbc_…" />
+              </label>
+              <label>This node's LAN address
+                <input value={peerUrl} onChange={e => setPeerUrl(e.target.value)} placeholder="http://192.168.1.10" />
+              </label>
+              <label>Node name
+                <input value={nodeName} onChange={e => setNodeName(e.target.value)} placeholder="basement-mini" />
+              </label>
+              <label>Control plane URL (empty = control.homebox.sh)
+                <input value={cpUrl} onChange={e => setCpUrl(e.target.value)} placeholder="https://control.homebox.sh" />
+              </label>
+              <div><button type="submit" disabled={manualJoin.isPending}>Join cluster</button></div>
+            </form>
+          )}
         </div>
       )}
 
-      <div className="card">
-        <div className="mode-chips" style={{ marginBottom: "0.9rem" }}>
-          <span className={`chip ${mode === "create" ? "active" : ""}`} onClick={() => setMode("create")}>
-            <Plus size={12} /> Create a cluster
-          </span>
-          <span className={`chip ${mode === "join" ? "active" : ""}`} onClick={() => setMode("join")}>
-            <Network size={12} /> Join a cluster
-          </span>
-        </div>
-
-        <form onSubmit={submit} className="stack" style={{ display: "grid", gap: "0.7rem", maxWidth: 560 }}>
-          {mode === "create" ? (
-            <>
-              <label>Cluster name
-                <input value={name} onChange={(e) => setName(e.target.value)} placeholder="home" />
-              </label>
-              <label>homebox.sh account token
-                <input value={accountToken} onChange={(e) => setAccountToken(e.target.value)}
-                       placeholder="any token in dev mode" />
-              </label>
-            </>
-          ) : (
-            <label>Join token (minted on an existing node)
-              <input value={joinToken} onChange={(e) => setJoinToken(e.target.value)}
-                     placeholder="hbj.hbc_…" />
-            </label>
-          )}
-          <label>This node's LAN address (peers connect here, port 80)
-            <input value={peerUrl} onChange={(e) => setPeerUrl(e.target.value)}
-                   placeholder="http://192.168.1.10" />
-          </label>
-          <label>Node name (optional)
-            <input value={nodeName} onChange={(e) => setNodeName(e.target.value)} placeholder="basement-mini" />
-          </label>
-          <label>Control plane URL (leave empty for cluster.homebox.sh)
-            <input value={cpUrl} onChange={(e) => setCpUrl(e.target.value)}
-                   placeholder={status?.control_plane_url || "https://cluster.homebox.sh"} />
-          </label>
-          <div>
-            <button type="submit" disabled={create.isPending || join.isPending}>
-              {mode === "create" ? "Create cluster" : "Join cluster"}
+      <Modal
+        open={confirmLeave}
+        title="Leave & disconnect?"
+        onClose={() => setConfirmLeave(false)}
+        footer={
+          <>
+            <button className="ghost" onClick={() => setConfirmLeave(false)}>Cancel</button>
+            <button className="danger" onClick={() => leave.mutate()} disabled={leave.isPending}>
+              {leave.isPending ? <span className="spinner" /> : <>Leave cluster</>}
             </button>
-          </div>
-        </form>
-      </div>
+          </>
+        }
+      >
+        <p>Peers stop replicating to and from this node (their WAL slots for it are released), and
+           config/deploy sync ends. Cluster keys are not rotated.</p>
+        <label className="row" style={{ gap: "0.5rem", marginTop: "0.6rem" }}>
+          <input type="checkbox" checked={stopTunnel} onChange={e => setStopTunnel(e.target.checked)} />
+          Stop serving the shared Cloudflare tunnel from this node
+        </label>
+        <label className="row" style={{ gap: "0.5rem", marginTop: "0.4rem" }}>
+          <input type="checkbox" checked={teardownStacks} onChange={e => setTeardownStacks(e.target.checked)} />
+          Also tear down cluster-replicated app stacks on this node
+        </label>
+      </Modal>
     </>
   );
 }

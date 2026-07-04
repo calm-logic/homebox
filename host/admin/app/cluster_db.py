@@ -117,16 +117,28 @@ def derive_repl_password(cluster_secret: str, project_name: str, env_name: str, 
 
 
 def ordered_roster(state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Roster sorted by join time — the basis for stable node ordinals
-    (snowflake.node_id, spock node names n1/n2/…)."""
+    """Roster sorted by join time."""
     return sorted(state.get("roster") or [], key=lambda n: (n.get("joined_at") or 0, n.get("node_id")))
 
 
 def node_ordinal(state: dict[str, Any], node_id: str) -> int:
+    """This node's PERMANENT ordinal (spock node name n<ordinal>,
+    snowflake.node_id). The control plane assigns it at registration and
+    never reuses it — positional fallback only for pre-ordinal rosters."""
     for i, n in enumerate(ordered_roster(state)):
         if n.get("node_id") == node_id:
-            return i + 1
+            return int(n.get("ordinal") or (i + 1))
     return 1
+
+
+def roster_peer_ordinals(state: dict[str, Any], self_node_id: str) -> dict[int, dict[str, Any]]:
+    """ordinal → peer roster entry, for everyone but this node."""
+    out: dict[int, dict[str, Any]] = {}
+    for i, n in enumerate(ordered_roster(state)):
+        if n.get("node_id") == self_node_id:
+            continue
+        out[int(n.get("ordinal") or (i + 1))] = n
+    return out
 
 
 def peer_host(peer: dict[str, Any]) -> str | None:
@@ -381,12 +393,20 @@ async def ensure_replication(
     result: dict[str, Any] = {"container": container, "tables_added": [], "subs_created": [],
                               "errors": []}
 
-    # 1. spock node must exist (init script creates it on first boot)
+    # 1. spock node must exist (init script creates it on first boot). Our
+    # sub names derive from the DATABASE's baked node name, not the roster:
+    # a node that left and rejoined holds a fresh roster ordinal, but its
+    # data volume keeps the spock identity it was initialized with.
     code, out = await _psql(container, admin, pw, db,
                             "SELECT node_name FROM spock.node LIMIT 1;")
     if code != 0 or not out:
         result["errors"].append(f"spock node not ready on {container}: {out[:200]}")
         return result
+    local_node_name = out.strip().splitlines()[0]
+    try:
+        info = {**info, "ordinal": int(local_node_name.lstrip("n"))}
+    except ValueError:
+        pass
 
     # 1b. keep the local replication role's password at the CURRENT derived
     # value — the cluster secret can change (cluster re-created / migrated),
@@ -424,14 +444,13 @@ async def ensure_replication(
             else:
                 result["errors"].append(f"repset add {table}: {aout[:200]}")
 
-    # 3. subscriptions to every peer
+    # 3. subscriptions to every CURRENT peer …
     code, out = await _psql(container, admin, pw, db, "SELECT sub_name FROM spock.subscription;")
-    existing_subs = set(out.splitlines()) if code == 0 else set()
+    existing_subs = set(x.strip() for x in out.splitlines() if x.strip()) if code == 0 else set()
     my_ord = info["ordinal"]
-    for i, peer in enumerate(ordered_roster(state)):
-        if peer.get("node_id") == self_node_id:
-            continue
-        p_ord = i + 1
+    peers = roster_peer_ordinals(state, self_node_id)
+    expected = {f"sub_n{my_ord}_n{p_ord}" for p_ord in peers}
+    for p_ord, peer in peers.items():
         host = peer_host(peer)
         if not host:
             continue
@@ -451,4 +470,40 @@ async def ensure_replication(
         else:
             # Peer likely not deployed/reachable yet — the reconcile loop retries.
             result["errors"].append(f"{sub}: {sout[:200]}")
+
+    # 4. … and NONE to departed ones. Dropping the sub is what stops pulling
+    # from a gone peer; peers dropping THEIR subs to us is what releases our
+    # WAL slots. Ordinals are permanent, so a stale name can never collide
+    # with a live peer.
+    for sub in existing_subs:
+        if sub.startswith(f"sub_n{my_ord}_") and sub not in expected:
+            code, sout = await _psql(container, admin, pw, db,
+                                     f"SELECT spock.sub_drop('{sub}');", timeout=60)
+            if code == 0:
+                result.setdefault("subs_dropped", []).append(sub)
+                log.info("cluster db: dropped %s on %s (peer left the roster)", sub, container)
+            else:
+                result["errors"].append(f"drop {sub}: {sout[:200]}")
     return result
+
+
+async def drop_subscriptions(
+    *, stack: str, info: dict[str, Any], to_ordinal: int | None = None,
+) -> list[str]:
+    """Drop this stack's subscriptions — all of them (local side of a full
+    leave) or just those pulling from one departed peer's ordinal. Best-effort;
+    returns the dropped names."""
+    container = f"{stack}-{info['service']}-1"
+    admin, pw, db = info["admin_user"], info["admin_password"], info["db"]
+    code, out = await _psql(container, admin, pw, db, "SELECT sub_name FROM spock.subscription;")
+    if code != 0:
+        return []
+    dropped = []
+    for sub in (x.strip() for x in out.splitlines() if x.strip()):
+        if to_ordinal is not None and sub.rsplit("_n", 1)[-1] != str(to_ordinal):
+            continue
+        code, _ = await _psql(container, admin, pw, db,
+                              f"SELECT spock.sub_drop('{sub}');", timeout=60)
+        if code == 0:
+            dropped.append(sub)
+    return dropped

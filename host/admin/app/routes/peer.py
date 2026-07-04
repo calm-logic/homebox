@@ -107,6 +107,50 @@ async def peer_state(peer: dict = Depends(require_peer), session: AsyncSession =
     return await cluster_sync.export_state(session, node_id)
 
 
+class NodeLeavingBody(BaseModel):
+    node_id: str
+
+
+@router.post("/node-leaving")
+async def node_leaving(
+    body: NodeLeavingBody,
+    peer: dict = Depends(require_peer),
+    session: AsyncSession = Depends(get_session),
+):
+    """A peer is disconnecting: drop OUR subscriptions to it now (this is what
+    releases its WAL slots on our side) instead of waiting for the roster to
+    shrink and the reconcile loop to notice."""
+    from .. import cluster_db
+    from ..deploy import repo_dir
+    from ..urls import stack_name as make_stack_name
+    if body.node_id != peer["caller_id"]:
+        raise HTTPException(403, "Nodes can only announce their own departure")
+    state = peer["state"]
+    ordinal = cluster_db.node_ordinal(state, body.node_id)
+    dropped: list[str] = []
+    rows = (await session.execute(
+        select(Deployment, Environment, Project)
+        .join(Environment, Deployment.environment_id == Environment.id)
+        .join(Project, Environment.project_id == Project.id)
+        .where(Deployment.status == "running")
+    )).all()
+    seen: set[str] = set()
+    for dep, env, project in rows:
+        stack = make_stack_name(project, env)
+        if stack in seen:
+            continue
+        seen.add(stack)
+        rd = repo_dir(project.name, env.name)
+        if not cluster_db.cluster_db_enabled(rd):
+            continue
+        for info in cluster_db.infos_from_compose(rd):
+            dropped += await cluster_db.drop_subscriptions(
+                stack=stack, info=info, to_ordinal=ordinal,
+            )
+    log.info("peer %s leaving: dropped %s", body.node_id, dropped)
+    return {"ok": True, "subs_dropped": dropped}
+
+
 class PeerDeployBody(BaseModel):
     project_name: str
     env_name: str
