@@ -84,6 +84,25 @@ else
     esac
 fi
 
+# Address pools: docker's defaults fall back to 192.168.0.0/16 once the
+# 172.16/12 space is exhausted, and a network landing there shadows typical
+# home LANs — containers then can't reach LAN peers (breaks clustering).
+# On native Linux we can fix the daemon config ourselves; Docker Desktop
+# users manage this in Settings → Docker Engine, so we can only warn.
+if [ "$PLATFORM" = "linux" ] && ! docker info 2>/dev/null | grep -qi "desktop"; then
+    DAEMON_JSON=/etc/docker/daemon.json
+    if [ ! -s "$DAEMON_JSON" ]; then
+        info "Setting docker default-address-pools to 10.201.0.0/16 (avoids LAN-colliding 192.168.x auto-allocation)"
+        mkdir -p /etc/docker
+        printf '{\n  "default-address-pools": [{"base": "10.201.0.0/16", "size": 24}]\n}\n' > "$DAEMON_JSON"
+        systemctl restart docker 2>/dev/null || service docker restart 2>/dev/null || true
+    elif ! grep -q "default-address-pools" "$DAEMON_JSON"; then
+        warn "$DAEMON_JSON exists without default-address-pools — docker may auto-allocate"
+        warn "networks in 192.168.0.0/16 that shadow your LAN. Consider adding:"
+        warn '  "default-address-pools": [{"base": "10.201.0.0/16", "size": 24}]'
+    fi
+fi
+
 # Verify Docker Compose plugin
 if docker compose version >/dev/null 2>&1; then
     info "Docker Compose: $(docker compose version --short)"

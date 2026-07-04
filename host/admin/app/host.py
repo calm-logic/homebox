@@ -385,7 +385,18 @@ def write_traefik_dynamic(routes: list[dict[str, Any]]) -> Path:
         lines.append("      loadBalancer:")
         lines.append("        servers:")
         lines.append(f"          - url: \"{r['service_url']}\"")
-    dyn.write_text("\n".join(lines) + "\n")
+    content = "\n".join(lines) + "\n"
+    try:
+        unchanged = dyn.read_text() == content
+    except OSError:
+        unchanged = False
+    if unchanged:
+        return dyn
+    dyn.write_text(content)
+    # Traefik watches this file, but single-file bind mounts don't deliver
+    # fsnotify events on macOS (VirtioFS) — the routes silently never load.
+    # A restart is cheap (<1s) and only happens when the content changed.
+    restart_container("homebox-traefik")
     return dyn
 
 

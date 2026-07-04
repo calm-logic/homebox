@@ -576,6 +576,53 @@ async def fanout_deploy(project_name: str, env_name: str, commit_sha: str | None
                             peer["peer_url"], e)
 
 
+async def check_network_conflicts(session: AsyncSession, state: dict[str, Any]) -> list[str]:
+    """Detect docker networks whose subnet shadows a cluster peer address —
+    containers would route peer traffic into the bridge void instead of the
+    LAN (exactly how an auto-allocated 192.168.0.0/20 network once broke
+    replication). Logged loudly + persisted for the UI."""
+    import ipaddress
+    from .host import _docker_request
+    node_id = await get_node_id(session)
+    peer_ips = []
+    for n in state.get("roster") or []:
+        url = (n.get("peer_url") or "").split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+        if url and n.get("node_id") != node_id:
+            try:
+                peer_ips.append(ipaddress.ip_address(url))
+            except ValueError:
+                continue
+    if not peer_ips:
+        return []
+    conflicts: list[str] = []
+    try:
+        code, body = await asyncio.to_thread(_docker_request, "GET", "/networks")
+        nets = json.loads(body[body.find(b"["):body.rfind(b"]") + 1]) if code == 200 else []
+    except Exception:  # noqa: BLE001
+        return []
+    for net in nets:
+        for cfg in ((net.get("IPAM") or {}).get("Config") or []):
+            subnet = cfg.get("Subnet")
+            if not subnet:
+                continue
+            try:
+                network = ipaddress.ip_network(subnet, strict=False)
+            except ValueError:
+                continue
+            hit = [str(ip) for ip in peer_ips if ip in network]
+            if hit:
+                msg = (f"docker network '{net.get('Name')}' ({subnet}) shadows cluster "
+                       f"peer(s) {', '.join(hit)} — containers cannot reach them. "
+                       f"Recreate that network on another subnet (set docker "
+                       f"default-address-pools away from your LAN range).")
+                conflicts.append(msg)
+                log.error("NETWORK CONFLICT: %s", msg)
+    await _set_setting(session, "network_conflicts", {
+        "checked_at": datetime.utcnow().isoformat(), "conflicts": conflicts,
+    })
+    return conflicts
+
+
 async def cluster_loop() -> None:
     cycle = 0
     while True:
@@ -602,6 +649,7 @@ async def cluster_loop() -> None:
                         # idempotent — heals a route file written before
                         # admin_domain was known).
                         await ensure_peer_route(session)
+                        await check_network_conflicts(session, state)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — the loop must survive anything

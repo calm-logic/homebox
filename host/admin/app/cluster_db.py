@@ -206,7 +206,11 @@ psql -v ON_ERROR_STOP=1 -U "$ADMIN" -d "$DB" -c "GRANT CREATE, TEMP ON DATABASE 
 
 NODE_EXISTS=$(psql -tA -U "$ADMIN" -d "$DB" -c "SELECT 1 FROM spock.node WHERE node_name='${NODE_NAME}' LIMIT 1;" || true)
 if [ "$NODE_EXISTS" != "1" ]; then
-  psql -v ON_ERROR_STOP=1 -U "$ADMIN" -d "$DB" -c "SELECT spock.node_create(node_name := '${NODE_NAME}', dsn := 'host=${NODE_DSN_HOST} port=${NODE_DSN_PORT} dbname=${DB} user=${REPL_USER} password=${REPL_PASS}');"
+  # The node's own interface DSN must be dialable FROM THIS CONTAINER —
+  # spock validates it during sub_create. The host's LAN address is not
+  # (hairpin NAT fails on WSL2); peers never read this DSN (subscriptions
+  # carry an explicit provider_dsn built from the cluster roster).
+  psql -v ON_ERROR_STOP=1 -U "$ADMIN" -d "$DB" -c "SELECT spock.node_create(node_name := '${NODE_NAME}', dsn := 'host=localhost port=5432 dbname=${DB} user=${REPL_USER} password=${REPL_PASS}');"
 fi
 """,
 }
