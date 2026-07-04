@@ -30,7 +30,6 @@ export function Overview() {
         <Metric label="Domains" value={data.domain_count} link="/domains" />
         <Metric label="Integrations" value={data.integration_count} link="/integrations" />
         <Metric label="Projects" value={`${data.managed_count}/${data.project_count}`} link="/projects" />
-        <Metric label="CI/CD" value={<span className="dim" style={{ fontSize: "1rem" }}>runs</span>} link="/cicd" />
       </div>
 
       <h2>Get started</h2>

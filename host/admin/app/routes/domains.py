@@ -162,8 +162,7 @@ async def connect_cloudflare_domain(
     target = cf.tunnel_target(tunnel_id)
     try:
         await cf.upsert_cname(token, body.zone_id, name, target, proxied=True)
-        if body.mode == "wildcard":
-            await cf.upsert_cname(token, body.zone_id, f"*.{name}", target, proxied=True)
+        await cf.upsert_cname(token, body.zone_id, f"*.{name}", target, proxied=True)
     except cf.CloudflareError as e:
         raise HTTPException(400, f"DNS update failed: {e}")
 
@@ -266,8 +265,9 @@ async def add_cloudflare_domain(
         target = cf.tunnel_target(tunnel_id)
         try:
             await cf.upsert_cname(token, zone["id"], name, target, proxied=True)
-            if body.mode == "wildcard":
-                await cf.upsert_cname(token, zone["id"], f"*.{name}", target, proxied=True)
+            # Wildcard record in BOTH modes: dedicated domains still serve
+            # env subdomains (dev.<domain>).
+            await cf.upsert_cname(token, zone["id"], f"*.{name}", target, proxied=True)
         except cf.CloudflareError as e:
             raise HTTPException(400, f"DNS update failed: {e}")
         result = await _upsert_domain_row(
@@ -312,3 +312,63 @@ async def add_cloudflare_domain(
     )
     await _sync_to_disk(session)
     return {**_serialize(result), "pending": True}
+
+
+class PatchDomainBody(BaseModel):
+    mode: str | None = None       # wildcard | dedicated
+    primary: bool | None = None
+
+
+@router.patch("/{domain_id}")
+async def patch_domain(
+    domain_id: int,
+    body: PatchDomainBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Edit a domain's mode/primary. A mode change on a Cloudflare-routed
+    domain also adds (wildcard) or removes (dedicated) the *.domain CNAME."""
+    d = await session.get(Domain, domain_id)
+    if not d:
+        raise HTTPException(404, "Domain not found")
+    if body.mode is not None and body.mode not in ("wildcard", "dedicated"):
+        raise HTTPException(400, "Mode must be wildcard or dedicated")
+
+    mode_changed = body.mode is not None and body.mode != d.mode
+    if body.mode is not None:
+        d.mode = body.mode
+    if body.primary is not None:
+        if body.primary:
+            for other in (await session.execute(select(Domain))).scalars():
+                other.is_primary = False
+            d.is_primary = True
+        else:
+            d.is_primary = False
+    await session.commit()
+    await session.refresh(d)
+    await _sync_to_disk(session)
+
+    # Both modes keep apex + wildcard records (dedicated still serves env
+    # subdomains like dev.<domain>) — just make sure the wildcard exists for
+    # legacy dedicated domains that were connected without one.
+    if mode_changed and d.cloudflare_routed:
+        state = await cf.load_state(session)
+        token = cf.get_token(state)
+        tunnel_id = state.get("tunnel_id")
+        if token and tunnel_id:
+            try:
+                zone_id = d.zone_id
+                if not zone_id:
+                    zones = await cf.list_zones(token, account_id=state.get("account_id"))
+                    zone = cf.resolve_zone_for(zones, d.name)
+                    zone_id = zone["id"] if zone else None
+                if zone_id:
+                    await cf.upsert_cname(token, zone_id, f"*.{d.name}", cf.tunnel_target(tunnel_id), proxied=True)
+            except cf.CloudflareError:
+                pass  # hourly DNS check will reconcile
+
+    try:
+        await _push_remote_ingress(session)
+    except cf.CloudflareError:
+        pass
+    return _serialize(d)

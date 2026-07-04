@@ -17,7 +17,6 @@ import { DeploymentDetail } from "./pages/DeploymentDetail";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { Integrations } from "./pages/Integrations";
 import { IntegrationDetail } from "./pages/IntegrationDetail";
-import { CICD } from "./pages/CICD";
 import { Cluster } from "./pages/Cluster";
 import { Identities } from "./pages/Identities";
 import { Onboarding } from "./pages/Onboarding";
@@ -75,13 +74,13 @@ export function App() {
               <Route path="/projects/:projectId" element={<ProjectDetail />} />
               <Route path="/projects/:projectId/deployments/:deploymentId" element={<DeploymentDetail />} />
               <Route path="/projects/:projectId/services/:serviceId" element={<ServiceDetail />} />
-              <Route path="/cicd" element={<CICD />} />
               <Route path="/cluster" element={<Cluster />} />
               <Route path="/identities" element={<Identities />} />
               {/* Legacy routes — pages were merged into the parents above. */}
               <Route path="/tunnel" element={<Navigate to="/domains" replace />} />
+              <Route path="/cicd" element={<Navigate to="/projects" replace />} />
               <Route path="/github" element={<Navigate to="/integrations" replace />} />
-              <Route path="/runner" element={<Navigate to="/cicd" replace />} />
+              <Route path="/runner" element={<Navigate to="/projects" replace />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

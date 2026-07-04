@@ -288,6 +288,15 @@ async def list_dns_records(
     return _unwrap(r) or []
 
 
+async def delete_dns_record(token: str, zone_id: str, record_id: str) -> None:
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.delete(
+            f"{API}/zones/{zone_id}/dns_records/{record_id}", headers=_headers(token)
+        )
+        if r.status_code != 404:
+            _unwrap(r)
+
+
 async def upsert_cname(
     token: str,
     zone_id: str,

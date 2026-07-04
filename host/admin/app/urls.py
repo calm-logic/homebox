@@ -1,42 +1,58 @@
 """Single source of truth for the per-service, per-environment hostname scheme.
 
-For a project named `box` on the wildcard domain `x100.dev`:
+WILDCARD domain (shared by many projects) — project `box` on `x100.dev`:
 
     production   main UI   box.x100.dev
                  api       box-api.x100.dev
-                 db        box-db.x100.dev
     dev          main UI   box--dev.x100.dev
                  api       box-api--dev.x100.dev
 
-The label segment is the project name plus the service's subdomain_label (joined
-with '-'), then the environment's slug_suffix ("" for production, "--dev" for
-dev, "--<feature>" for a feature env), then the domain root.
+DEDICATED domain (one project owns it) — one entry host per environment, with
+non-main public services PATH-proxied under it (see deploy._assemble_stack):
 
-With a wildcard primary domain (`*.x100.dev`) every derived host resolves
-through the existing wildcard DNS + tunnel ingress, so no per-service Cloudflare
-record is needed. Dedicated-domain projects need explicit records (handled by
-the deploy path).
+    production   main UI   infinitescroll.io
+                 api       infinitescroll.io/api
+    dev          main UI   dev.infinitescroll.io
+                 api       dev.infinitescroll.io/api
+
+Both schemes resolve through the domain's apex + wildcard CNAMEs at Cloudflare,
+so no per-service records are needed in either mode.
 """
 
 from .models import Domain, Environment, Project, Service
 
 
-def host_label(project_name: str, subdomain_label: str, slug_suffix: str) -> str:
-    """The left-hand label of a hostname (everything before the domain root)."""
-    base = project_name.strip().lower()
+def host_label(project_name: str, subdomain_label: str, slug_suffix: str,
+               *, dedicated: bool = False) -> str:
+    """The left-hand label of a hostname. Empty string means the domain root
+    itself (dedicated production main service)."""
     label = (subdomain_label or "").strip().lower()
+    if dedicated:
+        env_part = (slug_suffix or "").strip("-").lower()
+        return "-".join(p for p in (label, env_part) if p)
+    base = project_name.strip().lower()
     if label:
         base = f"{base}-{label}"
     return f"{base}{slug_suffix or ''}"
 
 
-def service_host(project: Project, service: Service, env: Environment, domain_name: str) -> str:
+def full_host(project_name: str, subdomain_label: str, slug_suffix: str,
+              domain_name: str, *, dedicated: bool = False) -> str:
+    root = domain_name.strip(".").lower()
+    hl = host_label(project_name, subdomain_label, slug_suffix, dedicated=dedicated)
+    return f"{hl}.{root}" if hl else root
+
+
+def service_host(project: Project, service: Service, env: Environment,
+                 domain_name: str, *, dedicated: bool = False) -> str:
     """Full public hostname for a service in an environment."""
-    return f"{host_label(project.name, service.subdomain_label, env.slug_suffix)}.{domain_name.strip('.').lower()}"
+    return full_host(project.name, service.subdomain_label, env.slug_suffix,
+                     domain_name, dedicated=dedicated)
 
 
-def service_url(project: Project, service: Service, env: Environment, domain_name: str) -> str:
-    return f"https://{service_host(project, service, env, domain_name)}"
+def service_url(project: Project, service: Service, env: Environment,
+                domain_name: str, *, dedicated: bool = False) -> str:
+    return f"https://{service_host(project, service, env, domain_name, dedicated=dedicated)}"
 
 
 def stack_name(project: Project, env: Environment) -> str:

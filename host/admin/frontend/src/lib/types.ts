@@ -109,6 +109,7 @@ export interface ProjectItem {
   require_checks: boolean;
   domain_id: number | null;
   domain: string | null;
+  domain_mode: "wildcard" | "dedicated" | null;
   description: string | null;
   dissected_at: string | null;
   detected_stack: { services?: DetectedStackEntry[] };

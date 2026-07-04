@@ -81,12 +81,10 @@ async def _push_ingress(state: dict[str, Any], session: AsyncSession) -> None:
 
 
 def _dns_hostnames(d: Domain) -> list[str]:
-    """The CNAME record names Homebox manages for a routed domain: the host
-    itself, plus its wildcard in wildcard mode (mirrors cf.build_ingress)."""
-    names = [d.name]
-    if d.mode == "wildcard":
-        names.append(f"*.{d.name}")
-    return names
+    """The CNAME record names Homebox manages for a routed domain: apex +
+    wildcard in BOTH modes (dedicated domains serve env subdomains like
+    dev.<domain>). Mirrors cf.build_ingress."""
+    return [d.name, f"*.{d.name}"]
 
 
 async def _all_domains(session: AsyncSession) -> list[Domain]:

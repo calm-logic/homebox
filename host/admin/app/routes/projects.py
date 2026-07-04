@@ -205,6 +205,7 @@ def _serialize_project(p: Project, integration: Integration | None, domain: Doma
         "require_checks": p.require_checks,
         "domain_id": p.domain_id,
         "domain": domain.name if domain else None,
+        "domain_mode": domain.mode if domain else None,
         "description": p.description,
         "dissected_at": p.dissected_at.isoformat() if p.dissected_at else None,
         "detected_stack": p.detected_stack or {},

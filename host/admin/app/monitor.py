@@ -85,8 +85,7 @@ async def _finish_pending_zones(session, state: dict) -> None:
             target = cf.tunnel_target(tunnel_id)
             try:
                 await cf.upsert_cname(token, d.zone_id, d.name, target, proxied=True)
-                if d.mode == "wildcard":
-                    await cf.upsert_cname(token, d.zone_id, f"*.{d.name}", target, proxied=True)
+                await cf.upsert_cname(token, d.zone_id, f"*.{d.name}", target, proxied=True)
                 d.cloudflare_routed = True
             except cf.CloudflareError as e:
                 log.warning("zone %s active but DNS wiring failed: %s", d.name, e)

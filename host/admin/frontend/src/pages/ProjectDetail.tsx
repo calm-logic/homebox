@@ -58,8 +58,18 @@ export function envUnreachable(env: EnvironmentInfo): boolean {
     && env.instances.some(i => i.url && i.status === "unreachable");
 }
 
-function predictedHost(name: string, label: string, slugSuffix: string, domain: string | null): string | null {
+export function predictedHost(
+  name: string, label: string, slugSuffix: string,
+  domain: string | null, mode: "wildcard" | "dedicated" | null,
+): string | null {
   if (!domain) return null;
+  if (mode === "dedicated") {
+    // The project owns the domain: prod at the root, envs as subdomains,
+    // non-main services path-proxied (infinitescroll.io/api).
+    const envPart = (slugSuffix || "").replace(/^-+/, "");
+    const host = envPart ? `${envPart}.${domain}` : domain;
+    return label ? `${host}/${label}` : host;
+  }
   const base = label ? `${name}-${label}` : name;
   return `${base}${slugSuffix}.${domain}`;
 }
@@ -160,7 +170,7 @@ export function ProjectDetail() {
           <thead><tr><th>Service</th><th>Kind</th><th>Exposure</th><th>Hostname</th><th>Env</th><th className="right" /></tr></thead>
           <tbody>
             {project.services.map(s => {
-              const host = s.is_public ? predictedHost(project.name, s.subdomain_label, "", project.domain) : null;
+              const host = s.is_public ? predictedHost(project.name, s.subdomain_label, "", project.domain, project.domain_mode) : null;
               return (
                 <tr key={s.id} className="clickable" onClick={() => nav(`/projects/${id}/services/${s.id}`)}>
                   <td><strong>{s.name}</strong>{s.internal_port && <span className="dim"> :{s.internal_port}</span>}</td>
@@ -338,12 +348,13 @@ function SettingsModal({ project, onClose }: { project: ProjectDetailData; onClo
 
   const { data: domains } = useQuery<DomainItem[]>({ queryKey: ["domains"], queryFn: () => api.get<DomainItem[]>("/api/domains") });
 
-  const domainName = (id: string): string => {
-    if (id) return (domains ?? []).find(d => d.id === Number(id))?.name ?? "…";
-    return (domains ?? []).find(d => d.is_primary)?.name ?? "…";
-  };
+  const resolveDomain = (id: string): DomainItem | undefined =>
+    id ? (domains ?? []).find(d => d.id === Number(id)) : (domains ?? []).find(d => d.is_primary);
+  const domainName = (id: string): string => resolveDomain(id)?.name ?? "…";
   const projectDomain = domainName(domainId);
-  const effectiveEnvDomain = (envId: number) => envDomains[envId] ? domainName(envDomains[envId]) : projectDomain;
+  const projectDomainMode = resolveDomain(domainId)?.mode ?? null;
+  const effectiveEnvDomainObj = (envId: number) =>
+    envDomains[envId] ? resolveDomain(envDomains[envId]) : resolveDomain(domainId);
 
   const save = useMutation({
     mutationFn: async () => {
@@ -379,7 +390,11 @@ function SettingsModal({ project, onClose }: { project: ProjectDetailData; onClo
       <div className="field">
         <label className="lbl">Project name (URL slug)</label>
         <input value={name} onChange={e => setName(e.target.value)} placeholder={project.name} />
-        <span className="hint">Used as the hostname base, e.g. <code>{name || project.name}.{projectDomain}</code>.</span>
+        <span className="hint">
+          {projectDomainMode === "dedicated"
+            ? <>Dedicated domain — the app lives at <code>{projectDomain}</code> (name is used for stacks and wildcard fallbacks).</>
+            : <>Used as the hostname base, e.g. <code>{predictedHost(name || project.name, "", "", projectDomain, projectDomainMode)}</code>.</>}
+        </span>
       </div>
       <div className="field">
         <label className="lbl">Domain</label>
@@ -401,7 +416,10 @@ function SettingsModal({ project, onClose }: { project: ProjectDetailData; onClo
             <option value="">Project domain</option>
             {(domains ?? []).map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
           </select>
-          <code style={{ flex: "0 0 auto" }}>{name || project.name}{env.slug_suffix}.{effectiveEnvDomain(env.id)}</code>
+          <code style={{ flex: "0 0 auto" }}>
+            {predictedHost(name || project.name, "", env.slug_suffix,
+              effectiveEnvDomainObj(env.id)?.name ?? "…", effectiveEnvDomainObj(env.id)?.mode ?? null)}
+          </code>
         </div>
       ))}
       <span className="hint">Point environments at different domains, e.g. production on its own domain.</span>

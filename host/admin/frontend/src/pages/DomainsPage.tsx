@@ -1,7 +1,7 @@
 import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, Cloud, Wrench, Copy } from "lucide-react";
+import { Plus, Trash2, Cloud, Wrench, Copy, Pencil } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
@@ -25,6 +25,7 @@ export function DomainsPage() {
   const qc = useQueryClient();
   const toast = useToast();
   const [addOpen, setAddOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<DomainItem | null>(null);
 
   const { data: domains } = useQuery<DomainItem[]>({
     queryKey: ["domains"],
@@ -119,7 +120,10 @@ export function DomainsPage() {
           </thead>
           <tbody>
             {domains.map(d => (
-              <DomainRow key={d.id} d={d} onRemove={() => { if (confirm(`Remove ${d.name}?`)) remove.mutate(d.id); }} removing={remove.isPending} />
+              <DomainRow key={d.id} d={d}
+                onEdit={() => setEditTarget(d)}
+                onRemove={() => { if (confirm(`Remove ${d.name}?`)) remove.mutate(d.id); }}
+                removing={remove.isPending} />
             ))}
           </tbody>
         </table>
@@ -132,11 +136,14 @@ export function DomainsPage() {
       ) : <span className="spinner" />}
 
       <AddDomainModal open={addOpen} onClose={() => setAddOpen(false)} cfReady={cfReady} />
+      {editTarget && <EditDomainModal d={editTarget} onClose={() => setEditTarget(null)} />}
     </>
   );
 }
 
-function DomainRow({ d, onRemove, removing }: { d: DomainItem; onRemove: () => void; removing: boolean }) {
+function DomainRow({ d, onEdit, onRemove, removing }: {
+  d: DomainItem; onEdit: () => void; onRemove: () => void; removing: boolean;
+}) {
   const toast = useToast();
   const pending = d.zone_status === "pending";
   return (
@@ -153,6 +160,10 @@ function DomainRow({ d, onRemove, removing }: { d: DomainItem; onRemove: () => v
         </td>
         <td>{d.is_primary && <span className="badge ok plain">Primary</span>}</td>
         <td className="actions">
+          <button className="btn small ghost" aria-label={`Edit ${d.name}`} title="Edit"
+            onClick={onEdit}>
+            <Pencil size={12} />
+          </button>{" "}
           <button className="btn small danger" aria-label={`Remove ${d.name}`} title="Remove"
             disabled={removing} onClick={onRemove}>
             <Trash2 size={12} />
@@ -277,6 +288,53 @@ function AddDomainModal({ open, onClose, cfReady }: { open: boolean; onClose: ()
           )}
         </form>
       )}
+    </Modal>
+  );
+}
+
+
+function EditDomainModal({ d, onClose }: { d: DomainItem; onClose: () => void }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [mode, setMode] = useState<"wildcard" | "dedicated">(d.mode);
+  const [primary, setPrimary] = useState(d.is_primary);
+
+  const save = useMutation({
+    mutationFn: () => api.patch(`/api/domains/${d.id}`, { mode, primary }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["domains"] });
+      toast.show("Domain updated", "ok");
+      onClose();
+    },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
+  return (
+    <Modal open onClose={onClose} title={`Edit ${d.name}`} footer={<>
+      <span className="spacer" />
+      <button className="btn ghost" type="button" onClick={onClose}>Cancel</button>
+      <button className="btn primary" type="button" disabled={save.isPending} onClick={() => save.mutate()}>
+        {save.isPending ? <span className="spinner" /> : "Save"}
+      </button>
+    </>}>
+      <div className="field">
+        <label className="lbl">Mode</label>
+        <div className="mode-chips">
+          <span className={`chip ${mode === "wildcard" ? "active" : ""}`} onClick={() => setMode("wildcard")}>Wildcard (root + subdomains)</span>
+          <span className={`chip ${mode === "dedicated" ? "active" : ""}`} onClick={() => setMode("dedicated")}>Dedicated (one project)</span>
+        </div>
+        {mode !== d.mode && (
+          <span className="hint">
+            {mode === "dedicated"
+              ? <>The assigned project's production will live at <code>{d.name}</code>, other public services path-proxied (<code>{d.name}/api</code>), dev at <code>dev.{d.name}</code>. Redeploy to apply.</>
+              : <>Projects get name-prefixed hostnames like <code>app.{d.name}</code>. Redeploy to apply.</>}
+          </span>
+        )}
+      </div>
+      <label className="row" style={{ cursor: "pointer", gap: "0.5rem" }}>
+        <input type="checkbox" checked={primary} onChange={e => setPrimary(e.target.checked)} />
+        Primary domain
+      </label>
     </Modal>
   );
 }

@@ -41,7 +41,6 @@ export function Layout() {
           <NavLink to="/domains"><Globe size={15} aria-hidden /> <span className="nav-label">Domains</span></NavLink>
           <NavLink to="/integrations"><Plug size={15} aria-hidden /> <span className="nav-label">Integrations</span></NavLink>
           <NavLink to="/projects"><Boxes size={15} aria-hidden /> <span className="nav-label">Projects</span></NavLink>
-          <NavLink to="/cicd"><Workflow size={15} aria-hidden /> <span className="nav-label">CI/CD</span></NavLink>
           <NavLink to="/identities"><Users size={15} aria-hidden /> <span className="nav-label">Identities</span></NavLink>
           <NavLink to="/cluster"><Network size={15} aria-hidden /> <span className="nav-label">Cluster</span></NavLink>
           <NavLink to="/system"><Activity size={15} aria-hidden /> <span className="nav-label">System</span></NavLink>
