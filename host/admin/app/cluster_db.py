@@ -8,10 +8,13 @@ Projects opt in through homebox.yaml:
 At deploy time (deploy._assemble_stack), every compose-origin Postgres service
 in an opted-in project is transformed:
 
-  - image swapped to the pgEdge Postgres build (Spock + snowflake preinstalled)
-  - init scripts (written under <repo>/.homebox/pgedge-<svc>/) configure
-    logical replication and create the spock node on first boot, with the
-    node's advertised DSN = <this node's LAN IP>:<deterministic port>
+  - image swapped to the pgEdge Postgres build (Spock + snowflake
+    preinstalled; multi-arch, so amd64 Linux and arm64 Macs interoperate)
+  - init scripts delivered as compose `configs` with inline content (never
+    host bind mounts — the admin's in-container paths don't exist on the
+    host on macOS, where the base dir is ~/homebox); they configure logical
+    replication and create the spock node on first boot, with the node's
+    advertised DSN = <this node's LAN IP>:<deterministic port>
   - the DB port is published on the host so peer nodes can subscribe
   - a replication role with a password derived from the cluster secret
     (HMAC — every node derives the same one, nothing to sync)
@@ -47,7 +50,6 @@ SUPPORTED_MAJORS = ("16", "17", "18")
 DEFAULT_MAJOR = "16"
 PORT_BASE = 54000
 PORT_SPAN = 1000
-INIT_DIR_NAME = ".homebox/pgedge-{svc}"
 
 
 # ───── manifest / detection ───────────────────────────────────────────────────
@@ -221,6 +223,7 @@ def transform_db_service(
     self_node_id: str,
     cluster_secret: str,
     top_volumes: dict[str, Any],
+    top_configs: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Mutate a compose-origin Postgres service dict for active-active
     replication. Returns an info dict (port, creds, container hints) or None
@@ -244,12 +247,21 @@ def transform_db_service(
         log.warning("cluster db: no LAN host for this node; skipping transform of %s", svc_name)
         return None
 
-    init_dir = rd / INIT_DIR_NAME.format(svc=svc_name)
-    init_dir.mkdir(parents=True, exist_ok=True)
+    # Init scripts ride as compose configs with inline content — the compose
+    # CLI materializes them in the container, so no host paths are involved
+    # (bind mounts would break on macOS, where the admin's in-container
+    # /opt/homebox path doesn't exist on the host). `$` must be escaped as
+    # `$$` or compose interpolates it away before the script ever runs.
+    svc_configs = []
     for fname, content in _INIT_SCRIPTS.items():
-        p = init_dir / fname
-        p.write_text(content)
-        p.chmod(0o755)
+        cfg_name = f"pgedge-{svc_name}-{fname.split('.', 1)[0]}"
+        top_configs[cfg_name] = {"content": content.replace("$", "$$")}
+        svc_configs.append({
+            "source": cfg_name,
+            "target": f"/docker-entrypoint-initdb.d/{fname}",
+            "mode": 0o755,
+        })
+    svc["configs"] = svc_configs
 
     svc["image"] = PGEDGE_IMAGE.format(major=major)
     env.update({
@@ -275,7 +287,6 @@ def transform_db_service(
     vols = list(vols) if isinstance(vols, list) else []
     vols = [v for v in vols if not (isinstance(v, str) and v.endswith(":/var/lib/pgsql"))]
     vols.append(f"{vol_name}:/var/lib/pgsql")
-    vols.append(f"{init_dir.as_posix()}:/docker-entrypoint-initdb.d")
     svc["volumes"] = vols
     top_volumes.setdefault(vol_name, {})
 

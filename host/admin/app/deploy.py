@@ -257,6 +257,7 @@ async def _assemble_stack(
     rd: Path, project: Project, env: Environment, domain_name: str,
     detected: list[dissect.DetectedService], user_env: dict[str, dict[str, str]],
     cluster_ctx: dict[str, Any] | None = None,
+    *, dedicated: bool = False,
 ) -> tuple[Path, dict[str, dict]]:
     """Build a single compose for the (project, env): compose-origin backing
     services reused as-is (ports stripped, joined to traefik-net), build-origin
@@ -275,6 +276,7 @@ async def _assemble_stack(
     compose = find_compose(rd)
     compose_services: dict[str, Any] = {}
     top_volumes: dict[str, Any] = {}
+    top_configs: dict[str, Any] = {}
     if compose:
         try:
             cdata = yaml.safe_load(compose.read_text()) or {}
@@ -286,17 +288,24 @@ async def _assemble_stack(
     services_out: dict[str, Any] = {}
     plan: dict[str, dict] = {}
 
-    # Bare-host hostname (subdomain_label == "") — path-prefix routes hang off it.
-    main_host = (
-        f"{urls.host_label(project.name, '', env.slug_suffix)}.{domain_name}"
-        if any(x.is_public and not x.subdomain_label for x in detected) else None
-    )
+    # Entry host: on a DEDICATED domain the domain root (or <env>.<domain>) is
+    # the single hostname for the whole env — non-main public services are
+    # path-proxied under it (infinitescroll.io/api). On a wildcard domain each
+    # service gets its own derived hostname, with /api additionally path-routed
+    # on the main host (path_prefix).
+    entry_host = urls.full_host(project.name, "", env.slug_suffix, domain_name, dedicated=dedicated)
+    main_host = entry_host if any(x.is_public and not x.subdomain_label for x in detected) else None
 
     for d in detected:
-        host = (
-            f"{urls.host_label(project.name, d.subdomain_label, env.slug_suffix)}.{domain_name}"
-            if d.is_public else None
-        )
+        path: str | None = None
+        if not d.is_public:
+            host = None
+        elif dedicated:
+            host = entry_host
+            if d.subdomain_label:
+                path = d.path_prefix or f"/{d.subdomain_label}"
+        else:
+            host = urls.full_host(project.name, d.subdomain_label, env.slug_suffix, domain_name)
         port = d.internal_port or 80
 
         if d.origin == "compose":
@@ -313,6 +322,7 @@ async def _assemble_stack(
                 project_name=project.name, env_name=env.name,
                 state=cluster_ctx["state"], self_node_id=cluster_ctx["node_id"],
                 cluster_secret=cluster_ctx["secret"], top_volumes=top_volumes,
+                top_configs=top_configs,
             )
 
         _attach_network(svc)
@@ -320,8 +330,22 @@ async def _assemble_stack(
         _merge_env(svc, user_env.get(d.name, {}))
         if d.is_public and host:
             router = _router_name(project.name, d.subdomain_label, env.name)
+            if path:
+                # Dedicated domain: this service lives at <entry host><path>.
+                labels = {
+                    "traefik.enable": "true",
+                    f"traefik.http.routers.{router}.rule": f"Host(`{host}`) && PathPrefix(`{path}`)",
+                    f"traefik.http.routers.{router}.entrypoints": "web",
+                    f"traefik.http.services.{router}.loadbalancer.server.port": str(port),
+                }
+                _apply_labels(svc, labels)
+                services_out[d.name] = svc
+                plan[d.name] = {"public": True, "host": host, "path": path, "port": port, "label": d.subdomain_label}
+                if cluster_db_info:
+                    plan[d.name]["cluster_db"] = cluster_db_info
+                continue
             labels = _traefik_labels(router, host, port)
-            if d.path_prefix and main_host and main_host != host:
+            if not dedicated and d.path_prefix and main_host and main_host != host:
                 # Same-origin path route: <main host><prefix> → this service.
                 # Traefik prefers the longer (more specific) rule, so this wins
                 # over the main service's bare Host rule for matching paths.
@@ -341,6 +365,8 @@ async def _assemble_stack(
     data: dict[str, Any] = {"services": services_out, "networks": {TRAEFIK_NET: {"external": True}}}
     if top_volumes:
         data["volumes"] = top_volumes
+    if top_configs:
+        data["configs"] = top_configs
 
     out = rd / GENERATED_COMPOSE
     out.write_text(yaml.safe_dump(data, sort_keys=False))
@@ -501,7 +527,9 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
     # Domain precedence: environment override → project setting → primary.
     env_domain = await session.get(Domain, env.domain_id) if env.domain_id else None
     domain_obj = env_domain or (await session.get(Domain, project.domain_id) if project.domain_id else None)
-    domain_name = domain_obj.name if domain_obj else (primary.name if primary else None)
+    effective_domain = domain_obj or primary
+    domain_name = effective_domain.name if effective_domain else None
+    dedicated = bool(effective_domain and effective_domain.mode == "dedicated")
     if not domain_name:
         raise DeployError("No domain configured. Set a primary domain (Routes) or assign one to this project.")
     if not project.integration_id:
@@ -542,6 +570,7 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
     # (Nixpacks/Dockerfile/static). Raises if no public app was detected.
     compose_path, plan = await _assemble_stack(
         rd, project, env, domain_name, detected, user_env, cluster_ctx,
+        dedicated=dedicated,
     )
 
     _touch(dep, status="starting")
@@ -587,7 +616,10 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
         )).scalars()
     }
     for name, info in plan.items():
-        url = f"https://{info['host']}" if info.get("public") and info.get("host") else None
+        url = (
+            f"https://{info['host']}{info.get('path') or ''}"
+            if info.get("public") and info.get("host") else None
+        )
         session.add(ServiceInstance(
             deployment_id=dep.id,
             service_id=svc_rows[name].id if name in svc_rows else None,
