@@ -41,7 +41,7 @@ reset-password:
 
 admin:
 	@echo ">>> Syncing admin source from repo to /opt/homebox/admin"
-	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' homebox-infra/admin/ /opt/homebox/admin/
+	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'cluster-keys.json' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' homebox-infra/admin/ /opt/homebox/admin/
 	$(SUDO) bash -c 'cd /opt/homebox/admin && docker compose --env-file .env up -d --build'
 	@port=$$($(SUDO) sed -n 's/^HOMEBOX_ADMIN_PORT=//p' /opt/homebox/admin/.env 2>/dev/null | head -1); \
 	  port=$${port:-7765}; \
@@ -61,7 +61,7 @@ admin-down:
 
 admin-reset:
 	@echo ">>> WIPING the admin database volume and rebuilding (you will re-onboard)."
-	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' homebox-infra/admin/ /opt/homebox/admin/
+	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'cluster-keys.json' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' homebox-infra/admin/ /opt/homebox/admin/
 	$(SUDO) bash -c 'cd /opt/homebox/admin && docker compose --env-file .env down -v && docker compose --env-file .env up -d --build'
 	@echo ">>> Admin reset complete. Sign in and re-run onboarding."
 

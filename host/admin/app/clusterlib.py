@@ -569,6 +569,12 @@ async def cluster_loop() -> None:
             async with SessionLocal() as session:
                 state = await load_cluster(session)
                 if state:
+                    # Self-heal the on-disk key override: anything that
+                    # recreates /opt/homebox/admin (deploy rsync, restore)
+                    # must not silently drop the cluster keys.
+                    if not CLUSTER_KEYS_FILE.exists():
+                        log.warning("cluster-keys.json missing — rewriting from live settings")
+                        _write_cluster_keys(settings.encryption_key, settings.app_secret)
                     try:
                         state = await _heartbeat(session, state)
                     except ControlPlaneError as e:
