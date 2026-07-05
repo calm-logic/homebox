@@ -8,7 +8,7 @@ connection vars at deploy time).
 
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,14 +79,21 @@ class SetEnvBody(BaseModel):
 async def set_env_vars(
     service_id: int,
     body: SetEnvBody,
+    background: BackgroundTasks,
     user: str = Depends(require_session_api),
     session: AsyncSession = Depends(get_session),
+    redeploy: bool = True,
 ):
     """Replace all user-set env vars for a service. Auto-wired (source='auto')
     vars are left untouched. A secret submitted with the masked value
     (SECRET_MASK — what the GET returns instead of the real value) keeps its
     stored value: the UI shows the mask, and saving other fields must not
-    overwrite the real secret with the placeholder."""
+    overwrite the real secret with the placeholder.
+
+    When the effective values actually change, the affected already-deployed
+    environments are redeployed automatically (compose recreates only the
+    containers whose env changed) so the app picks the values up without a
+    manual redeploy. Pass ?redeploy=false to suppress that."""
     svc = await _get_service(session, service_id)
     existing = (await session.execute(
         select(ServiceEnvVar).where(
@@ -100,6 +107,7 @@ async def set_env_vars(
             ServiceEnvVar.service_id == svc.id, ServiceEnvVar.source == "user"
         )
     )
+    new_map: dict[tuple, str] = {}
     for v in body.vars:
         key = v.key.strip()
         if not key:
@@ -108,12 +116,55 @@ async def set_env_vars(
         if v.is_secret and value == SECRET_MASK:
             # Unchanged secret — restore the stored value; never persist the mask.
             value = prior.get((key, v.environment_id), "")
+        new_map[(key, v.environment_id)] = value
         session.add(ServiceEnvVar(
             service_id=svc.id, environment_id=v.environment_id,
             key=key, value=value, source="user", is_secret=v.is_secret,
         ))
     await session.commit()
-    return {"ok": True, "count": len(body.vars)}
+
+    redeployed: list[dict] = []
+    if redeploy and new_map != prior:
+        redeployed = await _redeploy_for_env_change(session, background, svc, prior, new_map)
+    return {"ok": True, "count": len(body.vars), "redeployed": redeployed}
+
+
+async def _redeploy_for_env_change(
+    session: AsyncSession, background: BackgroundTasks, svc: Service,
+    prior: dict[tuple, str], new_map: dict[tuple, str],
+) -> list[dict]:
+    """Redeploy the environments affected by an env-var change — but only ones
+    that have actually been deployed (never spin up an env the user hasn't
+    launched). A var scoped to environment_id=None affects every environment."""
+    from .projects import queue_deploy
+    from ..models import Environment, Deployment, Project
+
+    project = await session.get(Project, svc.project_id)
+    if not project or not project.managed:
+        return []
+
+    changed_keys = {k for k in (set(prior) | set(new_map)) if prior.get(k) != new_map.get(k)}
+    touched_env_ids = {env_id for (_key, env_id) in changed_keys}
+    all_envs_touched = None in touched_env_ids
+    specific_env_ids = {e for e in touched_env_ids if e is not None}
+
+    envs = (await session.execute(
+        select(Environment).where(Environment.project_id == project.id)
+    )).scalars().all()
+
+    out: list[dict] = []
+    for env in envs:
+        if not (all_envs_touched or env.id in specific_env_ids):
+            continue
+        # Only redeploy an env that has a prior deployment (has been launched).
+        has_deploy = (await session.execute(
+            select(Deployment.id).where(Deployment.environment_id == env.id).limit(1)
+        )).scalar_one_or_none()
+        if not has_deploy:
+            continue
+        dep = await queue_deploy(session, background, env, trigger="config")
+        out.append({"environment": env.name, "deployment_id": dep.id})
+    return out
 
 
 @router.get("/{service_id}/metrics")

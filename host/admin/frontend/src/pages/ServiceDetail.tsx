@@ -341,8 +341,18 @@ function EnvVarsEditor({ svc, projectId }: { svc: ServiceItem; projectId: number
   );
 
   const save = useMutation({
-    mutationFn: () => api.put(`/api/services/${svc.id}/env-vars`, { vars: rows.filter(r => r.key.trim()) }),
-    onSuccess: () => { toast.show("Env vars saved — redeploy to apply", "ok"); qc.invalidateQueries({ queryKey: ["project", projectId] }); },
+    mutationFn: () => api.put<{ redeployed?: { environment: string }[] }>(
+      `/api/services/${svc.id}/env-vars`, { vars: rows.filter(r => r.key.trim()) }),
+    onSuccess: (res) => {
+      const envs = res?.redeployed ?? [];
+      toast.show(
+        envs.length
+          ? `Env vars saved — redeploying ${envs.map(e => e.environment).join(", ")}`
+          : "Env vars saved",
+        "ok",
+      );
+      qc.invalidateQueries({ queryKey: ["project", projectId] });
+    },
     onError: (e) => toast.show(String(e), "fail"),
   });
 
