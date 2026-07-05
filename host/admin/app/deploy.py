@@ -525,13 +525,15 @@ async def run_deploy(deployment_id: int, *, trigger: str = "manual") -> None:
                 await session.commit()
                 return
         # Fan the deploy out to cluster peers — but never re-fan a deploy that
-        # itself arrived from a peer (that's how loops would start). A DB
-        # transition forces peers past their same-sha dedupe: the stack
-        # changed even though the commit didn't.
+        # itself arrived from a peer (that's how loops would start). Two cases
+        # force peers past their same-sha dedupe: a DB transition, and any
+        # MANUAL deploy — an operator redeploying without a new commit is
+        # applying a config change (env vars, domain), and peers' containers
+        # must pick it up too. Webhook deploys keep the dedupe (new sha).
         if dep.trigger != "cluster":
             asyncio.get_event_loop().create_task(
                 clusterlib.fanout_deploy(project.name, env.name, dep.commit_sha,
-                                         force=did_transition)
+                                         force=did_transition or dep.trigger == "manual")
             )
 
 
