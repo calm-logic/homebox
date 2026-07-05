@@ -69,8 +69,29 @@ def read_cluster_manifest(rd: Path) -> dict[str, Any]:
     return block if isinstance(block, dict) else {}
 
 
+def db_replication_mode(rd: Path) -> str:
+    """'auto' or 'off'. Replication is ON BY DEFAULT for clustered nodes —
+    apps need no config to run correctly in either mode (a non-replicated
+    Postgres behind a shared tunnel splits its data across nodes, which is
+    never what anyone wants). homebox.yaml opts OUT:
+
+        cluster:
+          enabled: false        # or
+          database: none        # or database: {replication: none}
+    """
+    block = read_cluster_manifest(rd)
+    if block.get("enabled") is False:
+        return "off"
+    dbb = block.get("database")
+    if isinstance(dbb, str) and dbb.lower() in ("none", "off", "false"):
+        return "off"
+    if isinstance(dbb, dict) and str(dbb.get("replication", "")).lower() in ("none", "off", "false"):
+        return "off"
+    return "auto"
+
+
 def cluster_db_enabled(rd: Path) -> bool:
-    return bool(read_cluster_manifest(rd).get("enabled"))
+    return db_replication_mode(rd) != "off"
 
 
 def _norm_env(svc: dict[str, Any]) -> dict[str, str]:
@@ -178,6 +199,8 @@ spock.save_resolutions = 'on'
 # Homebox clusters: every node deploys + migrates the same app itself, so
 # schemas converge by construction. Only DML replicates.
 spock.enable_ddl_replication = 'off'
+# GUC name varies across snowflake extension versions — set both.
+snowflake.node = '${NODE_ORDINAL}'
 snowflake.node_id = '${NODE_ORDINAL}'
 EOF
 """,
@@ -279,6 +302,15 @@ def transform_db_service(
         })
     svc["configs"] = svc_configs
 
+    # Remember the plain-postgres data volume (if any) BEFORE rewriting: it's
+    # how the deploy engine detects a single-node → cluster transition that
+    # must migrate existing data (see deploy.py). Binary reuse is off the
+    # table — alpine(musl) data dirs aren't index-safe under glibc images.
+    legacy_volume = None
+    for v in (svc.get("volumes") or []):
+        if isinstance(v, str) and ":/var/lib/postgresql/data" in v and not v.startswith("/"):
+            legacy_volume = v.split(":", 1)[0]
+
     svc["image"] = PGEDGE_IMAGE.format(major=major)
     env.update({
         "POSTGRES_USER": admin_user,
@@ -316,7 +348,31 @@ def transform_db_service(
         "repl_password": repl_password,
         "ordinal": ordinal,
         "node_name": f"n{ordinal}",
+        "legacy_volume": legacy_volume,
     }
+
+
+async def residual_transform(svc: dict[str, Any], svc_name: str, stack: str,
+                             top_volumes: dict[str, Any]) -> bool:
+    """Cluster → single-node continuity: after a node leaves a cluster, its
+    replicated data lives in the pgedge volume. Deploying with the app's
+    original plain-postgres image would silently resurrect the stale legacy
+    volume — instead keep the pgEdge image (it's plain Postgres plus unused
+    extensions) on the pgedge volume: same data, no ports published, no
+    replication. Returns True when applied."""
+    image = str(svc.get("image") or "")
+    if not image or not is_postgres_image(image) or image.startswith("ghcr.io/pgedge/"):
+        return False
+    vol_name = f"{svc_name}-pgedge"
+    if not await volume_exists(f"{stack}_{vol_name}"):
+        return False
+    svc["image"] = PGEDGE_IMAGE.format(major=_pg_major(image))
+    vols = [v for v in (svc.get("volumes") or [])
+            if not (isinstance(v, str) and ":/var/lib/postgresql/data" in v)]
+    vols.append(f"{vol_name}:/var/lib/pgsql")
+    svc["volumes"] = vols
+    top_volumes.setdefault(vol_name, {})
+    return True
 
 
 def infos_from_compose(rd: Path) -> list[dict[str, Any]]:
@@ -420,6 +476,46 @@ async def ensure_replication(
     if code != 0:
         result["errors"].append(f"repl role rotate: {out[:200]}")
 
+    # 1c. sequence safety: nextval-style defaults collide across nodes. Bigint
+    # sequences are converted to snowflake (node-tagged 64-bit ids — the
+    # conversion rewrites the column default to snowflake.nextval). int4
+    # serials can't hold snowflake ids — those get a loud warning instead of
+    # silent breakage. First make sure the node GUC is set (init scripts
+    # written before 2026-07-04 used the wrong name for this extension
+    # version; ALTER SYSTEM self-heals existing volumes).
+    result.setdefault("warnings", [])
+    ord_from_db = info["ordinal"]
+    await _psql(container, admin, pw, db,
+                f"ALTER SYSTEM SET snowflake.node = '{ord_from_db}';")
+    await _psql(container, admin, pw, db, "SELECT pg_reload_conf();")
+    code, out = await _psql(container, admin, pw, db, """
+        SELECT c.relname || '|' || a.attname || '|' || a.atttypid::regtype::text
+               || '|' || COALESCE(pg_get_serial_sequence(quote_ident(n.nspname) || '.' || quote_ident(c.relname), a.attname), '')
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+        LEFT JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
+        WHERE n.nspname = 'public' AND c.relkind = 'r'
+          AND (pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%' OR a.attidentity <> '')
+    """)
+    if code == 0 and out:
+        for line in (x for x in out.splitlines() if x.strip()):
+            table, col, coltype, seq = (line.split("|") + ["", "", ""])[:4]
+            if coltype in ("bigint", "int8") and seq:
+                code, cout = await _psql(
+                    container, admin, pw, db,
+                    f"SELECT snowflake.convert_sequence_to_snowflake('{seq}');",
+                )
+                if code == 0:
+                    result.setdefault("sequences_converted", []).append(seq)
+                    log.info("cluster db: %s converted to snowflake on %s", seq, container)
+                # Errors here are usually "already converted" — not worth noise.
+            elif coltype in ("integer", "int4", "smallint", "int2"):
+                result["warnings"].append(
+                    f"{table}.{col} is a 32-bit auto-increment — snowflake ids don't fit, "
+                    f"so cross-node inserts CAN collide. Migrate it to bigint or uuid."
+                )
+
     # 2. add public tables to the replication set (PK tables → default,
     #    PK-less tables → insert-only)
     # spock.tables lists every table; set_name is NULL until it joins a repset.
@@ -450,6 +546,16 @@ async def ensure_replication(
     my_ord = info["ordinal"]
     peers = roster_peer_ordinals(state, self_node_id)
     expected = {f"sub_n{my_ord}_n{p_ord}" for p_ord in peers}
+    # A first subscription made while THIS database is still empty copies the
+    # provider's existing rows (synchronize_data) — that's how a fresh node
+    # (or a transition peer) receives data that predates the subscription.
+    # Non-empty databases subscribe plain: they already share history.
+    local_has_data = False
+    code, out = await _psql(container, admin, pw, db,
+                            "SELECT EXISTS (SELECT 1 FROM pg_stat_user_tables "
+                            "WHERE n_live_tup > 0 AND relname NOT LIKE '%migrations%');")
+    if code == 0 and out.strip() == "t":
+        local_has_data = True
     for p_ord, peer in peers.items():
         host = peer_host(peer)
         if not host:
@@ -459,10 +565,11 @@ async def ensure_replication(
             continue
         dsn = (f"host={host} port={info['port']} dbname={db} "
                f"user={info['repl_user']} password={info['repl_password']}")
+        sync_clause = "" if local_has_data else ", synchronize_data := true"
         code, sout = await _psql(
             container, admin, pw, db,
-            f"SELECT spock.sub_create(subscription_name := '{sub}', provider_dsn := '{dsn}');",
-            timeout=60,
+            f"SELECT spock.sub_create(subscription_name := '{sub}', provider_dsn := '{dsn}'{sync_clause});",
+            timeout=120,
         )
         if code == 0:
             result["subs_created"].append(sub)
@@ -485,6 +592,77 @@ async def ensure_replication(
             else:
                 result["errors"].append(f"drop {sub}: {sout[:200]}")
     return result
+
+
+async def _docker(args: list[str], timeout: int = 600, stdin_path: str | None = None,
+                  stdout_path: str | None = None) -> tuple[int, str]:
+    stdin_f = open(stdin_path, "rb") if stdin_path else None
+    stdout_f = open(stdout_path, "wb") if stdout_path else None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", *args,
+            stdin=stdin_f, stdout=stdout_f or asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT if not stdout_f else asyncio.subprocess.PIPE,
+        )
+        try:
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return 124, "docker command timed out"
+        blob = (out or b"") + (err or b"")
+        return proc.returncode or 0, blob.decode("utf-8", "replace")[-2000:]
+    finally:
+        if stdin_f:
+            stdin_f.close()
+        if stdout_f:
+            stdout_f.close()
+
+
+async def volume_exists(name: str) -> bool:
+    code, _ = await _docker(["volume", "inspect", name], timeout=15)
+    return code == 0
+
+
+async def dump_database(*, container: str, admin_user: str, admin_password: str,
+                        db: str, out_path: Path) -> tuple[bool, str]:
+    """pg_dump (custom format) streamed out of the container to a host file —
+    no intermediate copies, no tools needed in the admin image."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    code, out = await _docker(
+        ["exec", "-e", f"PGPASSWORD={admin_password}", container,
+         "pg_dump", "-U", admin_user, "-Fc", db],
+        timeout=3600, stdout_path=str(out_path),
+    )
+    if code != 0 or out_path.stat().st_size == 0:
+        return False, out
+    return True, f"{out_path.stat().st_size} bytes"
+
+
+async def restore_database(*, container: str, admin_user: str, admin_password: str,
+                           db: str, dump_path: Path) -> tuple[bool, str]:
+    """Data-only restore into a freshly-migrated database: truncate app tables
+    (replicates to peers), then stream the dump in. --disable-triggers keeps
+    FK ordering out of the picture; the COPYs flow through logical decoding,
+    so cluster peers receive every row."""
+    code, out = await _psql(container, admin_user, admin_password, db, """
+        DO $$ DECLARE t text;
+        BEGIN
+          FOR t IN SELECT tablename FROM pg_tables WHERE schemaname='public'
+          LOOP EXECUTE format('TRUNCATE TABLE %I CASCADE', t); END LOOP;
+        END $$;
+    """, timeout=300)
+    if code != 0:
+        return False, f"truncate failed: {out[:300]}"
+    code, out = await _docker(
+        ["exec", "-i", "-e", f"PGPASSWORD={admin_password}", container,
+         "pg_restore", "-U", admin_user, "-d", db,
+         "--data-only", "--disable-triggers", "--no-owner", "--single-transaction"],
+        timeout=3600, stdin_path=str(dump_path),
+    )
+    if code != 0:
+        return False, out[:500]
+    return True, "restored"
 
 
 async def drop_subscriptions(

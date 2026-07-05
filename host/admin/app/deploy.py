@@ -318,15 +318,21 @@ async def _assemble_stack(
             svc = await _generate_build_service(rd, project, env, d)
 
         cluster_db_info = None
-        if cluster_ctx and d.kind == "database" and d.origin == "compose":
+        if d.kind == "database" and d.origin == "compose":
             from . import cluster_db
-            cluster_db_info = cluster_db.transform_db_service(
-                svc=svc, svc_name=d.name, rd=rd,
-                project_name=project.name, env_name=env.name,
-                state=cluster_ctx["state"], self_node_id=cluster_ctx["node_id"],
-                cluster_secret=cluster_ctx["secret"], top_volumes=top_volumes,
-                top_configs=top_configs,
-            )
+            if cluster_ctx:
+                cluster_db_info = cluster_db.transform_db_service(
+                    svc=svc, svc_name=d.name, rd=rd,
+                    project_name=project.name, env_name=env.name,
+                    state=cluster_ctx["state"], self_node_id=cluster_ctx["node_id"],
+                    cluster_secret=cluster_ctx["secret"], top_volumes=top_volumes,
+                    top_configs=top_configs,
+                )
+            else:
+                # Not clustered (anymore) — keep serving replicated-era data.
+                await cluster_db.residual_transform(
+                    svc, d.name, urls.stack_name(project, env), top_volumes,
+                )
 
         _attach_network(svc)
         _merge_env(svc, d.auto_env)
@@ -561,9 +567,10 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
     _touch(dep, status="building")
     await session.commit()
 
-    # Cluster context: only when this node is in a synced cluster AND the repo
-    # opts in via homebox.yaml `cluster.enabled` — then Postgres services get
-    # the active-active treatment.
+    # Cluster context: when this node is in a synced cluster, Postgres services
+    # get the active-active treatment BY DEFAULT (homebox.yaml can opt out —
+    # cluster_db.db_replication_mode). Single-node installs deploy plain
+    # Postgres from the same unchanged app config.
     from . import cluster_db, clusterlib
     cluster_ctx = None
     cluster_state = await clusterlib.load_cluster(session)
@@ -585,7 +592,60 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
     await session.commit()
 
     stack = dep.stack_name
-    header = "$ docker compose up -d --build\n"
+
+    # Single-node → cluster transition: the replicated DB starts on a FRESH
+    # volume (an alpine data dir isn't binary-safe under the glibc pgEdge
+    # image), so existing data must travel logically. Dump it NOW — compose up
+    # is about to replace the old container. Only the deploy coordinator dumps
+    # (peers' divergent copies are not the source of truth); peers receive the
+    # restored data through replication (their first subscription synchronizes
+    # data while their DB is still empty).
+    transition_dumps: dict[str, Any] = {}
+    if cluster_ctx and dep.trigger != "cluster":
+        for name, pinfo in plan.items():
+            cdb = pinfo.get("cluster_db")
+            if not cdb or not cdb.get("legacy_volume"):
+                continue
+            old_vol = f"{stack}_{cdb['legacy_volume']}"
+            new_vol = f"{stack}_{name}-pgedge"
+            if await cluster_db.volume_exists(new_vol) or not await cluster_db.volume_exists(old_vol):
+                continue
+            old_container = f"{stack}-{name}-1"
+            from .host import container_status
+            st = container_status(old_container)
+            if not st.get("exists"):
+                _touch(dep, log_tail=(dep.log_tail or "") +
+                       f"\n[cluster] {name}: found legacy volume {old_vol} but no container to "
+                       f"dump from — data stays in the volume, restore it manually if needed.")
+                continue
+            if not st.get("running"):
+                await _run(["docker", "start", old_container], timeout=60)
+            for _ in range(30):
+                code, _out = await _run(["docker", "exec", old_container, "pg_isready",
+                                         "-U", cdb["admin_user"], "-d", cdb["db"]], timeout=15)
+                if code == 0:
+                    break
+                await asyncio.sleep(2)
+            dump_path = rd / ".homebox" / f"transition-{name}.dump"
+            ok, msg = await cluster_db.dump_database(
+                container=old_container, admin_user=cdb["admin_user"],
+                admin_password=cdb["admin_password"], db=cdb["db"], out_path=dump_path,
+            )
+            if ok:
+                transition_dumps[name] = dump_path
+                _touch(dep, log_tail=(dep.log_tail or "") +
+                       f"\n[cluster] {name}: transition dump captured ({msg})")
+            else:
+                raise DeployError(
+                    f"Cluster transition: could not dump existing data from {old_container} "
+                    f"({msg}). Aborting so the data isn't stranded — fix and redeploy, or opt "
+                    f"out with homebox.yaml `cluster: {{database: none}}`."
+                )
+            await session.commit()
+
+    # header carries any transition notes so the streaming log rewrites below
+    # (header + build output) don't erase them.
+    header = ((dep.log_tail or "") + "\n$ docker compose up -d --build\n").lstrip("\n")
     _touch(dep, log_tail=header)
     await session.commit()
 
@@ -650,10 +710,32 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
                     stack=stack, info=info["cluster_db"],
                     state=cluster_ctx["state"], self_node_id=cluster_ctx["node_id"],
                 )
-                if res.get("errors"):
-                    tail = (tail + f"\n[cluster] {name}: " + "; ".join(res["errors"]))[-8000:]
+                for kind in ("errors", "warnings"):
+                    if res.get(kind):
+                        tail = (tail + f"\n[cluster] {name} {kind}: " + "; ".join(res[kind]))[-8000:]
             except Exception as e:  # noqa: BLE001
                 tail = (tail + f"\n[cluster] {name}: wiring error {e}")[-8000:]
+
+        # Transition restore: pour the pre-up dump into the fresh replicated
+        # DB. App containers pause for the restore (they've already run their
+        # migrations during verify) so half-restored state is never served.
+        for name, dump_path in transition_dumps.items():
+            cdb = plan[name]["cluster_db"]
+            new_container = containers.get(name) or f"{stack}-{name}-1"
+            app_containers = [c for svc_name, c in containers.items() if svc_name != name]
+            for c in app_containers:
+                await _run(["docker", "stop", c], timeout=60)
+            ok, msg = await cluster_db.restore_database(
+                container=new_container, admin_user=cdb["admin_user"],
+                admin_password=cdb["admin_password"], db=cdb["db"], dump_path=dump_path,
+            )
+            for c in app_containers:
+                await _run(["docker", "start", c], timeout=60)
+            if ok:
+                dump_path.rename(dump_path.with_suffix(".dump.imported"))
+                tail = (tail + f"\n[cluster] {name}: transition data restored — replicating to peers")[-8000:]
+            else:
+                tail = (tail + f"\n[cluster] {name}: TRANSITION RESTORE FAILED: {msg} — dump kept at {dump_path}")[-8000:]
 
     _touch(dep, status="running", log_tail=tail, error=None)
     # This deploy replaced the env's containers — older "running" rows are
