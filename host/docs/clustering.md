@@ -19,12 +19,21 @@ A working 2-node-LAN slice of Phases 1–3, cut for speed (deviations noted):
 | App-DB active-active (pgEdge Spock) | `admin/app/cluster_db.py` | DDL replication OFF by design — every node deploys+migrates the same app, only DML replicates. PK-less tables → insert-only repset. Serial PKs unsupported (use UUIDs/snowflake) |
 | Cluster UI | `admin/frontend/src/pages/Cluster.tsx` | create/join/mint-token/roster/leave; reachable pre-onboarding for fresh joiners |
 
-Opt-in per project via `homebox.yaml`:
+Replication is ON BY DEFAULT for clustered nodes (2026-07-04 evening) —
+apps run unchanged in single-node or cluster mode. Per-app opt-OUT via
+`homebox.yaml`:
 
 ```yaml
 cluster:
-  enabled: true
+  database: none
 ```
+
+Platform absorbs the multi-master requirements: bigint sequences auto-convert
+to snowflake at wiring time (int4 serials warn in the deploy log);
+single→cluster transitions dump/restore existing data automatically
+(coordinator dumps pre-deploy, peers pick it up via synchronize_data on their
+first empty-DB subscription); a node leaving the cluster keeps serving its
+replicated-era data (residual pgEdge volume).
 
 Added 2026-07-04 (evening):
 - **Leave & disconnect**: peers drop their subscriptions to the leaver (WAL
