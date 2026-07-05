@@ -229,15 +229,16 @@ export PGPASSWORD="${POSTGRES_PASSWORD}"
 REPL_USER="${PGEDGE_USER:-pgedge}"
 REPL_PASS="${PGEDGE_PASSWORD:?PGEDGE_PASSWORD not set}"
 
+# SUPERUSER: spock's synchronize_data path calls pause/resume_apply_workers
+# and drops/creates slots on the PROVIDER as this role — plain REPLICATION +
+# read/write-all is not enough. Container-scoped database, container-scoped
+# blast radius.
 EXISTS=$(psql -tA -U "$ADMIN" -d "$DB" -c "SELECT 1 FROM pg_roles WHERE rolname='$REPL_USER' LIMIT 1;" || true)
 if [ "$EXISTS" != "1" ]; then
-  psql -v ON_ERROR_STOP=1 -U "$ADMIN" -d "$DB" -c "CREATE ROLE \\"$REPL_USER\\" LOGIN REPLICATION PASSWORD '$REPL_PASS';"
+  psql -v ON_ERROR_STOP=1 -U "$ADMIN" -d "$DB" -c "CREATE ROLE \\"$REPL_USER\\" LOGIN REPLICATION SUPERUSER PASSWORD '$REPL_PASS';"
 else
-  psql -v ON_ERROR_STOP=1 -U "$ADMIN" -d "$DB" -c "ALTER ROLE \\"$REPL_USER\\" LOGIN REPLICATION PASSWORD '$REPL_PASS';"
+  psql -v ON_ERROR_STOP=1 -U "$ADMIN" -d "$DB" -c "ALTER ROLE \\"$REPL_USER\\" LOGIN REPLICATION SUPERUSER PASSWORD '$REPL_PASS';"
 fi
-psql -v ON_ERROR_STOP=1 -U "$ADMIN" -d "$DB" -c "GRANT pg_read_all_data TO \\"$REPL_USER\\";"
-psql -v ON_ERROR_STOP=1 -U "$ADMIN" -d "$DB" -c "GRANT pg_write_all_data TO \\"$REPL_USER\\";"
-psql -v ON_ERROR_STOP=1 -U "$ADMIN" -d "$DB" -c "GRANT CREATE, TEMP ON DATABASE \\"$DB\\" TO \\"$REPL_USER\\";"
 
 NODE_EXISTS=$(psql -tA -U "$ADMIN" -d "$DB" -c "SELECT 1 FROM spock.node WHERE node_name='${NODE_NAME}' LIMIT 1;" || true)
 if [ "$NODE_EXISTS" != "1" ]; then
@@ -470,7 +471,7 @@ async def ensure_replication(
     # value, so their subscription DSNs authenticate once this converges.
     code, out = await _psql(
         container, admin, pw, db,
-        f"ALTER ROLE \"{info['repl_user']}\" WITH LOGIN REPLICATION "
+        f"ALTER ROLE \"{info['repl_user']}\" WITH LOGIN REPLICATION SUPERUSER "
         f"PASSWORD '{info['repl_password']}';",
     )
     if code != 0:
