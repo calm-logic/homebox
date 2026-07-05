@@ -752,10 +752,13 @@ async def ensure_db_replication(session: AsyncSession, state: dict[str, Any]) ->
                 log.exception("cluster db reconcile failed for %s", stack)
 
 
-async def fanout_deploy(project_name: str, env_name: str, commit_sha: str | None) -> None:
+async def fanout_deploy(project_name: str, env_name: str, commit_sha: str | None,
+                        force: bool = False) -> None:
     """After a successful LOCAL deploy, tell every peer to deploy the same
     (project, env). Peers pull config from us first, so env-var/domain changes
-    ride along. Fire-and-forget per peer; own session (called from deploy.py's
+    ride along. `force` bypasses the peers' same-sha dedupe — used when the
+    platform changed the stack without a new commit (cluster DB transition).
+    Fire-and-forget per peer; own session (called from deploy.py's
     background task)."""
     async with SessionLocal() as session:
         state = await load_cluster(session)
@@ -772,7 +775,8 @@ async def fanout_deploy(project_name: str, env_name: str, commit_sha: str | None
                     "POST", peer["peer_url"], "/peer/deploy",
                     secret=secret, self_node_id=node_id,
                     body={"project_name": project_name, "env_name": env_name,
-                          "commit_sha": commit_sha, "source_peer_url": my_url},
+                          "commit_sha": commit_sha, "source_peer_url": my_url,
+                          "force": force},
                     timeout=20,
                 )
                 log.info("fanout: %s/%s dispatched to %s", project_name, env_name, peer["peer_url"])

@@ -515,7 +515,7 @@ async def run_deploy(deployment_id: int, *, trigger: str = "manual") -> None:
         dep.node_id = await clusterlib.get_node_id(session)
         async with _lock_for(dep.stack_name):
             try:
-                await _do_deploy(session, dep, project, env)
+                did_transition = await _do_deploy(session, dep, project, env)
             except DeployError as e:
                 _touch(dep, status="failed", error=str(e)[:8000])
                 await session.commit()
@@ -525,14 +525,17 @@ async def run_deploy(deployment_id: int, *, trigger: str = "manual") -> None:
                 await session.commit()
                 return
         # Fan the deploy out to cluster peers — but never re-fan a deploy that
-        # itself arrived from a peer (that's how loops would start).
+        # itself arrived from a peer (that's how loops would start). A DB
+        # transition forces peers past their same-sha dedupe: the stack
+        # changed even though the commit didn't.
         if dep.trigger != "cluster":
             asyncio.get_event_loop().create_task(
-                clusterlib.fanout_deploy(project.name, env.name, dep.commit_sha)
+                clusterlib.fanout_deploy(project.name, env.name, dep.commit_sha,
+                                         force=did_transition)
             )
 
 
-async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, env: Environment) -> None:
+async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, env: Environment) -> bool:
     # Resolve domain + integration explicitly (relationships aren't eagerly
     # loaded on the background-task session, and async can't lazy-load them).
     primary = (await session.execute(
@@ -752,6 +755,7 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
     await session.commit()
 
     await _trigger_promotions(session, project, env, dep)
+    return bool(transition_dumps)
 
 
 async def _trigger_promotions(

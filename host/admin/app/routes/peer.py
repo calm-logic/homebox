@@ -156,6 +156,10 @@ class PeerDeployBody(BaseModel):
     env_name: str
     commit_sha: str | None = None
     source_peer_url: str = ""
+    # Redeploy even at the same commit — set when the PLATFORM changed the
+    # stack (e.g. a single-node → cluster DB transition), which the sha-based
+    # dedupe below can't see.
+    force: bool = False
 
 
 @router.post("/deploy")
@@ -199,7 +203,7 @@ async def peer_deploy(
     )).scalar_one_or_none()
     if latest is not None and (
         latest.status in clusterlib._IN_FLIGHT
-        or (latest.status == "running" and body.commit_sha
+        or (not body.force and latest.status == "running" and body.commit_sha
             and latest.commit_sha == body.commit_sha)
     ):
         return {"ok": True, "queued": False, "reason": "already up to date or in flight"}
