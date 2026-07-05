@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import require_session_api
 from ..db import get_session
-from ..models import MetricSample, Service, ServiceEnvVar
+from ..models import MetricSample, Service, ServiceEnvVar, SECRET_MASK
 
 router = APIRouter(prefix="/api/services")
 
@@ -83,8 +83,18 @@ async def set_env_vars(
     session: AsyncSession = Depends(get_session),
 ):
     """Replace all user-set env vars for a service. Auto-wired (source='auto')
-    vars are left untouched."""
+    vars are left untouched. A secret submitted with the masked value
+    (SECRET_MASK — what the GET returns instead of the real value) keeps its
+    stored value: the UI shows the mask, and saving other fields must not
+    overwrite the real secret with the placeholder."""
     svc = await _get_service(session, service_id)
+    existing = (await session.execute(
+        select(ServiceEnvVar).where(
+            ServiceEnvVar.service_id == svc.id, ServiceEnvVar.source == "user"
+        )
+    )).scalars().all()
+    prior = {(v.key, v.environment_id): v.value for v in existing}
+
     await session.execute(
         delete(ServiceEnvVar).where(
             ServiceEnvVar.service_id == svc.id, ServiceEnvVar.source == "user"
@@ -94,9 +104,13 @@ async def set_env_vars(
         key = v.key.strip()
         if not key:
             continue
+        value = v.value
+        if v.is_secret and value == SECRET_MASK:
+            # Unchanged secret — restore the stored value; never persist the mask.
+            value = prior.get((key, v.environment_id), "")
         session.add(ServiceEnvVar(
             service_id=svc.id, environment_id=v.environment_id,
-            key=key, value=v.value, source="user", is_secret=v.is_secret,
+            key=key, value=value, source="user", is_secret=v.is_secret,
         ))
     await session.commit()
     return {"ok": True, "count": len(body.vars)}

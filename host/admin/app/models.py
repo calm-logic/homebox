@@ -30,6 +30,13 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from .db import Base
 
+# Placeholder the API returns instead of a secret env var's real value. The
+# env-var save path treats an incoming value equal to this as "unchanged" and
+# preserves what's stored — otherwise editing any field on the service would
+# write the mask back over the real secret (it corrupted a live Google OAuth
+# secret to six bullet bytes exactly this way).
+SECRET_MASK = "••••••"
+
 
 class Integration(Base):
     """A connection to an external system Homebox depends on — one row per

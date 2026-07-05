@@ -10,6 +10,9 @@ import { useToast } from "../lib/toast";
 import type { EnvironmentInfo, MetricsResponse, ProjectDetailData, ServiceItem } from "../lib/types";
 
 const WINDOWS = ["1h", "6h", "24h", "7d"] as const;
+// Matches app/models.py SECRET_MASK — the API returns this instead of a
+// secret's real value, and treats it on save as "keep the stored value".
+const SECRET_MASK = "••••••";
 type Win = (typeof WINDOWS)[number];
 
 const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -370,7 +373,12 @@ function EnvVarsEditor({ svc, projectId }: { svc: ServiceItem; projectId: number
         {rows.map((r, i) => (
           <div key={i} className="row" style={{ gap: "0.4rem" }}>
             <input placeholder="KEY" value={r.key} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} style={{ flex: "0 0 35%" }} />
-            <input placeholder="value" value={r.value} type={r.is_secret ? "password" : "text"} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, value: e.target.value } : x))} />
+            <input
+              placeholder={r.is_secret && r.value === SECRET_MASK ? "•••••• (unchanged — type to replace)" : "value"}
+              value={r.value === SECRET_MASK ? "" : r.value}
+              type={r.is_secret ? "password" : "text"}
+              onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, value: e.target.value } : x))}
+            />
             <label className="row" style={{ gap: "0.3rem", cursor: "pointer" }} title="Secret">
               <input type="checkbox" checked={r.is_secret} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, is_secret: e.target.checked } : x))} />🔒
             </label>

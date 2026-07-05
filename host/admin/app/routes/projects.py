@@ -20,7 +20,7 @@ from ..db import get_session
 from ..integrations_lib import SLUG_RE, decrypted_token, slugify
 from ..models import (
     Deployment, Domain, Environment, Integration, Project, Service, ServiceEnvVar,
-    ServiceInstance, WorkflowRunCache,
+    ServiceInstance, WorkflowRunCache, SECRET_MASK,
 )
 from ..webhooks_lib import sync_project_webhook
 
@@ -186,7 +186,7 @@ def _serialize_service(s: Service, env_vars: list[ServiceEnvVar]) -> dict:
         "subdomain_label": s.subdomain_label, "internal_port": s.internal_port,
         "depends_on": s.depends_on or [], "env_template": s.env_template or {},
         "env_vars": [
-            {"id": v.id, "key": v.key, "value": ("••••••" if v.is_secret else v.value),
+            {"id": v.id, "key": v.key, "value": (SECRET_MASK if v.is_secret else v.value),
              "source": v.source, "is_secret": v.is_secret, "environment_id": v.environment_id}
             for v in env_vars if v.service_id == s.id
         ],
