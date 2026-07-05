@@ -553,7 +553,8 @@ async def ensure_replication(
     local_has_data = False
     code, out = await _psql(container, admin, pw, db,
                             "SELECT EXISTS (SELECT 1 FROM pg_stat_user_tables "
-                            "WHERE n_live_tup > 0 AND relname NOT LIKE '%migrations%');")
+                            "WHERE schemaname = 'public' "  # spock's catalogs also count as "user tables"
+                            "AND n_live_tup > 0 AND relname NOT LIKE '%migrations%');")
     if code == 0 and out.strip() == "t":
         local_has_data = True
     for p_ord, peer in peers.items():
