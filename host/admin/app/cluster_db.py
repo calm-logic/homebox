@@ -518,11 +518,25 @@ async def ensure_replication(
                 )
 
     # 2. add public tables to the replication set (PK tables → default,
-    #    PK-less tables → insert-only)
+    #    PK-less tables → insert-only). Migration-bookkeeping tables NEVER
+    #    replicate: every node runs its own migrations (identical rows arise
+    #    independently), and copying them breaks a new node's initial sync
+    #    with duplicate-key errors. Also evict any that slipped in earlier.
+    code, out = await _psql(container, admin, pw, db,
+                            "SELECT relname FROM spock.tables "
+                            "WHERE nspname='public' AND set_name IS NOT NULL "
+                            "AND relname LIKE '%migrations%';")
+    if code == 0 and out:
+        for table in (x.strip() for x in out.splitlines() if x.strip()):
+            await _psql(container, admin, pw, db,
+                        f"SELECT spock.repset_remove_table('default', 'public.{table}');")
+            await _psql(container, admin, pw, db,
+                        f"SELECT spock.repset_remove_table('default_insert_only', 'public.{table}');")
     # spock.tables lists every table; set_name is NULL until it joins a repset.
     code, out = await _psql(container, admin, pw, db,
                             "SELECT relname FROM spock.tables "
-                            "WHERE nspname='public' AND set_name IS NULL;")
+                            "WHERE nspname='public' AND set_name IS NULL "
+                            "AND relname NOT LIKE '%migrations%';")
     if code == 0 and out:
         for table in [x for x in out.splitlines() if x.strip()]:
             code, hp = await _psql(container, admin, pw, db, f"""
