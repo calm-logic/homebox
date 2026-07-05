@@ -460,15 +460,21 @@ async def _user_env_by_service(session: AsyncSession, project: Project, env: Env
     return out
 
 
+TRAEFIK_INTERNAL = "http://homebox-traefik:80"
+
+
 async def verify_instances(session: AsyncSession, deployment_id: int, *, attempts: int = 3) -> bool:
-    """Probe each public instance URL end-to-end and mark it running or
-    unreachable. ANY response from the app counts as up — an API with no
-    route at / legitimately 404s (e.g. it only serves /api/*). Down means:
-    network/edge errors, 5xx, Traefik's no-router 404 fallback (exact body
-    "404 page not found"), or the Cloudflare tunnel ingress catch-all's
-    EMPTY-body 404 (the hostname isn't in the tunnel config at all — the app
-    was previously reported green while unreachable from any browser).
-    Returns True when every URL answered."""
+    """Probe each public instance and mark it running or unreachable. The probe
+    goes through THIS node's Traefik directly (Host header), not the public
+    tunnel — so the judgment is purely "is the app container serving?" and is
+    immune to the tunnel-catch-all 404 ambiguity that made healthy apps look
+    down. (End-to-end tunnel/DNS health is the tunnel monitor's job.)
+
+    ANY HTTP response from the app counts as up — a 404/401/403/405 means the
+    service answered, it just doesn't serve that exact path (an API that only
+    serves /api/* legitimately 404s its root). Down means: connection failure,
+    a gateway 5xx (Traefik has no healthy backend), or Traefik's own no-router
+    404 fallback (exact body "404 page not found")."""
     rows = (await session.execute(
         select(ServiceInstance).where(ServiceInstance.deployment_id == deployment_id)
     )).scalars().all()
@@ -477,16 +483,18 @@ async def verify_instances(session: AsyncSession, deployment_id: int, *, attempt
         for inst in rows:
             if not inst.url:
                 continue
+            # Route the probe at the local Traefik, preserving host + path.
+            parsed = httpx.URL(inst.url)
+            host = parsed.host
+            probe_url = f"{TRAEFIK_INTERNAL}{parsed.raw_path.decode() if parsed.raw_path else '/'}"
             ok = False
             for i in range(attempts):
                 try:
-                    r = await client.get(inst.url)
-                    body = r.text.strip()
-                    infra_404 = r.status_code == 404 and (
-                        body == "404 page not found"  # traefik: no router
-                        or body == ""                 # tunnel ingress catch-all
+                    r = await client.get(probe_url, headers={"Host": host})
+                    traefik_no_router = (
+                        r.status_code == 404 and r.text.strip() == "404 page not found"
                     )
-                    if r.status_code < 500 and not infra_404:
+                    if r.status_code < 500 and not traefik_no_router:
                         ok = True
                         break
                 except httpx.HTTPError:
