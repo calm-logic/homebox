@@ -266,6 +266,104 @@ async def _pg(container: str, sql: str) -> str:
     return out
 
 
+def _ident(name: str) -> str:
+    """Validate + double-quote a SQL identifier (column/table)."""
+    if not isinstance(name, str) or not _IDENT_RE.match(name):
+        raise HTTPException(400, f"Invalid identifier: {name!r}")
+    return f'"{name}"'
+
+
+def _lit(v) -> str:
+    """A safe SQL literal for a Python value from a JSON body. Single quotes are
+    doubled (the only injection vector); Postgres coerces the literal to the
+    column type on assignment/compare, so we don't need per-column typing."""
+    if v is None:
+        return "NULL"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    if isinstance(v, (dict, list)):
+        return "'" + _json.dumps(v).replace("'", "''") + "'"
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+# Filter operators the rows endpoint accepts. `contains` casts the column to
+# text so it works on any type; the rest let Postgres coerce the literal.
+_FILTER_OPS = {"eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+
+
+def _where_from_filters(filters_json: str | None) -> str:
+    if not filters_json:
+        return ""
+    try:
+        filters = _json.loads(filters_json)
+    except ValueError:
+        raise HTTPException(400, "filters must be valid JSON")
+    if not isinstance(filters, list):
+        raise HTTPException(400, "filters must be a JSON array")
+    clauses: list[str] = []
+    for f in filters:
+        if not isinstance(f, dict):
+            continue
+        col = _ident(f.get("col", ""))
+        op = f.get("op")
+        if op == "is_null":
+            clauses.append(f"{col} IS NULL")
+        elif op == "not_null":
+            clauses.append(f"{col} IS NOT NULL")
+        elif op == "contains":
+            clauses.append(f"{col}::text ILIKE {_lit('%' + str(f.get('val', '')) + '%')}")
+        elif op in _FILTER_OPS:
+            clauses.append(f"{col} {_FILTER_OPS[op]} {_lit(f.get('val'))}")
+        else:
+            raise HTTPException(400, f"Unknown filter op: {op!r}")
+    return (" WHERE " + " AND ".join(clauses)) if clauses else ""
+
+
+async def _table_schema(container: str, table: str) -> dict:
+    """Columns (name, type, nullable, default), primary key, and foreign keys
+    for one public table — everything the editor UI needs."""
+    qtbl = f"'public.\"{table}\"'"  # for ::regclass
+    cols_raw = await _pg(
+        container,
+        "select coalesce(json_agg(json_build_object("
+        "'name', column_name, 'type', data_type, 'udt', udt_name, "
+        "'nullable', is_nullable = 'YES', 'default', column_default) "
+        "order by ordinal_position), '[]'::json) "
+        f"from information_schema.columns where table_schema='public' and table_name='{table}'",
+    )
+    columns = _json.loads(cols_raw or "[]")
+    if not columns:
+        raise HTTPException(404, "Table not found")
+    pk_raw = await _pg(
+        container,
+        "select coalesce(json_agg(a.attname), '[]'::json) from pg_index i "
+        "join pg_attribute a on a.attrelid = i.indrelid and a.attnum = any(i.indkey) "
+        f"where i.indrelid = {qtbl}::regclass and i.indisprimary",
+    )
+    pk = _json.loads(pk_raw or "[]")
+    fk_raw = await _pg(
+        container,
+        "select coalesce(json_agg(json_build_object("
+        "'column', kcu.column_name, 'ftable', ccu.table_name, 'fcolumn', ccu.column_name)), '[]'::json) "
+        "from information_schema.table_constraints tc "
+        "join information_schema.key_column_usage kcu on kcu.constraint_name = tc.constraint_name "
+        "and kcu.table_schema = tc.table_schema "
+        "join information_schema.constraint_column_usage ccu on ccu.constraint_name = tc.constraint_name "
+        "and ccu.table_schema = tc.table_schema "
+        "where tc.constraint_type = 'FOREIGN KEY' and tc.table_schema = 'public' "
+        f"and tc.table_name = '{table}'",
+    )
+    fk_map = {f["column"]: {"table": f["ftable"], "column": f["fcolumn"]}
+              for f in _json.loads(fk_raw or "[]")}
+    pk_set = set(pk)
+    for c in columns:
+        c["pk"] = c["name"] in pk_set
+        c["fk"] = fk_map.get(c["name"])
+    return {"table": table, "columns": columns, "primary_key": pk}
+
+
 @router.get("/{service_id}/data")
 async def data_overview(
     service_id: int,
@@ -304,6 +402,26 @@ async def data_overview(
     return {"flavor": "redis", "dbs": dbs}
 
 
+@router.get("/{service_id}/data/schema")
+async def data_schema(
+    service_id: int,
+    environment_id: int,
+    table: str,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Columns (name, type, nullable, default), primary key, and foreign keys
+    for one table — everything the editor needs to render typed headers, FK
+    arrows, and inline edits."""
+    svc = await _get_service(session, service_id)
+    if _data_flavor(svc) != "postgres":
+        raise HTTPException(400, "Schema is only available for postgres services.")
+    if not _IDENT_RE.match(table):
+        raise HTTPException(400, "Invalid table name")
+    _env, container = await _service_container(session, svc, environment_id)
+    return await _table_schema(container, table)
+
+
 @router.get("/{service_id}/data/rows")
 async def data_rows(
     service_id: int,
@@ -311,6 +429,9 @@ async def data_rows(
     table: str,
     limit: int = 50,
     offset: int = 0,
+    order_by: str | None = None,
+    dir: str = "asc",
+    filters: str | None = None,
     user: str = Depends(require_session_api),
     session: AsyncSession = Depends(get_session),
 ):
@@ -331,11 +452,20 @@ async def data_rows(
     columns = _json.loads(cols_raw or "[]")
     if not columns:
         raise HTTPException(404, "Table not found")
-    count_raw = await _pg(container, f'select count(*) from "{table}"')
+
+    where = _where_from_filters(filters)
+    order = ""
+    if order_by:
+        if order_by not in columns:
+            raise HTTPException(400, "Unknown sort column")
+        direction = "DESC" if str(dir).lower() == "desc" else "ASC"
+        order = f' ORDER BY {_ident(order_by)} {direction}'
+
+    count_raw = await _pg(container, f'select count(*) from "{table}"{where}')
     rows_raw = await _pg(
         container,
         "select coalesce(json_agg(t), '[]'::json) from "
-        f'(select * from "{table}" limit {limit} offset {offset}) t',
+        f'(select * from "{table}"{where}{order} limit {limit} offset {offset}) t',
     )
     return {
         "table": table, "columns": columns,
@@ -343,6 +473,113 @@ async def data_rows(
         "total": int(count_raw.strip() or 0),
         "limit": limit, "offset": offset,
     }
+
+
+class _RowUpdate(BaseModel):
+    table: str
+    pk: dict          # {col: value} identifying the row
+    changes: dict     # {col: new_value}
+
+
+@router.post("/{service_id}/data/update")
+async def data_update(
+    service_id: int,
+    environment_id: int,
+    body: _RowUpdate,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Update one row identified by its primary key. Returns the updated row."""
+    svc = await _get_service(session, service_id)
+    if _data_flavor(svc) != "postgres":
+        raise HTTPException(400, "Editing is only available for postgres services.")
+    if not _IDENT_RE.match(body.table):
+        raise HTTPException(400, "Invalid table name")
+    if not body.pk or not body.changes:
+        raise HTTPException(400, "pk and changes are both required")
+    _env, container = await _service_container(session, svc, environment_id)
+
+    set_clause = ", ".join(f"{_ident(c)} = {_lit(v)}" for c, v in body.changes.items())
+    where_clause = " AND ".join(f"{_ident(c)} = {_lit(v)}" for c, v in body.pk.items())
+    tbl = f'"{body.table}"'
+    out = await _pg(
+        container,
+        f"with u as (update {tbl} set {set_clause} where {where_clause} returning *) "
+        "select coalesce(json_agg(u), '[]'::json) from u",
+    )
+    updated = _json.loads(out or "[]")
+    if not updated:
+        raise HTTPException(404, "No row matched — it may have changed or been deleted.")
+    return {"ok": True, "row": updated[0]}
+
+
+class _RowDelete(BaseModel):
+    table: str
+    rows: list[dict]  # each is a {col: value} PK identifying a row to delete
+
+
+@router.post("/{service_id}/data/delete")
+async def data_delete(
+    service_id: int,
+    environment_id: int,
+    body: _RowDelete,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Bulk-delete rows by primary key. Returns the count deleted."""
+    svc = await _get_service(session, service_id)
+    if _data_flavor(svc) != "postgres":
+        raise HTTPException(400, "Deleting is only available for postgres services.")
+    if not _IDENT_RE.match(body.table):
+        raise HTTPException(400, "Invalid table name")
+    if not body.rows:
+        raise HTTPException(400, "No rows to delete")
+    if len(body.rows) > 500:
+        raise HTTPException(400, "Refusing to delete more than 500 rows at once")
+    _env, container = await _service_container(session, svc, environment_id)
+
+    ors = []
+    for r in body.rows:
+        if not r:
+            continue
+        ands = " AND ".join(f"{_ident(c)} = {_lit(v)}" for c, v in r.items())
+        ors.append(f"({ands})")
+    if not ors:
+        raise HTTPException(400, "No valid row identifiers")
+    out = await _pg(
+        container,
+        f'with d as (delete from "{body.table}" where {" OR ".join(ors)} returning 1) '
+        "select count(*) from d",
+    )
+    return {"ok": True, "deleted": int(out.strip() or 0)}
+
+
+@router.get("/{service_id}/data/related")
+async def data_related(
+    service_id: int,
+    environment_id: int,
+    table: str,
+    column: str,
+    value: str,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Fetch the single row a foreign key points at (for the relationship
+    popup), plus that table's schema so the popup can render typed fields."""
+    svc = await _get_service(session, service_id)
+    if _data_flavor(svc) != "postgres":
+        raise HTTPException(400, "Related rows are only available for postgres services.")
+    if not _IDENT_RE.match(table) or not _IDENT_RE.match(column):
+        raise HTTPException(400, "Invalid table or column")
+    _env, container = await _service_container(session, svc, environment_id)
+    schema = await _table_schema(container, table)
+    out = await _pg(
+        container,
+        "select coalesce(json_agg(t), '[]'::json) from "
+        f'(select * from "{table}" where {_ident(column)} = {_lit(value)} limit 1) t',
+    )
+    rows = _json.loads(out or "[]")
+    return {"table": table, "columns": schema["columns"], "row": rows[0] if rows else None}
 
 
 @router.get("/{service_id}/data/keys")

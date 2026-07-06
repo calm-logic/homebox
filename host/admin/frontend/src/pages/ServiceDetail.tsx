@@ -7,6 +7,7 @@ import {
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import { api } from "../lib/api";
 import { useToast } from "../lib/toast";
+import { Modal } from "../components/Modal";
 import type { EnvironmentInfo, MetricsResponse, ProjectDetailData, ServiceItem } from "../lib/types";
 
 const WINDOWS = ["1h", "6h", "24h", "7d"] as const;
@@ -184,25 +185,123 @@ function DataBrowser({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }) {
     : <RedisBrowser svc={svc} env={env} dbs={overview.dbs ?? []} />;
 }
 
+interface ColumnMeta {
+  name: string; type: string; udt: string; nullable: boolean;
+  default: string | null; pk: boolean;
+  fk: { table: string; column: string } | null;
+}
+interface TableSchema { table: string; columns: ColumnMeta[]; primary_key: string[]; }
+interface Filter { col: string; op: string; val: string; }
+
+const FILTER_OPS: { op: string; label: string; needsVal: boolean }[] = [
+  { op: "eq", label: "=", needsVal: true },
+  { op: "neq", label: "≠", needsVal: true },
+  { op: "contains", label: "contains", needsVal: true },
+  { op: "gt", label: ">", needsVal: true },
+  { op: "gte", label: "≥", needsVal: true },
+  { op: "lt", label: "<", needsVal: true },
+  { op: "lte", label: "≤", needsVal: true },
+  { op: "is_null", label: "is null", needsVal: false },
+  { op: "not_null", label: "not null", needsVal: false },
+];
+
+const shortType = (c: ColumnMeta): string => {
+  const t = c.udt || c.type;
+  const map: Record<string, string> = {
+    varchar: "text", bpchar: "text", int2: "int2", int4: "int4", int8: "int8",
+    float4: "float", float8: "float", bool: "bool", timestamptz: "timestamptz",
+    timestamp: "timestamp", jsonb: "jsonb", json: "json", uuid: "uuid",
+  };
+  return map[t] ?? t;
+};
+
+const isNumeric = (c: ColumnMeta) => /^(int|float|numeric|decimal|serial|int2|int4|int8|float4|float8)/.test(c.udt || c.type);
+const isBool = (c: ColumnMeta) => (c.udt || c.type) === "bool" || c.type === "boolean";
+const isJson = (c: ColumnMeta) => /json/.test(c.udt || c.type);
+
 function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: EnvironmentInfo; tables: string[] }) {
+  const qc = useQueryClient();
+  const toast = useToast();
   const [table, setTable] = useState(tables[0] ?? "");
   const [offset, setOffset] = useState(0);
-  useEffect(() => { setTable(tables[0] ?? ""); setOffset(0); }, [env.id, tables.join(",")]);
+  const [orderBy, setOrderBy] = useState<string | null>(null);
+  const [dir, setDir] = useState<"asc" | "desc">("asc");
+  const [filters, setFilters] = useState<Filter[]>([]);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [editing, setEditing] = useState<{ row: number; col: string } | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [related, setRelated] = useState<{ table: string; column: string; value: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const { data, isFetching } = useQuery<RowsResponse>({
-    queryKey: ["svc-rows", svc.id, env.id, table, offset],
-    queryFn: () => api.get<RowsResponse>(
-      `/api/services/${svc.id}/data/rows?environment_id=${env.id}&table=${encodeURIComponent(table)}&offset=${offset}`),
+  const resetView = () => { setOffset(0); setOrderBy(null); setDir("asc"); setFilters([]); setSelected(new Set()); setEditing(null); };
+  useEffect(() => { setTable(tables[0] ?? ""); resetView(); }, [env.id, tables.join(",")]);
+  useEffect(() => { setSelected(new Set()); setEditing(null); }, [table, offset, orderBy, dir, JSON.stringify(filters)]);
+
+  const { data: schema } = useQuery<TableSchema>({
+    queryKey: ["svc-schema", svc.id, env.id, table],
+    queryFn: () => api.get<TableSchema>(`/api/services/${svc.id}/data/schema?environment_id=${env.id}&table=${encodeURIComponent(table)}`),
     enabled: !!table,
+  });
+
+  const filtersParam = filters.length ? `&filters=${encodeURIComponent(JSON.stringify(filters))}` : "";
+  const orderParam = orderBy ? `&order_by=${encodeURIComponent(orderBy)}&dir=${dir}` : "";
+  const rowsKey = ["svc-rows", svc.id, env.id, table, offset, orderBy, dir, JSON.stringify(filters)];
+  const { data, isFetching } = useQuery<RowsResponse>({
+    queryKey: rowsKey,
+    queryFn: () => api.get<RowsResponse>(
+      `/api/services/${svc.id}/data/rows?environment_id=${env.id}&table=${encodeURIComponent(table)}&offset=${offset}${orderParam}${filtersParam}`),
+    enabled: !!table,
+  });
+
+  const colMeta = (name: string): ColumnMeta | undefined => schema?.columns.find(c => c.name === name);
+  const pkCols = schema?.primary_key ?? [];
+  const canEdit = pkCols.length > 0;
+  const pkOf = (r: Record<string, unknown>) => Object.fromEntries(pkCols.map(c => [c, r[c]]));
+
+  const update = useMutation({
+    mutationFn: (v: { row: Record<string, unknown>; col: string; value: unknown }) =>
+      api.post(`/api/services/${svc.id}/data/update?environment_id=${env.id}`,
+        { table, pk: pkOf(v.row), changes: { [v.col]: v.value } }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: rowsKey }); toast.show("Row updated", "ok"); setEditing(null); },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
+  const del = useMutation({
+    mutationFn: () => api.post<{ deleted: number }>(`/api/services/${svc.id}/data/delete?environment_id=${env.id}`,
+      { table, rows: [...selected].map(i => pkOf(data!.rows[i])) }),
+    onSuccess: (r) => { qc.invalidateQueries({ queryKey: rowsKey }); toast.show(`Deleted ${r.deleted} row${r.deleted === 1 ? "" : "s"}`, "ok"); setSelected(new Set()); setConfirmDelete(false); },
+    onError: (e) => toast.show(String(e), "fail"),
   });
 
   if (tables.length === 0) return <div className="card"><span className="dim">No tables yet in this database.</span></div>;
 
+  const startEdit = (rowIdx: number, col: string, cur: unknown) => {
+    if (!canEdit) { toast.show("This table has no primary key, so rows can't be edited here.", "info"); return; }
+    if (pkCols.includes(col) || colMeta(col)?.default?.includes("gen_random_uuid")) {
+      // Editing a PK/identity is a footgun — allow non-PK edits only.
+      if (pkCols.includes(col)) { toast.show("Primary-key columns aren't editable.", "info"); return; }
+    }
+    setEditing({ row: rowIdx, col });
+    setEditValue(cur === null || cur === undefined ? "" : typeof cur === "object" ? JSON.stringify(cur) : String(cur));
+  };
+
+  const commitEdit = (row: Record<string, unknown>, col: string) => {
+    const meta = colMeta(col);
+    let value: unknown = editValue;
+    if (editValue === "" && meta?.nullable) value = null;
+    else if (meta && isBool(meta)) value = editValue === "true" || editValue === "t" || editValue === "1";
+    update.mutate({ row, col, value });
+  };
+
+  const allSelected = !!data && data.rows.length > 0 && selected.size === data.rows.length;
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(data!.rows.map((_, i) => i)));
+  const toggleRow = (i: number) => setSelected(s => { const n = new Set(s); n.has(i) ? n.delete(i) : n.add(i); return n; });
+
   return (
     <>
-      <div className="row">
+      <div className="row" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
         <h3 style={{ margin: 0 }}>Data</h3>
-        <select value={table} onChange={e => { setTable(e.target.value); setOffset(0); }} style={{ width: "auto" }}>
+        <select value={table} onChange={e => { setTable(e.target.value); resetView(); }} style={{ width: "auto" }}>
           {tables.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
         {isFetching && <span className="spinner" />}
@@ -215,17 +314,92 @@ function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: Environm
         <button className="btn small" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>‹ Prev</button>
         <button className="btn small" disabled={!data || offset + data.limit >= data.total} onClick={() => setOffset(offset + 50)}>Next ›</button>
       </div>
+
+      <FilterBar columns={schema?.columns ?? []} filters={filters} setFilters={(f) => { setFilters(f); setOffset(0); }} />
+
+      {selected.size > 0 && (
+        <div className="bulk-bar">
+          <span>{selected.size} selected</span>
+          <div className="spacer" />
+          <button className="btn small ghost" onClick={() => setSelected(new Set())}>Clear</button>
+          <button className="btn small danger" onClick={() => setConfirmDelete(true)}>Delete {selected.size}</button>
+        </div>
+      )}
+
       {data && (
         data.rows.length === 0 ? (
-          <div className="card" style={{ marginTop: "0.5rem" }}><span className="dim">Table is empty.</span></div>
+          <div className="card" style={{ marginTop: "0.5rem" }}>
+            <span className="dim">{filters.length ? "No rows match the filters." : "Table is empty."}</span>
+          </div>
         ) : (
-          <div style={{ overflowX: "auto", marginTop: "0.5rem" }}>
-            <table className="data-table" style={{ margin: 0 }}>
-              <thead><tr>{data.columns.map(c => <th key={c}>{c}</th>)}</tr></thead>
+          <div className="data-scroll">
+            <table className="data-table editor">
+              <thead>
+                <tr>
+                  <th className="sel-col">
+                    <input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="Select all" />
+                  </th>
+                  {data.columns.map(c => {
+                    const m = colMeta(c);
+                    const sorted = orderBy === c;
+                    return (
+                      <th key={c} onClick={() => { if (orderBy === c) setDir(d => d === "asc" ? "desc" : "asc"); else { setOrderBy(c); setDir("asc"); } setOffset(0); }} className="sortable">
+                        <div className="th-inner">
+                          <span className="th-name">
+                            {m?.pk && <span className="pk-dot" title="Primary key">🔑</span>}
+                            {c}
+                            {sorted && <span className="sort-ind">{dir === "asc" ? "▲" : "▼"}</span>}
+                          </span>
+                          <span className="th-type">{m ? shortType(m) : ""}{m?.fk ? ` → ${m.fk.table}` : ""}</span>
+                        </div>
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
               <tbody>
                 {data.rows.map((r, i) => (
-                  <tr key={i}>
-                    {data.columns.map(c => <td key={c} className="dim" style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={fmtCell(r[c])}>{fmtCell(r[c])}</td>)}
+                  <tr key={i} className={selected.has(i) ? "row-selected" : ""}>
+                    <td className="sel-col">
+                      <input type="checkbox" checked={selected.has(i)} onChange={() => toggleRow(i)} aria-label="Select row" />
+                    </td>
+                    {data.columns.map(c => {
+                      const m = colMeta(c);
+                      const isEditing = editing?.row === i && editing?.col === c;
+                      if (isEditing) {
+                        return (
+                          <td key={c} className="editing-cell">
+                            {m && isBool(m) ? (
+                              <select autoFocus value={editValue} onChange={e => setEditValue(e.target.value)}
+                                onBlur={() => commitEdit(r, c)}
+                                onKeyDown={e => { if (e.key === "Enter") commitEdit(r, c); if (e.key === "Escape") setEditing(null); }}>
+                                <option value="true">true</option>
+                                <option value="false">false</option>
+                                {m.nullable && <option value="">∅ null</option>}
+                              </select>
+                            ) : (
+                              <input autoFocus value={editValue}
+                                type={m && isNumeric(m) ? "text" : "text"}
+                                onChange={e => setEditValue(e.target.value)}
+                                onBlur={() => commitEdit(r, c)}
+                                onKeyDown={e => { if (e.key === "Enter") commitEdit(r, c); if (e.key === "Escape") setEditing(null); }} />
+                            )}
+                          </td>
+                        );
+                      }
+                      const raw = r[c];
+                      const display = fmtCell(raw);
+                      return (
+                        <td key={c} className={`data-cell${raw === null ? " null-cell" : ""}`}
+                          onDoubleClick={() => startEdit(i, c, raw)} title={display}>
+                          <span className="cell-val">{display}</span>
+                          {m?.fk && raw !== null && raw !== undefined && (
+                            <button className="fk-arrow" title={`Open ${m.fk.table}`}
+                              onClick={(e) => { e.stopPropagation(); setRelated({ table: m.fk!.table, column: m.fk!.column, value: String(raw) }); }}>→</button>
+                          )}
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>
@@ -233,7 +407,86 @@ function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: Environm
           </div>
         )
       )}
+      {!canEdit && data && data.rows.length > 0 && (
+        <div className="dim" style={{ marginTop: "0.35rem", fontSize: 12 }}>
+          This table has no primary key — rows are read-only here.
+        </div>
+      )}
+
+      {related && (
+        <RelatedRowModal svc={svc} env={env} target={related} onClose={() => setRelated(null)} />
+      )}
+
+      <Modal open={confirmDelete} title={`Delete ${selected.size} row${selected.size === 1 ? "" : "s"}?`}
+        onClose={() => setConfirmDelete(false)}
+        footer={<>
+          <button className="btn ghost" onClick={() => setConfirmDelete(false)}>Cancel</button>
+          <button className="btn danger" onClick={() => del.mutate()} disabled={del.isPending}>Delete</button>
+        </>}>
+        This permanently deletes the selected rows from <code>{table}</code>. This can't be undone.
+      </Modal>
     </>
+  );
+}
+
+function FilterBar({ columns, filters, setFilters }: { columns: ColumnMeta[]; filters: Filter[]; setFilters: (f: Filter[]) => void }) {
+  const [col, setCol] = useState("");
+  const [op, setOp] = useState("contains");
+  const [val, setVal] = useState("");
+  useEffect(() => { if (!col && columns.length) setCol(columns[0].name); }, [columns]);
+  const opMeta = FILTER_OPS.find(o => o.op === op);
+  const add = () => {
+    if (!col) return;
+    setFilters([...filters, { col, op, val: opMeta?.needsVal ? val : "" }]);
+    setVal("");
+  };
+  return (
+    <div className="filter-bar">
+      {filters.map((f, i) => (
+        <span key={i} className="filter-chip">
+          {f.col} {FILTER_OPS.find(o => o.op === f.op)?.label ?? f.op}{f.op !== "is_null" && f.op !== "not_null" ? ` ${f.val}` : ""}
+          <button onClick={() => setFilters(filters.filter((_, j) => j !== i))}>✕</button>
+        </span>
+      ))}
+      <select value={col} onChange={e => setCol(e.target.value)} style={{ width: "auto" }}>
+        {columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+      </select>
+      <select value={op} onChange={e => setOp(e.target.value)} style={{ width: "auto" }}>
+        {FILTER_OPS.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
+      </select>
+      {opMeta?.needsVal && (
+        <input value={val} onChange={e => setVal(e.target.value)} placeholder="value" style={{ maxWidth: 160 }}
+          onKeyDown={e => { if (e.key === "Enter") add(); }} />
+      )}
+      <button className="btn small" onClick={add}>+ Filter</button>
+    </div>
+  );
+}
+
+function RelatedRowModal({ svc, env, target, onClose }: {
+  svc: ServiceItem; env: EnvironmentInfo; target: { table: string; column: string; value: string }; onClose: () => void;
+}) {
+  const { data } = useQuery<{ table: string; columns: ColumnMeta[]; row: Record<string, unknown> | null }>({
+    queryKey: ["svc-related", svc.id, env.id, target.table, target.column, target.value],
+    queryFn: () => api.get(`/api/services/${svc.id}/data/related?environment_id=${env.id}&table=${encodeURIComponent(target.table)}&column=${encodeURIComponent(target.column)}&value=${encodeURIComponent(target.value)}`),
+  });
+  return (
+    <Modal open title={`${target.table} · ${target.column} = ${target.value}`} onClose={onClose}>
+      {!data ? <span className="spinner" /> : !data.row ? (
+        <span className="dim">No matching row.</span>
+      ) : (
+        <div className="related-grid">
+          {data.columns.map(c => (
+            <div key={c.name} className="related-field">
+              <div className="related-key">
+                {c.pk && "🔑 "}{c.name} <span className="dim">{shortType(c)}</span>
+              </div>
+              <div className="related-val">{fmtCell(data.row![c.name])}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
   );
 }
 
