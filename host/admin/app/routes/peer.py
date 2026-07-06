@@ -151,6 +151,26 @@ async def node_leaving(
     return {"ok": True, "subs_dropped": dropped}
 
 
+class SetServingBody(BaseModel):
+    serving: bool
+
+
+@router.post("/set-serving")
+async def set_serving(
+    body: SetServingBody,
+    peer: dict = Depends(require_peer),
+    session: AsyncSession = Depends(get_session),
+):
+    """A peer (driven from the cluster UI) drains or resumes app traffic on this
+    node: the Cloudflare connector goes down/up so the shared tunnel routes app
+    requests to healthy peers, while this node's admin + cluster loop keep
+    running — so it stays reachable on the LAN, keeps heartbeating, and can be
+    re-enabled at any time."""
+    result = await clusterlib.apply_app_serving(session, body.serving)
+    log.info("peer %s set serving=%s → %s", peer["caller_id"], body.serving, result)
+    return {"ok": True, **result}
+
+
 class PeerDeployBody(BaseModel):
     project_name: str
     env_name: str

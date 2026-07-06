@@ -30,7 +30,7 @@ from sqlalchemy import delete, select
 from . import cloudflare as cf
 from .db import SessionLocal
 from .deploy import verify_instances
-from .host import container_status, restart_container, run_cloudflared_remote
+from .host import container_status, remove_container, restart_container, run_cloudflared_remote
 from .models import Deployment, Domain, Setting, UptimeSample
 
 log = logging.getLogger("homebox.monitor")
@@ -123,10 +123,20 @@ def _running(name: str) -> bool:
     return bool(container_status(name).get("running"))
 
 
-async def _reconcile_cloudflared(state: dict) -> tuple[str, str | None]:
+async def _reconcile_cloudflared(state: dict, serving: bool = True) -> tuple[str, str | None]:
     """Ensure the cloudflared connector is running. Returns (status, detail).
-    If it's down but we hold a connector token, relaunch it from the token."""
-    if await asyncio.to_thread(_running, CLOUDFLARED):
+    If it's down but we hold a connector token, relaunch it from the token.
+
+    When the node is drained (serving=False) we do the opposite: keep the
+    connector DOWN so the shared tunnel routes app traffic to peers. This is a
+    deliberate state, not an outage — reported as 'disabled', and the connector
+    is not resurrected until the node is re-enabled."""
+    running = await asyncio.to_thread(_running, CLOUDFLARED)
+    if not serving:
+        if running:
+            await asyncio.to_thread(remove_container, CLOUDFLARED)
+        return "disabled", "app traffic drained (node disabled)"
+    if running:
         return "up", None
     token = cf.get_connector_token(state)
     if not token:
@@ -191,10 +201,12 @@ async def _cycle(cycle: int = 0) -> None:
     async with SessionLocal() as session:
         state = await cf.load_state(session)
         admin_domain = await _get_setting(session, ADMIN_DOMAIN_KEY)
+        from .clusterlib import get_app_serving
+        serving = await get_app_serving(session)
 
         samples: list[UptimeSample] = []
 
-        cf_status, cf_detail = await _reconcile_cloudflared(state)
+        cf_status, cf_detail = await _reconcile_cloudflared(state, serving)
         samples.append(UptimeSample(component="cloudflared", status=cf_status, detail=cf_detail))
 
         for comp, name in (("traefik", TRAEFIK), ("docker_proxy", DOCKER_PROXY)):

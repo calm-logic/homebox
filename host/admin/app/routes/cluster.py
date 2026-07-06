@@ -201,6 +201,42 @@ async def evict(
     return {"ok": True, "nodes": resp.get("nodes")}
 
 
+class ServingBody(BaseModel):
+    node_id: str
+    serving: bool
+
+
+@router.post("/node/serving")
+async def set_node_serving(
+    body: ServingBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Drain (serving=False) or resume (True) app traffic on a node. Applies
+    locally when it targets this node, otherwise dispatches to the peer over the
+    LAN peer API — which stays reachable because draining only stops the app
+    connector, not the admin/control-plane path."""
+    node_id = await clusterlib.get_node_id(session)
+    if body.node_id == node_id:
+        result = await clusterlib.apply_app_serving(session, body.serving)
+        return {"ok": True, "node_id": node_id, **result}
+    state = await clusterlib.load_cluster(session)
+    if not state:
+        raise HTTPException(404, "This node is not part of a cluster.")
+    peer = next((n for n in state.get("roster") or [] if n.get("node_id") == body.node_id), None)
+    if not peer or not peer.get("peer_url"):
+        raise HTTPException(404, "Unknown node or it has no peer URL.")
+    try:
+        resp = await clusterlib.peer_request(
+            "POST", peer["peer_url"], "/peer/set-serving",
+            secret=clusterlib.cluster_secret(state), self_node_id=node_id,
+            body={"serving": body.serving},
+        )
+    except clusterlib.PeerError as e:
+        raise HTTPException(502, str(e))
+    return {"ok": True, "node_id": body.node_id, **resp}
+
+
 # ───── homebox.sh account (token-less create/join) ────────────────────────────
 
 

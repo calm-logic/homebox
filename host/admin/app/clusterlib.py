@@ -49,6 +49,7 @@ ACCOUNT_KEY = "account"
 ACCOUNT_OVERVIEW_KEY = "account_overview"
 INSTALL_ID_KEY = "install_id"
 ADMIN_DOMAIN_KEY = "admin_domain"
+APP_SERVING_KEY = "app_serving"  # False → this node is drained of app traffic
 
 VERSION = "0.2-cluster"
 LOOP_INTERVAL = 60          # heartbeat cadence (seconds)
@@ -70,6 +71,38 @@ async def _set_setting(session: AsyncSession, key: str, value) -> None:
         session.add(Setting(key=key, value=value))
     else:
         row.value = value
+
+
+# ───── app-serving drain (reversible, control-plane-visible) ──────────────────
+
+
+async def get_app_serving(session: AsyncSession) -> bool:
+    """Whether this node currently serves app traffic. When False the node is
+    'drained': its Cloudflare connector is down (so the shared tunnel routes app
+    requests to peers) but the admin + cluster loop keep running, so it still
+    heartbeats the control plane and can be re-enabled. Default True."""
+    val = await _get_setting(session, APP_SERVING_KEY)
+    return True if val is None else bool(val)
+
+
+async def apply_app_serving(session: AsyncSession, serving: bool) -> dict[str, Any]:
+    """Persist the desired serving state and enforce it now: stop the connector
+    to drain, or relaunch it from the stored connector token to resume. The
+    monitor loop re-enforces this each cycle, so a drained node stays drained
+    (it won't be resurrected) and a resumed one is kept up."""
+    from . import cloudflare as cf
+    from .host import remove_container, run_cloudflared_remote
+    await _set_setting(session, APP_SERVING_KEY, bool(serving))
+    await session.commit()
+    if not serving:
+        remove_container("homebox-cloudflared")
+        return {"serving": False, "connector": "stopped"}
+    cf_state = await cf.load_state(session)
+    token = cf.get_connector_token(cf_state)
+    if not token:
+        return {"serving": True, "connector": "no token (tunnel not configured)"}
+    ok, msg = await asyncio.to_thread(run_cloudflared_remote, token)
+    return {"serving": True, "connector": "started" if ok else f"start failed: {msg}"}
     await session.commit()
 
 
@@ -603,7 +636,8 @@ async def _heartbeat(session: AsyncSession, state: dict[str, Any]) -> dict[str, 
         token=node_token(state),
         body={"node_id": node_id, "peer_url": state.get("peer_url") or "",
               "version": VERSION, "name": state.get("node_name") or "",
-              "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT},
+              "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT,
+              "serving": await get_app_serving(session)},
     )
     state["roster"] = resp["nodes"]
     state["license"] = resp.get("license")

@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, LogIn, Network, Plus, RefreshCw, Send, Ticket, Unplug, UserMinus } from "lucide-react";
+import { Copy, LogIn, Network, Plus, Power, PowerOff, RefreshCw, Send, Ticket, Unplug, UserMinus } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
@@ -12,6 +12,7 @@ type ClusterNode = {
   version: string;
   ordinal?: number;
   online: boolean;
+  serving?: boolean;
 };
 
 type ClusterStatus = {
@@ -112,6 +113,19 @@ export function Cluster() {
     onSuccess: () => { invalidate(); toast.show("Node evicted — replication links are being cleaned up", "ok"); },
     onError: onErr,
   });
+  const setServing = useMutation({
+    mutationFn: (v: { node_id: string; serving: boolean }) => api.post("/api/cluster/node/serving", v),
+    onSuccess: (_d, v) => {
+      invalidate();
+      toast.show(
+        v.serving
+          ? "Node enabled — resuming app traffic"
+          : "Node disabled — app traffic draining to peers (roster updates within a minute)",
+        "ok",
+      );
+    },
+    onError: onErr,
+  });
   const manualJoin = useMutation({
     mutationFn: () => api.post("/api/cluster/join", {
       join_token: joinToken, peer_url: peerUrl, node_name: nodeName,
@@ -161,59 +175,77 @@ export function Cluster() {
         </div>
       </div>
 
-      {(overview.clusters ?? []).length > 0 && (
+      {status?.active ? (
+        // Already in a cluster — the cluster and its nodes are shown in the card
+        // above, so here we only surface OTHER linked nodes available to invite.
         <>
-          <h3 style={{ marginTop: "0.9rem" }}>Your clusters</h3>
-          {(overview.clusters ?? []).map(cl => (
-            <div key={cl.cluster_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
+          <h3 style={{ marginTop: "0.9rem" }}>Other linked nodes</h3>
+          {invitableNodes.length === 0 ? (
+            <div className="dim">
+              All your linked nodes are in this cluster. Sign in on another homebox node with the
+              same account token to add it here — no join tokens needed.
+            </div>
+          ) : invitableNodes.map(n => (
+            <div key={n.node_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
               <div className="row" style={{ gap: "0.5rem" }}>
-                <strong>{cl.name}</strong>
-                <span className="dim">{cl.cluster_id}</span>
-                <span className="badge">{cl.nodes.length} node{cl.nodes.length === 1 ? "" : "s"}</span>
+                <span className={`badge ${n.online ? "ok" : "fail"}`}>{n.online ? "online" : "offline"}</span>
+                <strong>{n.name || n.node_id}</strong>
+                <span className="dim">{n.peer_url}</span>
               </div>
-              {status?.active && status.cluster_id === cl.cluster_id ? (
-                <span className="chip active">this cluster</span>
-              ) : !status?.active ? (
-                <button onClick={() => joinCluster.mutate(cl.cluster_id)} disabled={joinCluster.isPending}>
-                  Join this cluster
-                </button>
-              ) : null}
+              <button className="ghost" onClick={() => inviteNode.mutate(n.node_id)} disabled={inviteNode.isPending}>
+                <Send size={14} /> Invite to this cluster
+              </button>
             </div>
           ))}
         </>
-      )}
-
-      <h3 style={{ marginTop: "0.9rem" }}>Linked nodes</h3>
-      {(overview.nodes ?? []).map(n => (
-        <div key={n.node_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
-          <div className="row" style={{ gap: "0.5rem" }}>
-            <span className={`badge ${n.online ? "ok" : "fail"}`}>{n.online ? "online" : "offline"}</span>
-            <strong>{n.name || n.node_id}</strong>
-            {n.node_id === status?.node_id && <span className="chip active">this node</span>}
-            <span className="dim">{n.peer_url}</span>
-          </div>
-          {status?.active && !rosterIds.has(n.node_id) && (
-            <button className="ghost" onClick={() => inviteNode.mutate(n.node_id)} disabled={inviteNode.isPending}>
-              <Send size={14} /> Invite to this cluster
-            </button>
+      ) : (
+        // Not in a cluster yet — full picker: join an existing cluster, or
+        // create one with this node as the seed.
+        <>
+          {(overview.clusters ?? []).length > 0 && (
+            <>
+              <h3 style={{ marginTop: "0.9rem" }}>Your clusters</h3>
+              {(overview.clusters ?? []).map(cl => (
+                <div key={cl.cluster_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
+                  <div className="row" style={{ gap: "0.5rem" }}>
+                    <strong>{cl.name}</strong>
+                    <span className="dim">{cl.cluster_id}</span>
+                    <span className="badge">{cl.nodes.length} node{cl.nodes.length === 1 ? "" : "s"}</span>
+                  </div>
+                  <button onClick={() => joinCluster.mutate(cl.cluster_id)} disabled={joinCluster.isPending}>
+                    Join this cluster
+                  </button>
+                </div>
+              ))}
+            </>
           )}
-        </div>
-      ))}
-      {(overview.nodes ?? []).length <= 1 && (
-        <div className="dim" style={{ marginTop: "0.4rem" }}>
-          Sign in on your other homebox nodes with the same account token — they'll appear here,
-          ready to invite. No join tokens needed.
-        </div>
-      )}
 
-      {!status?.active && (
-        <div className="row" style={{ marginTop: "0.9rem", gap: "0.5rem" }}>
-          <input value={newClusterName} onChange={e => setNewClusterName(e.target.value)}
-                 placeholder="cluster name" style={{ maxWidth: 200 }} />
-          <button onClick={() => createCluster.mutate()} disabled={createCluster.isPending}>
-            <Plus size={14} /> Create cluster with this node
-          </button>
-        </div>
+          <h3 style={{ marginTop: "0.9rem" }}>Linked nodes</h3>
+          {(overview.nodes ?? []).map(n => (
+            <div key={n.node_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
+              <div className="row" style={{ gap: "0.5rem" }}>
+                <span className={`badge ${n.online ? "ok" : "fail"}`}>{n.online ? "online" : "offline"}</span>
+                <strong>{n.name || n.node_id}</strong>
+                {n.node_id === status?.node_id && <span className="chip active">this node</span>}
+                <span className="dim">{n.peer_url}</span>
+              </div>
+            </div>
+          ))}
+          {(overview.nodes ?? []).length <= 1 && (
+            <div className="dim" style={{ marginTop: "0.4rem" }}>
+              Sign in on your other homebox nodes with the same account token — they'll appear here,
+              ready to invite. No join tokens needed.
+            </div>
+          )}
+
+          <div className="row" style={{ marginTop: "0.9rem", gap: "0.5rem" }}>
+            <input value={newClusterName} onChange={e => setNewClusterName(e.target.value)}
+                   placeholder="cluster name" style={{ maxWidth: 200 }} />
+            <button onClick={() => createCluster.mutate()} disabled={createCluster.isPending}>
+              <Plus size={14} /> Create cluster with this node
+            </button>
+          </div>
+        </>
       )}
     </div>
   ) : (
@@ -289,17 +321,31 @@ export function Cluster() {
           )}
 
           <h3 style={{ marginTop: "0.9rem" }}>Nodes</h3>
-          {(status.roster ?? []).map(n => (
+          {(status.roster ?? []).map(n => {
+            const serving = n.serving !== false;
+            const isSelf = n.node_id === status.node_id;
+            return (
             <div key={n.node_id} className="row" style={{ justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", padding: "0.4rem 0" }}>
               <div className="row" style={{ gap: "0.5rem", minWidth: 0 }}>
                 <span className={`badge ${n.online ? "ok" : "fail"}`}>{n.online ? "online" : "offline"}</span>
                 <strong>{n.name || n.node_id}</strong>
                 {n.ordinal != null && <span className="dim">n{n.ordinal}</span>}
-                {n.node_id === status.node_id && <span className="chip active">this node</span>}
+                {isSelf && <span className="chip active">this node</span>}
+                {!serving && <span className="badge warn">disabled</span>}
               </div>
               <div className="row" style={{ gap: "0.75rem" }}>
                 <span className="dim">{n.peer_url || "no peer URL"}</span>
-                {n.node_id !== status.node_id && (
+                <button className="ghost"
+                  title={serving
+                    ? (isSelf
+                        ? "Drain app traffic from this node. The control plane stays connected — re-enable from this admin on the LAN."
+                        : "Drain app traffic from this node so the shared tunnel routes to healthy peers. Control plane stays connected.")
+                    : "Resume app traffic on this node"}
+                  onClick={() => setServing.mutate({ node_id: n.node_id, serving: !serving })}
+                  disabled={setServing.isPending}>
+                  {serving ? <><PowerOff size={14} /> Disable</> : <><Power size={14} /> Enable</>}
+                </button>
+                {!isSelf && (
                   <button className="ghost danger" title="Remove this node from the cluster (for dead/unreachable nodes — use Leave on the node itself when possible)"
                     onClick={() => evict.mutate(n.node_id)} disabled={evict.isPending}>
                     <UserMinus size={14} /> Evict
@@ -307,7 +353,8 @@ export function Cluster() {
                 )}
               </div>
             </div>
-          ))}
+            );
+          })}
           <div className="dim" style={{ marginTop: "0.6rem" }}>
             Last heartbeat {status.last_heartbeat ?? "never"} · last config sync {status.last_sync_at ?? "never"}
           </div>
