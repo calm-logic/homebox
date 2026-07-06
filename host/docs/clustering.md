@@ -10,7 +10,7 @@ A working 2-node-LAN slice of Phases 1–3, cut for speed (deviations noted):
 
 | Piece | Where | Deviation from the design below |
 |---|---|---|
-| Control plane (registry, join tokens, heartbeats/rendezvous, grants, dev licenses) | `control-plane/` | Accounts are dev-stubbed (any bearer token); Stripe + license JWTs later |
+| Control plane (registry, join tokens, heartbeats/rendezvous, grants, dev licenses) | hosted service — `control.homebox.sh` (proprietary; not in this repo) | Accounts are dev-stubbed (any bearer token); Stripe + license JWTs later |
 | Node identity + sealed key exchange | `admin/app/clusterlib.py`, `crypto.py` | X25519 sealed box exactly as designed; cluster keys land in `/opt/homebox/admin/cluster-keys.json` + self-restart instead of mTLS CA (CA later) |
 | Peer API | `admin/app/routes/peer.py` | Routed through Traefik :80 via Host `homebox-peer.internal` — no WireGuard mesh yet (LAN-only trust, HMAC bearer) |
 | Config replication | `admin/app/cluster_sync.py` | API-based natural-key sync (full/deploy/update modes) instead of Spock-on-admin-DB; deletions don't propagate yet |
