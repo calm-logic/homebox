@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ChevronRight, ExternalLink, RefreshCw, Rocket, Square, Settings } from "lucide-react";
+import {
+  ArrowLeft, ChevronRight, ExternalLink, RefreshCw, Rocket, Square, Settings,
+  LayoutDashboard, Boxes, Workflow,
+} from "lucide-react";
 import { api } from "../lib/api";
-import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
 import type {
   DeploymentItem, DeploymentStatus, DomainItem, EnvironmentInfo,
@@ -14,6 +16,15 @@ export const BUSY: DeploymentStatus[] = ["queued", "cloning", "dissecting", "bui
 
 // Backend timestamps are naive UTC — tag them so Date() doesn't read them as local.
 export const utcDate = (iso: string) => new Date(/Z$|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z");
+
+type Section = "overview" | "deployments" | "services" | "cicd" | "settings";
+const SECTIONS: { key: Section; label: string; icon: typeof Settings }[] = [
+  { key: "overview", label: "Overview", icon: LayoutDashboard },
+  { key: "deployments", label: "Deployments", icon: Rocket },
+  { key: "services", label: "Services", icon: Boxes },
+  { key: "cicd", label: "CI/CD", icon: Workflow },
+  { key: "settings", label: "Settings", icon: Settings },
+];
 
 function envDotColor(status: DeploymentStatus | undefined): string {
   if (status === "running") return "var(--accent)";
@@ -80,7 +91,7 @@ export function ProjectDetail() {
   const qc = useQueryClient();
   const nav = useNavigate();
   const toast = useToast();
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [section, setSection] = useState<Section>("overview");
   const [envTab, setEnvTab] = useState<number | null>(null);
 
   const { data: project, isError } = useQuery<ProjectDetailData>({
@@ -122,7 +133,6 @@ export function ProjectDetail() {
         <button className="btn" disabled={sync.isPending} onClick={() => sync.mutate()} title="Re-read repo and refresh services">
           {sync.isPending ? <span className="spinner" /> : <RefreshCw size={14} />} Sync
         </button>
-        <button className="btn ghost" onClick={() => setSettingsOpen(true)}><Settings size={14} /> Settings</button>
         <a className="btn ghost" href={`https://github.com/${project.repo_full_name}`} target="_blank" rel="noopener">
           <ExternalLink size={14} /> GitHub
         </a>
@@ -132,90 +142,119 @@ export function ProjectDetail() {
         {project.dissected_at && <> · {project.services.length} service{project.services.length === 1 ? "" : "s"}</>}
       </p>
 
-      {/* ─── Environments (one tab per env) ─────────────────────── */}
-      <h2 style={{ marginTop: "1.5rem" }}>Environments</h2>
-      {(() => {
-        const activeEnv = project.environments.find(e => e.id === envTab) ?? project.environments[0];
-        if (!activeEnv) return null;
-        return (
-          <>
-            <div className="tabs" role="tablist">
-              {project.environments.map(env => (
-                <button
-                  key={env.id}
-                  role="tab"
-                  aria-selected={env.id === activeEnv.id}
-                  className={`tab ${env.id === activeEnv.id ? "active" : ""}`}
-                  onClick={() => setEnvTab(env.id)}
-                >
-                  <span className="tab-dot" style={{ background: envUnreachable(env) ? "var(--danger)" : envDotColor(env.deployment?.status) }} />
-                  <span style={{ textTransform: "capitalize" }}>{env.name}</span>
+      <div className="project-layout">
+        {/* ─── Section nav (vertical tabs) ─────────────────────── */}
+        <div className="vtabs" role="tablist" aria-orientation="vertical">
+          {SECTIONS.map(s => {
+            const Icon = s.icon;
+            return (
+              <button
+                key={s.key}
+                role="tab"
+                aria-selected={section === s.key}
+                className={`vtab ${section === s.key ? "active" : ""}`}
+                onClick={() => setSection(s.key)}
+              >
+                <Icon size={16} aria-hidden /> {s.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="project-panel">
+          {/* ─── Overview / Deployments (one horizontal tab per env) ── */}
+          {(section === "overview" || section === "deployments") && (() => {
+            const activeEnv = project.environments.find(e => e.id === envTab) ?? project.environments[0];
+            if (!activeEnv) {
+              return <div className="card"><span className="dim">No environments yet.</span></div>;
+            }
+            return (
+              <>
+                <div className="tabs" role="tablist">
+                  {project.environments.map(env => (
+                    <button
+                      key={env.id}
+                      role="tab"
+                      aria-selected={env.id === activeEnv.id}
+                      className={`tab ${env.id === activeEnv.id ? "active" : ""}`}
+                      onClick={() => setEnvTab(env.id)}
+                    >
+                      <span className="tab-dot" style={{ background: envUnreachable(env) ? "var(--danger)" : envDotColor(env.deployment?.status) }} />
+                      <span style={{ textTransform: "capitalize" }}>{env.name}</span>
+                    </button>
+                  ))}
+                </div>
+                {section === "overview"
+                  ? <EnvironmentCard key={activeEnv.id} projectId={id} env={activeEnv} onChange={invalidate} />
+                  : <Deployments key={activeEnv.id} projectId={id} envId={activeEnv.id} />}
+              </>
+            );
+          })()}
+
+          {/* ─── Services ───────────────────────────────────────── */}
+          {section === "services" && (
+            project.services.length === 0 ? (
+              <div className="card">
+                <span className="dim">No services detected yet. Click <strong>Sync</strong> to dissect the repo.</span>
+              </div>
+            ) : (
+              <table className="data-table">
+                <thead><tr><th>Service</th><th>Kind</th><th>Exposure</th><th>Hostname</th><th>Env</th><th className="right" /></tr></thead>
+                <tbody>
+                  {project.services.map(s => {
+                    const host = s.is_public ? predictedHost(project.name, s.subdomain_label, "", project.domain, project.domain_mode) : null;
+                    return (
+                      <tr key={s.id} className="clickable" onClick={() => nav(`/projects/${id}/services/${s.id}`)}>
+                        <td><strong>{s.name}</strong>{s.internal_port && <span className="dim"> :{s.internal_port}</span>}</td>
+                        <td><span className="badge plain">{s.kind}</span></td>
+                        <td>{s.is_public ? <span className="badge ok">Public</span> : <span className="badge muted plain">Internal</span>}</td>
+                        <td className="dim">{host ? <code>{host}</code> : "—"}</td>
+                        <td className="dim">{s.env_vars.length}{s.env_vars.some(v => v.source === "auto") && <span className="badge info plain" style={{ marginLeft: 6 }}>auto</span>}</td>
+                        <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )
+          )}
+
+          {/* ─── CI/CD runs ─────────────────────────────────────── */}
+          {section === "cicd" && (
+            <>
+              <div className="row">
+                <div className="spacer" />
+                <button className="btn small" disabled={refreshRuns.isPending} onClick={() => refreshRuns.mutate()}>
+                  <RefreshCw size={12} /> Refresh
                 </button>
-              ))}
-            </div>
-            <EnvironmentCard key={activeEnv.id} projectId={id} env={activeEnv} onChange={invalidate} />
-            <Deployments projectId={id} envId={activeEnv.id} />
-          </>
-        );
-      })()}
+              </div>
+              {runs && runs.length > 0 ? (
+                <table className="data-table" style={{ marginTop: "0.5rem" }}>
+                  <thead><tr><th>Workflow</th><th>Branch</th><th>Status</th><th>When</th><th className="right" /></tr></thead>
+                  <tbody>
+                    {runs.map(run => (
+                      <tr key={run.id}>
+                        <td>{run.name}</td>
+                        <td><span className="badge muted plain">{run.head_branch}</span></td>
+                        <td>{runBadge(run.status, run.conclusion)}</td>
+                        <td className="dim">{run.created_at ? new Date(run.created_at).toLocaleString() : "—"}</td>
+                        <td className="actions"><a className="btn small ghost" href={run.html_url} target="_blank" rel="noopener"><ExternalLink size={12} /></a></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <div className="card" style={{ marginTop: "0.5rem" }}>
+                  <span className="dim">No GitHub Actions runs cached. Click <strong>Refresh</strong> to pull them.</span>
+                </div>
+              )}
+            </>
+          )}
 
-      {/* ─── Services ───────────────────────────────────────────── */}
-      <h2 style={{ marginTop: "2rem" }}>Services</h2>
-      {project.services.length === 0 ? (
-        <div className="card" style={{ marginTop: "0.5rem" }}>
-          <span className="dim">No services detected yet. Click <strong>Sync</strong> to dissect the repo.</span>
+          {/* ─── Settings ────────────────────────────────────────── */}
+          {section === "settings" && <SettingsPanel project={project} onSaved={invalidate} />}
         </div>
-      ) : (
-        <table className="data-table" style={{ marginTop: "0.5rem" }}>
-          <thead><tr><th>Service</th><th>Kind</th><th>Exposure</th><th>Hostname</th><th>Env</th><th className="right" /></tr></thead>
-          <tbody>
-            {project.services.map(s => {
-              const host = s.is_public ? predictedHost(project.name, s.subdomain_label, "", project.domain, project.domain_mode) : null;
-              return (
-                <tr key={s.id} className="clickable" onClick={() => nav(`/projects/${id}/services/${s.id}`)}>
-                  <td><strong>{s.name}</strong>{s.internal_port && <span className="dim"> :{s.internal_port}</span>}</td>
-                  <td><span className="badge plain">{s.kind}</span></td>
-                  <td>{s.is_public ? <span className="badge ok">Public</span> : <span className="badge muted plain">Internal</span>}</td>
-                  <td className="dim">{host ? <code>{host}</code> : "—"}</td>
-                  <td className="dim">{s.env_vars.length}{s.env_vars.some(v => v.source === "auto") && <span className="badge info plain" style={{ marginLeft: 6 }}>auto</span>}</td>
-                  <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-
-      {/* ─── CI/CD runs ─────────────────────────────────────────── */}
-      <div className="row" style={{ marginTop: "2rem" }}>
-        <h2 style={{ margin: 0 }}>CI/CD runs</h2>
-        <div className="spacer" />
-        <button className="btn small" disabled={refreshRuns.isPending} onClick={() => refreshRuns.mutate()}>
-          <RefreshCw size={12} /> Refresh
-        </button>
       </div>
-      {runs && runs.length > 0 ? (
-        <table className="data-table" style={{ marginTop: "0.5rem" }}>
-          <thead><tr><th>Workflow</th><th>Branch</th><th>Status</th><th>When</th><th className="right" /></tr></thead>
-          <tbody>
-            {runs.map(run => (
-              <tr key={run.id}>
-                <td>{run.name}</td>
-                <td><span className="badge muted plain">{run.head_branch}</span></td>
-                <td>{runBadge(run.status, run.conclusion)}</td>
-                <td className="dim">{run.created_at ? new Date(run.created_at).toLocaleString() : "—"}</td>
-                <td className="actions"><a className="btn small ghost" href={run.html_url} target="_blank" rel="noopener"><ExternalLink size={12} /></a></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <div className="card" style={{ marginTop: "0.5rem" }}>
-          <span className="dim">No GitHub Actions runs cached. Click <strong>Refresh</strong> to pull them.</span>
-        </div>
-      )}
-
-      {settingsOpen && <SettingsModal project={project} onClose={() => { setSettingsOpen(false); invalidate(); }} />}
     </>
   );
 }
@@ -289,30 +328,29 @@ function Deployments({ projectId, envId }: { projectId: number; envId: number })
   });
 
   if (!deps) return <span className="spinner" />;
-  if (deps.length === 0) return null;
+  if (deps.length === 0) {
+    return <div className="card" style={{ marginTop: "0.75rem" }}><span className="dim">No deployments yet for this environment.</span></div>;
+  }
 
   return (
-    <>
-      <h3>Deployments</h3>
-      <table className="data-table" style={{ margin: "0.25rem 0 0" }}>
-        <thead><tr><th>Status</th><th>Commit</th><th>Trigger</th><th>Started</th><th className="right" /></tr></thead>
-        <tbody>
-          {deps.map(d => (
-            <tr
-              key={d.id}
-              className="clickable"
-              onClick={() => nav(`/projects/${projectId}/deployments/${d.id}`)}
-            >
-              <td title={d.error ?? undefined}>{historyBadge(d.status)}</td>
-              <td>{d.commit_sha ? <code>{d.commit_sha.slice(0, 7)}</code> : <span className="dim">—</span>}</td>
-              <td><span className="badge plain muted" style={{ textTransform: "capitalize" }}>{d.trigger}</span></td>
-              <td className="dim">{d.created_at ? utcDate(d.created_at).toLocaleString() : "—"}</td>
-              <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </>
+    <table className="data-table" style={{ margin: "0.75rem 0 0" }}>
+      <thead><tr><th>Status</th><th>Commit</th><th>Trigger</th><th>Started</th><th className="right" /></tr></thead>
+      <tbody>
+        {deps.map(d => (
+          <tr
+            key={d.id}
+            className="clickable"
+            onClick={() => nav(`/projects/${projectId}/deployments/${d.id}`)}
+          >
+            <td title={d.error ?? undefined}>{historyBadge(d.status)}</td>
+            <td>{d.commit_sha ? <code>{d.commit_sha.slice(0, 7)}</code> : <span className="dim">—</span>}</td>
+            <td><span className="badge plain muted" style={{ textTransform: "capitalize" }}>{d.trigger}</span></td>
+            <td className="dim">{d.created_at ? utcDate(d.created_at).toLocaleString() : "—"}</td>
+            <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -328,8 +366,8 @@ function runBadge(status: string, conclusion: string | null) {
   return <span className="badge plain">{status}</span>;
 }
 
-// ─── Settings modal (name + domain) ───────────────────────────────────────────
-function SettingsModal({ project, onClose }: { project: ProjectDetailData; onClose: () => void }) {
+// ─── Settings panel (name + domain) ───────────────────────────────────────────
+function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSaved: () => void }) {
   const toast = useToast();
   const [name, setName] = useState(project.name);
   const [domainId, setDomainId] = useState<string>(project.domain_id ? String(project.domain_id) : "");
@@ -375,18 +413,12 @@ function SettingsModal({ project, onClose }: { project: ProjectDetailData; onClo
         }
       }
     },
-    onSuccess: () => { toast.show("Saved — redeploy to apply hostname changes", "ok"); onClose(); },
+    onSuccess: () => { toast.show("Saved — redeploy to apply hostname changes", "ok"); onSaved(); },
     onError: (e) => toast.show(String(e), "fail"),
   });
 
   return (
-    <Modal open onClose={onClose} title="Project settings" footer={<>
-      <span className="spacer" />
-      <button className="btn ghost" onClick={onClose}>Cancel</button>
-      <button className="btn primary" disabled={save.isPending} onClick={() => save.mutate()}>
-        {save.isPending ? <span className="spinner" /> : "Save"}
-      </button>
-    </>}>
+    <div className="card">
       <div className="field">
         <label className="lbl">Project name (URL slug)</label>
         <input value={name} onChange={e => setName(e.target.value)} placeholder={project.name} />
@@ -467,6 +499,13 @@ function SettingsModal({ project, onClose }: { project: ProjectDetailData; onClo
         Wait for GitHub checks to pass before deploying
       </label>
       <span className="hint">Applies only when the repo has workflows; repos without CI deploy immediately.</span>
-    </Modal>
+
+      <div className="row" style={{ marginTop: "1.25rem", paddingTop: "1rem", borderTop: "1px solid var(--border)" }}>
+        <span className="spacer" />
+        <button className="btn primary" disabled={save.isPending} onClick={() => save.mutate()}>
+          {save.isPending ? <span className="spinner" /> : "Save changes"}
+        </button>
+      </div>
+    </div>
   );
 }

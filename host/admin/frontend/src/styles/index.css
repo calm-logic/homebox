@@ -534,6 +534,40 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .tabs .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-sm); }
 .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 
+/* Vertical section tabs (project detail sidebar) */
+.project-layout { display: flex; align-items: flex-start; gap: 1.75rem; margin-top: 1.25rem; }
+.vtabs {
+  display: flex; flex-direction: column; gap: 0.15rem;
+  flex: 0 0 12rem;
+  position: sticky; top: 1rem;
+}
+.vtabs .vtab {
+  display: flex; align-items: center; gap: 0.6rem;
+  background: none; border: none;
+  padding: 0.55rem 0.75rem;
+  color: var(--text-dim);
+  font: inherit; font-weight: 500; font-size: 0.88rem;
+  text-align: left;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+.vtabs .vtab svg { opacity: 0.85; flex-shrink: 0; }
+.vtabs .vtab:hover { background: var(--btn-bg); color: var(--text); }
+.vtabs .vtab.active { color: var(--accent); background: var(--accent-glow); }
+.vtabs .vtab.active svg { opacity: 1; }
+.vtabs .vtab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.project-panel { flex: 1; min-width: 0; }
+
+@media (max-width: 720px) {
+  .project-layout { flex-direction: column; gap: 0.75rem; }
+  .vtabs {
+    flex-direction: row; flex-wrap: wrap; position: static;
+    flex: 0 0 auto; width: 100%;
+    border-bottom: 1px solid var(--border); padding-bottom: 0.5rem;
+  }
+}
+
 /* Mode chips */
 .mode-chips { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 .mode-chips .chip {

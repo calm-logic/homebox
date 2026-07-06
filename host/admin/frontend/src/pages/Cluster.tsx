@@ -168,36 +168,34 @@ export function Cluster() {
           <span className="dim">as {account.node_name || "unnamed node"} · {account.peer_url}</span>
         </div>
         <div className="row" style={{ gap: "0.5rem" }}>
-          <button className="ghost" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
+          <button className="btn ghost" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
             <RefreshCw size={14} /> Refresh
           </button>
-          <button className="ghost" onClick={() => unlink.mutate()}>Unlink</button>
+          <button className="btn ghost" onClick={() => unlink.mutate()}>Unlink</button>
         </div>
       </div>
 
       {status?.active ? (
         // Already in a cluster — the cluster and its nodes are shown in the card
         // above, so here we only surface OTHER linked nodes available to invite.
-        <>
-          <h3 style={{ marginTop: "0.9rem" }}>Other linked nodes</h3>
-          {invitableNodes.length === 0 ? (
-            <div className="dim">
-              All your linked nodes are in this cluster. Sign in on another homebox node with the
-              same account token to add it here — no join tokens needed.
-            </div>
-          ) : invitableNodes.map(n => (
-            <div key={n.node_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
-              <div className="row" style={{ gap: "0.5rem" }}>
-                <span className={`badge ${n.online ? "ok" : "fail"}`}>{n.online ? "online" : "offline"}</span>
-                <strong>{n.name || n.node_id}</strong>
-                <span className="dim">{n.peer_url}</span>
+        // Nothing to invite → render nothing.
+        invitableNodes.length > 0 && (
+          <>
+            <h3 style={{ marginTop: "0.9rem" }}>Other linked nodes</h3>
+            {invitableNodes.map(n => (
+              <div key={n.node_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
+                <div className="row" style={{ gap: "0.5rem" }}>
+                  <span className={`badge ${n.online ? "ok" : "fail"}`}>{n.online ? "online" : "offline"}</span>
+                  <strong>{n.name || n.node_id}</strong>
+                  <span className="dim">{n.peer_url}</span>
+                </div>
+                <button className="btn ghost" onClick={() => inviteNode.mutate(n.node_id)} disabled={inviteNode.isPending}>
+                  <Send size={14} /> Invite to this cluster
+                </button>
               </div>
-              <button className="ghost" onClick={() => inviteNode.mutate(n.node_id)} disabled={inviteNode.isPending}>
-                <Send size={14} /> Invite to this cluster
-              </button>
-            </div>
-          ))}
-        </>
+            ))}
+          </>
+        )
       ) : (
         // Not in a cluster yet — full picker: join an existing cluster, or
         // create one with this node as the seed.
@@ -212,7 +210,7 @@ export function Cluster() {
                     <span className="dim">{cl.cluster_id}</span>
                     <span className="badge">{cl.nodes.length} node{cl.nodes.length === 1 ? "" : "s"}</span>
                   </div>
-                  <button onClick={() => joinCluster.mutate(cl.cluster_id)} disabled={joinCluster.isPending}>
+                  <button className="btn primary" onClick={() => joinCluster.mutate(cl.cluster_id)} disabled={joinCluster.isPending}>
                     Join this cluster
                   </button>
                 </div>
@@ -234,14 +232,14 @@ export function Cluster() {
           {(overview.nodes ?? []).length <= 1 && (
             <div className="dim" style={{ marginTop: "0.4rem" }}>
               Sign in on your other homebox nodes with the same account token — they'll appear here,
-              ready to invite. No join tokens needed.
+              ready to invite.
             </div>
           )}
 
           <div className="row" style={{ marginTop: "0.9rem", gap: "0.5rem" }}>
             <input value={newClusterName} onChange={e => setNewClusterName(e.target.value)}
                    placeholder="cluster name" style={{ maxWidth: 200 }} />
-            <button onClick={() => createCluster.mutate()} disabled={createCluster.isPending}>
+            <button className="btn primary" onClick={() => createCluster.mutate()} disabled={createCluster.isPending}>
               <Plus size={14} /> Create cluster with this node
             </button>
           </div>
@@ -253,7 +251,7 @@ export function Cluster() {
       <h3><LogIn size={15} /> Sign in to homebox.sh</h3>
       <p className="dim">
         Link this node to your account to see all your nodes and clusters from anywhere,
-        create clusters, and add nodes with one click — no join tokens.
+        create clusters, and add nodes with one click.
       </p>
       <form onSubmit={submitLink} style={{ display: "grid", gap: "0.7rem", maxWidth: 560 }}>
         <label>Account token
@@ -270,7 +268,7 @@ export function Cluster() {
           <input value={cpUrl} onChange={e => setCpUrl(e.target.value)}
                  placeholder={account?.control_plane_url || "https://control.homebox.sh"} />
         </label>
-        <div><button type="submit" disabled={link.isPending}>Sign in & link node</button></div>
+        <div><button className="btn primary" type="submit" disabled={link.isPending}>Sign in & link node</button></div>
       </form>
     </div>
   );
@@ -287,6 +285,8 @@ export function Cluster() {
         <div className="card"><span className="spinner" /> Restarting onto the cluster keys — hang tight…</div>
       )}
 
+      {accountSection}
+
       {status?.active && (
         <div className="card">
           <div className="card-row">
@@ -298,13 +298,13 @@ export function Cluster() {
               {!status.initial_sync_done && <span className="badge warn">initial sync pending…</span>}
             </div>
             <div className="row" style={{ gap: "0.5rem" }}>
-              <button className="ghost" onClick={() => sync.mutate()} disabled={sync.isPending}>
+              <button className="btn ghost" onClick={() => sync.mutate()} disabled={sync.isPending}>
                 <RefreshCw size={14} /> Sync now
               </button>
-              <button className="ghost" onClick={() => mint.mutate()} disabled={mint.isPending}>
+              <button className="btn ghost" onClick={() => mint.mutate()} disabled={mint.isPending}>
                 <Ticket size={14} /> Join token
               </button>
-              <button className="ghost danger" onClick={() => setConfirmLeave(true)}>
+              <button className="btn ghost danger" onClick={() => setConfirmLeave(true)}>
                 <Unplug size={14} /> Leave…
               </button>
             </div>
@@ -313,7 +313,7 @@ export function Cluster() {
           {mintedToken && (
             <div className="card-row" style={{ marginTop: "0.75rem" }}>
               <code style={{ wordBreak: "break-all", userSelect: "all" }}>{mintedToken}</code>
-              <button className="ghost"
+              <button className="btn ghost"
                 onClick={() => { navigator.clipboard.writeText(mintedToken); toast.show("Copied", "ok"); }}>
                 <Copy size={14} /> Copy
               </button>
@@ -335,7 +335,7 @@ export function Cluster() {
               </div>
               <div className="row" style={{ gap: "0.75rem" }}>
                 <span className="dim">{n.peer_url || "no peer URL"}</span>
-                <button className="ghost"
+                <button className="btn ghost"
                   title={serving
                     ? (isSelf
                         ? "Drain app traffic from this node. The control plane stays connected — re-enable from this admin on the LAN."
@@ -346,7 +346,7 @@ export function Cluster() {
                   {serving ? <><PowerOff size={14} /> Disable</> : <><Power size={14} /> Enable</>}
                 </button>
                 {!isSelf && (
-                  <button className="ghost danger" title="Remove this node from the cluster (for dead/unreachable nodes — use Leave on the node itself when possible)"
+                  <button className="btn ghost danger" title="Remove this node from the cluster (for dead/unreachable nodes — use Leave on the node itself when possible)"
                     onClick={() => evict.mutate(n.node_id)} disabled={evict.isPending}>
                     <UserMinus size={14} /> Evict
                   </button>
@@ -361,13 +361,11 @@ export function Cluster() {
         </div>
       )}
 
-      {accountSection}
-
       {!status?.active && (
         <div className="card">
           <div className="row" style={{ justifyContent: "space-between" }}>
             <h3 style={{ margin: 0 }}>Manual join (token fallback)</h3>
-            <button className="ghost" onClick={() => setShowManualJoin(s => !s)}>
+            <button className="btn ghost" onClick={() => setShowManualJoin(s => !s)}>
               {showManualJoin ? "Hide" : "Show"}
             </button>
           </div>
@@ -386,7 +384,7 @@ export function Cluster() {
               <label>Control plane URL (empty = control.homebox.sh)
                 <input value={cpUrl} onChange={e => setCpUrl(e.target.value)} placeholder="https://control.homebox.sh" />
               </label>
-              <div><button type="submit" disabled={manualJoin.isPending}>Join cluster</button></div>
+              <div><button className="btn primary" type="submit" disabled={manualJoin.isPending}>Join cluster</button></div>
             </form>
           )}
         </div>
@@ -398,8 +396,8 @@ export function Cluster() {
         onClose={() => setConfirmLeave(false)}
         footer={
           <>
-            <button className="ghost" onClick={() => setConfirmLeave(false)}>Cancel</button>
-            <button className="danger" onClick={() => leave.mutate()} disabled={leave.isPending}>
+            <button className="btn ghost" onClick={() => setConfirmLeave(false)}>Cancel</button>
+            <button className="btn danger" onClick={() => leave.mutate()} disabled={leave.isPending}>
               {leave.isPending ? <span className="spinner" /> : <>Leave cluster</>}
             </button>
           </>
