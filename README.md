@@ -9,12 +9,12 @@ Install on any machine with a single command:
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/main/homebox-infra/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/main/host/install.sh | bash
 ```
 
 **Windows (PowerShell as Administrator):**
 ```powershell
-irm https://raw.githubusercontent.com/aleontiev/homebox/main/homebox-infra/install.ps1 | iex
+irm https://raw.githubusercontent.com/aleontiev/homebox/main/host/install.ps1 | iex
 ```
 
 The installer will:
@@ -78,7 +78,7 @@ flowchart LR
 ## 🗂️ Project Structure
 
 ```
-homebox-infra/
+host/
 ├── install.sh / install.ps1       # One-liner installers
 ├── cli/                           # Python CLI for developers
 │   ├── homebox_cli/
@@ -126,10 +126,10 @@ Or invoke the provisioner directly:
 
 ```bash
 # Linux (requires sudo)
-sudo ./homebox-infra/host-provisioner/setup_host.sh
+sudo ./host/host-provisioner/setup_host.sh
 
 # macOS (no sudo required)
-./homebox-infra/host-provisioner/setup_host.sh
+./host/host-provisioner/setup_host.sh
 ```
 
 The provisioner installs Docker, creates the directory structure, deploys base infrastructure files, creates the `traefik-net` Docker network, and launches the interactive configurator.
@@ -187,7 +187,7 @@ GitHub does not support user-account-scoped runners; to share a runner across pe
 ### Install the CLI
 
 ```bash
-pip install ./homebox-infra/cli
+pip install ./host/cli
 ```
 
 ### Initialize
@@ -239,7 +239,7 @@ homebox db sync myapp --db myapp_db --user myapp_user --local-db myapp_dev --con
 
 ## 🧩 Making a Project Homebox-Ready
 
-Any project with a `docker-compose.yml` that includes Traefik labels and joins the `traefik-net` network is Homebox-compatible. See the full guide: **[homebox-ready.md](homebox-infra/docs/homebox-ready.md)**.
+Any project with a `docker-compose.yml` that includes Traefik labels and joins the `traefik-net` network is Homebox-compatible. See the full guide: **[homebox-ready.md](host/docs/homebox-ready.md)**.
 
 The minimum requirements:
 
@@ -247,7 +247,7 @@ The minimum requirements:
 2. The app service joins the external `traefik-net` network
 3. Backing services stay on an internal network (no host ports)
 
-To scaffold a new project or add Homebox support to an existing repo, see the [bootstrap skill](homebox-infra/docs/claude-bootstrap-skill.md).
+To scaffold a new project or add Homebox support to an existing repo, see the [bootstrap skill](host/docs/claude-bootstrap-skill.md).
 
 ## 🔄 Development Workflow
 

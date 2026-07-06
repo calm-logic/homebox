@@ -3,7 +3,7 @@
 # Homebox One-Liner Installer (macOS / Linux)
 # =============================================================================
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/main/homebox-infra/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/main/host/install.sh | bash
 #
 # This script:
 #   1. Detects your platform (macOS or Linux)
@@ -80,7 +80,7 @@ else
                 warn "Docker Desktop has been installed."
                 warn "Open Docker Desktop from Applications, wait for it to start,"
                 warn "then re-run this installer:"
-                warn "  curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/master/homebox-infra/install.sh | bash"
+                warn "  curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/master/host/install.sh | bash"
                 exit 0
             else
                 fail "Install Docker Desktop from https://docker.com/products/docker-desktop or install Homebrew (https://brew.sh) first."
@@ -100,10 +100,10 @@ git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$CLONE_DIR" 2>/dev/null
 info "Running host provisioner..."
 echo ""
 
-PROVISIONER="$CLONE_DIR/homebox-infra/host-provisioner/setup_host.sh"
+PROVISIONER="$CLONE_DIR/host/host-provisioner/setup_host.sh"
 chmod +x "$PROVISIONER"
-chmod +x "$CLONE_DIR/homebox-infra/host-provisioner/lib.sh"
-chmod +x "$CLONE_DIR/homebox-infra/host-provisioner/configure.sh"
+chmod +x "$CLONE_DIR/host/host-provisioner/lib.sh"
+chmod +x "$CLONE_DIR/host/host-provisioner/configure.sh"
 
 if [ "$PLATFORM" = "linux" ]; then
     sudo HOMEBOX_SUPPRESS_BANNER=1 bash "$PROVISIONER"

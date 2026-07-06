@@ -2,7 +2,7 @@
 # Homebox One-Liner Installer (Windows)
 # =============================================================================
 # Usage:
-#   irm https://raw.githubusercontent.com/aleontiev/homebox/master/homebox-infra/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/aleontiev/homebox/master/host/install.ps1 | iex
 #
 # Requires: PowerShell 5.1+ and Administrator privileges.
 # =============================================================================
@@ -55,7 +55,7 @@ if (-not $dockerOk) {
         exit 1
     }
     Write-Host "[WARN]  Docker Desktop installed. Start it, then re-run this script:" -ForegroundColor Yellow
-    Write-Host "        irm https://raw.githubusercontent.com/aleontiev/homebox/main/homebox-infra/install.ps1 | iex" -ForegroundColor Yellow
+    Write-Host "        irm https://raw.githubusercontent.com/aleontiev/homebox/main/host/install.ps1 | iex" -ForegroundColor Yellow
     exit 0
 }
 
@@ -77,7 +77,7 @@ New-Item -ItemType Directory -Force -Path "$HomeboxDir\traefik" | Out-Null
 New-Item -ItemType Directory -Force -Path "$HomeboxDir\projects" | Out-Null
 New-Item -ItemType Directory -Force -Path "$HomeboxDir\base-infrastructure" | Out-Null
 
-$SrcInfra = Join-Path $CloneDir "homebox-infra\host-provisioner\base-infrastructure"
+$SrcInfra = Join-Path $CloneDir "host\host-provisioner\base-infrastructure"
 Copy-Item "$SrcInfra\docker-compose.yml" "$HomeboxDir\base-infrastructure\" -Force
 Copy-Item "$SrcInfra\.env.example"       "$HomeboxDir\base-infrastructure\" -Force
 Copy-Item "$SrcInfra\dynamic_conf.yml"   "$HomeboxDir\traefik\" -Force
@@ -219,6 +219,6 @@ Write-Host "==============================================" -ForegroundColor Gre
 Write-Host ""
 Write-Host "[INFO]  Dashboard: http://dashboard.$domain" -ForegroundColor Green
 Write-Host "[INFO]  Install the developer CLI on your workstation:" -ForegroundColor Green
-Write-Host "        pip install ./homebox-infra/cli" -ForegroundColor White
+Write-Host "        pip install ./host/cli" -ForegroundColor White
 Write-Host "        homebox init" -ForegroundColor White
 Write-Host ""

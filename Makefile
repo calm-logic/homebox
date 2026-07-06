@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-PROVISIONER_DIR := homebox-infra/host-provisioner
+PROVISIONER_DIR := host/host-provisioner
 SETUP_HOST     := $(PROVISIONER_DIR)/setup_host.sh
 CONFIGURE_HOST := $(PROVISIONER_DIR)/configure.sh
 
@@ -27,7 +27,7 @@ help:
 	@echo "  make reonboard   Clear the Cloudflare connection so onboarding runs again (keeps projects/identities)"
 	@echo "  make boot        Bring the whole stack up now (same script systemd runs on boot)"
 	@echo "  make enable-boot Install + enable the systemd unit so Homebox auto-starts on boot"
-	@echo "  make cli         Install the developer CLI from ./homebox-infra/cli"
+	@echo "  make cli         Install the developer CLI from ./host/cli"
 	@echo "  make init        Initialize the developer CLI (~/.homebox.json)"
 
 host:
@@ -41,7 +41,7 @@ reset-password:
 
 admin:
 	@echo ">>> Syncing admin source from repo to /opt/homebox/admin"
-	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'cluster-keys.json' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' homebox-infra/admin/ /opt/homebox/admin/
+	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'cluster-keys.json' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' host/admin/ /opt/homebox/admin/
 	$(SUDO) bash -c 'cd /opt/homebox/admin && docker compose --env-file .env up -d --build'
 	@port=$$($(SUDO) sed -n 's/^HOMEBOX_ADMIN_PORT=//p' /opt/homebox/admin/.env 2>/dev/null | head -1); \
 	  port=$${port:-7765}; \
@@ -61,7 +61,7 @@ admin-down:
 
 admin-reset:
 	@echo ">>> WIPING the admin database volume and rebuilding (you will re-onboard)."
-	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'cluster-keys.json' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' homebox-infra/admin/ /opt/homebox/admin/
+	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'cluster-keys.json' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' host/admin/ /opt/homebox/admin/
 	$(SUDO) bash -c 'cd /opt/homebox/admin && docker compose --env-file .env down -v && docker compose --env-file .env up -d --build'
 	@echo ">>> Admin reset complete. Sign in and re-run onboarding."
 
@@ -81,7 +81,7 @@ enable-boot:
 	$(SUDO) bash -c 'source $(PROVISIONER_DIR)/lib.sh && install_boot_unit'
 
 cli:
-	pip install ./homebox-infra/cli
+	pip install ./host/cli
 
 init:
 	homebox init
