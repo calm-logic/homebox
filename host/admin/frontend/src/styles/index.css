@@ -715,17 +715,43 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .data-table.editor .th-name { font-weight: 600; color: var(--text); font-size: 0.8rem; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .data-table.editor .th-type { font-weight: 400; color: var(--muted); font-size: 0.68rem; text-transform: none; letter-spacing: 0; white-space: nowrap; }
 
-/* Real checkboxes in the data tables (the global rule renders them as toggles). */
+/* Skinned square checkboxes in the data tables (the global rule renders
+   checkboxes as toggle switches; these are theme-adaptive check boxes). */
 .data-table.editor input[type="checkbox"],
 .bulk-bar input[type="checkbox"] {
-  appearance: auto;
-  -webkit-appearance: auto;
-  width: 15px; height: 15px;
-  background: none; border: initial; border-radius: 0;
-  accent-color: var(--accent); cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px; height: 16px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--panel);
+  cursor: pointer;
+  position: relative;
   vertical-align: middle;
+  transition: background 0.12s, border-color 0.12s;
 }
-.data-table.editor input[type="checkbox"]::after { content: none; }
+.data-table.editor input[type="checkbox"]:hover,
+.bulk-bar input[type="checkbox"]:hover { border-color: var(--accent); }
+.data-table.editor input[type="checkbox"]::after,
+.bulk-bar input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  left: 4.5px; top: 1.5px;
+  width: 4px; height: 8px;
+  border: solid #08130d;               /* checkmark; contrasts the mint accent fill in both themes */
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) scale(0);
+  transition: transform 0.12s;
+}
+.data-table.editor input[type="checkbox"]:checked,
+.bulk-bar input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.data-table.editor input[type="checkbox"]:checked::after,
+.bulk-bar input[type="checkbox"]:checked::after { transform: rotate(45deg) scale(1); }
+.data-table.editor input[type="checkbox"]:focus-visible,
+.bulk-bar input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .data-table.editor .sort-ind { color: var(--accent); font-size: 0.62rem; }
 .data-table.editor .pk-dot { font-size: 0.66rem; }
 .data-table.editor td { padding: 0.35rem 0.75rem; border-bottom: 1px solid var(--border); }
