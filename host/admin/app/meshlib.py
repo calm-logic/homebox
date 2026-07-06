@@ -55,6 +55,9 @@ up() {
   fi
 }
 trap 'wg-quick down wg0 2>/dev/null; exit 0' TERM INT
+# Best-effort: enable forwarding so the host routes overlay traffic between
+# bridge containers and wg0 (host usually has this on already).
+sysctl -w net.ipv4.ip_forward=1 2>/dev/null || echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
 up
 while true; do sleep 10; up; done
 """
@@ -145,10 +148,12 @@ async def _run_container() -> tuple[bool, str]:
         "Image": MESH_IMAGE,
         "HostConfig": {
             "NetworkMode": "host",
-            "CapAdd": ["NET_ADMIN"],
+            "CapAdd": ["NET_ADMIN", "SYS_MODULE"],
             "Devices": [{"PathOnHost": "/dev/net/tun", "PathInContainer": "/dev/net/tun",
                          "CgroupPermissions": "rwm"}],
-            "Sysctls": {"net.ipv4.ip_forward": "1"},
+            # ip_forward is a host-namespace sysctl — can't be set per-container
+            # on a host-network container; the entrypoint enables it best-effort
+            # and Docker usually has it on already.
             "RestartPolicy": {"Name": "unless-stopped"},
         },
     }
