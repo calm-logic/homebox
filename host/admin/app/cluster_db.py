@@ -561,6 +561,13 @@ async def ensure_replication(
     my_ord = info["ordinal"]
     peers = roster_peer_ordinals(state, self_node_id)
     expected = {f"sub_n{my_ord}_n{p_ord}" for p_ord in peers}
+    # Prefer the WireGuard overlay for peers whose tunnel is up: across NAT the
+    # peer's LAN IP isn't reachable and its Postgres port isn't public, so the
+    # 10.77.x.y overlay is the only working replication path. Peers without a
+    # live tunnel fall back to their advertised LAN/public host (single-network
+    # clusters, where the direct address works, are unaffected).
+    from . import meshlib
+    overlay_up = await meshlib.mesh_up_ordinals(state)
     # A first subscription made while THIS database is still empty copies the
     # provider's existing rows (synchronize_data) — that's how a fresh node
     # (or a transition peer) receives data that predates the subscription.
@@ -573,7 +580,10 @@ async def ensure_replication(
     if code == 0 and out.strip() == "t":
         local_has_data = True
     for p_ord, peer in peers.items():
-        host = peer_host(peer)
+        if p_ord in overlay_up:
+            host, via = meshlib.mesh_ip(p_ord), "mesh"
+        else:
+            host, via = peer_host(peer), "direct"
         if not host:
             continue
         sub = f"sub_n{my_ord}_n{p_ord}"
@@ -589,7 +599,7 @@ async def ensure_replication(
         )
         if code == 0:
             result["subs_created"].append(sub)
-            log.info("cluster db: created %s on %s → %s:%s", sub, container, host, info["port"])
+            log.info("cluster db: created %s on %s → %s:%s (%s)", sub, container, host, info["port"], via)
         else:
             # Peer likely not deployed/reachable yet — the reconcile loop retries.
             result["errors"].append(f"{sub}: {sout[:200]}")
