@@ -33,6 +33,14 @@ async def cluster_status(
             "node_id": node_id,
             "control_plane_url": settings.homebox_control_plane_url,
         }
+    # Overlay this node's authoritative serving state onto its roster entry so
+    # the acting node's UI reflects a drain immediately, without waiting for the
+    # heartbeat→control-plane→roster round-trip (peers reflect on the next poll).
+    serving = await clusterlib.get_app_serving(session)
+    roster = [
+        {**n, "serving": serving} if n.get("node_id") == node_id else n
+        for n in (state.get("roster") or [])
+    ]
     return {
         "active": True,
         "node_id": node_id,
@@ -41,7 +49,7 @@ async def cluster_status(
         "node_name": state.get("node_name"),
         "peer_url": state.get("peer_url"),
         "control_plane_url": state.get("control_plane_url"),
-        "roster": state.get("roster") or [],
+        "roster": roster,
         "license": state.get("license"),
         "initial_sync_done": bool(state.get("initial_sync_done")),
         "last_heartbeat": state.get("last_heartbeat"),
