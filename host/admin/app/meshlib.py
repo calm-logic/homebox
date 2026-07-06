@@ -30,16 +30,32 @@ from .host import remove_container, container_status
 log = logging.getLogger("homebox.mesh")
 
 MESH_CONTAINER = "homebox-mesh"
-MESH_IMAGE = "homebox-mesh:latest"
+# Bridge sidecar that publishes UDP 51820 into the host-net mesh container.
+# Only used on Docker Desktop, where "host networking" is a NAT'd VM that never
+# receives inbound LAN UDP; a published port is the only way in. On real Linux
+# hosts the mesh container's host-net wg0 is directly reachable and no sidecar
+# is created.
+MESH_PUB_CONTAINER = "homebox-mesh-pub"
+# Bump the tag when the image contents change (socat was added) so _image_exists
+# forces a rebuild instead of reusing a stale image.
+MESH_IMAGE = "homebox-mesh:2"
 WG_PORT = 51820
 WG_KEYS_KEY = "wg_keys"
 
 _DOCKERFILE = """FROM alpine:3.20
-RUN apk add --no-cache wireguard-tools iproute2
+RUN apk add --no-cache wireguard-tools iproute2 socat
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 """
+
+# The sidecar forwards its published :51820 to the docker bridge gateway, which
+# on Docker Desktop is the VM address where the host-net wg listens on all
+# interfaces. socat's fork/RECVFROM pattern relays return datagrams per source.
+_PUB_ENTRYPOINT_CMD = (
+    "GW=$(ip route | awk '/^default/{print $3; exit}'); "
+    "exec socat -T120 UDP4-LISTEN:51820,fork,reuseaddr UDP4:${GW:-172.17.0.1}:51820"
+)
 
 _ENTRYPOINT = """#!/bin/sh
 set -u
@@ -170,6 +186,45 @@ async def _run_container() -> tuple[bool, str]:
     return False, f"start failed: {code} {body[:200]!r}"
 
 
+async def _is_docker_desktop() -> bool:
+    """Docker Desktop runs every container in one NAT'd VM, so a host-net wg
+    can't receive inbound LAN UDP — we need the publish sidecar. Real Linux
+    hosts report their distro here and need no sidecar."""
+    code, out = await _run(
+        ["docker", "info", "--format", "{{.OperatingSystem}}"], timeout=20
+    )
+    return code == 0 and "docker desktop" in out.lower()
+
+
+async def _run_pub_container() -> tuple[bool, str]:
+    """(Re)create the bridge sidecar that publishes UDP 51820 into the host-net
+    mesh container. Docker Desktop only."""
+    from .host import _docker_request_json, _docker_request
+    from urllib.parse import quote
+    remove_container(MESH_PUB_CONTAINER)
+    payload = {
+        "Image": MESH_IMAGE,
+        "Entrypoint": ["/bin/sh", "-c", _PUB_ENTRYPOINT_CMD],
+        "ExposedPorts": {"51820/udp": {}},
+        "HostConfig": {
+            "PortBindings": {"51820/udp": [{"HostPort": str(WG_PORT)}]},
+            "RestartPolicy": {"Name": "unless-stopped"},
+        },
+    }
+    code, body = await asyncio.to_thread(
+        _docker_request_json, "POST",
+        f"/containers/create?name={quote(MESH_PUB_CONTAINER)}", payload,
+    )
+    if code not in (200, 201):
+        return False, f"create failed: {code} {body[:200]!r}"
+    code, body = await asyncio.to_thread(
+        _docker_request, "POST", f"/containers/{quote(MESH_PUB_CONTAINER)}/start"
+    )
+    if code in (204, 304):
+        return True, "started"
+    return False, f"start failed: {code} {body[:200]!r}"
+
+
 async def _write_conf(conf: str) -> bool:
     """Deliver wg0.conf into the running mesh container (no host-path bind)."""
     proc = await asyncio.create_subprocess_exec(
@@ -219,3 +274,11 @@ async def ensure_mesh(session: AsyncSession, state: dict) -> None:
             return
         await asyncio.sleep(1)
     await _write_conf(conf)
+
+    # Docker Desktop can't receive inbound LAN UDP on a host-net container;
+    # a bridge sidecar publishes :51820 into it. No-op on real Linux hosts.
+    if await _is_docker_desktop():
+        if not container_status(MESH_PUB_CONTAINER).get("running"):
+            ok, msg = await _run_pub_container()
+            if not ok:
+                log.warning("mesh publish sidecar start failed: %s", msg)
