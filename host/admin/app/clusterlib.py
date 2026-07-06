@@ -235,10 +235,13 @@ async def create_cluster_flow(
     here (the control plane never sees it)."""
     node_id = await get_node_id(session)
     _, pub = await get_node_keys(session)
+    from . import meshlib
+    _, wg_pub = await meshlib.get_wg_keys(session)
     resp = await _cp("POST", control_plane_url, "/v1/clusters",
                      token=account_token_plain,
                      body={"name": name, "node_id": node_id, "node_name": node_name,
-                           "pubkey": pub, "peer_url": peer_url, "version": VERSION})
+                           "pubkey": pub, "peer_url": peer_url, "version": VERSION,
+                           "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT})
     state = {
         "cluster_id": resp["cluster_id"],
         "name": resp["name"],
@@ -310,11 +313,14 @@ async def join_cluster_flow(
 
     node_id = await get_node_id(session)
     priv, pub = await get_node_keys(session)
+    from . import meshlib
+    _, wg_pub = await meshlib.get_wg_keys(session)
 
     reg = await _cp("POST", control_plane_url, f"/v1/clusters/{cluster_id}/nodes",
                     body={"join_token": join_token, "node_id": node_id,
                           "node_name": node_name, "pubkey": pub,
-                          "peer_url": peer_url, "version": VERSION})
+                          "peer_url": peer_url, "version": VERSION,
+                          "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT})
 
     donors = [n for n in reg["nodes"] if n["node_id"] != node_id and n.get("peer_url")]
     if not donors:
@@ -589,12 +595,15 @@ async def evict_node(session: AsyncSession, node_id_to_evict: str) -> dict[str, 
 
 async def _heartbeat(session: AsyncSession, state: dict[str, Any]) -> dict[str, Any]:
     node_id = await get_node_id(session)
+    from . import meshlib
+    _, wg_pub = await meshlib.get_wg_keys(session)
     resp = await _cp(
         "POST", state["control_plane_url"],
         f"/v1/clusters/{state['cluster_id']}/heartbeat",
         token=node_token(state),
         body={"node_id": node_id, "peer_url": state.get("peer_url") or "",
-              "version": VERSION, "name": state.get("node_name") or ""},
+              "version": VERSION, "name": state.get("node_name") or "",
+              "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT},
     )
     state["roster"] = resp["nodes"]
     state["license"] = resp.get("license")
@@ -859,6 +868,14 @@ async def cluster_loop() -> None:
                         # admin_domain was known).
                         await ensure_peer_route(session)
                         await check_network_conflicts(session, state)
+                    # WireGuard mesh: reconcile every cycle (cheap; peer
+                    # endpoints/keys change as the roster does). Best-effort.
+                    if state.get("initial_sync_done"):
+                        try:
+                            from . import meshlib
+                            await meshlib.ensure_mesh(session, state)
+                        except Exception:  # noqa: BLE001
+                            log.exception("mesh reconcile failed")
                 # Account link is independent of membership: keeps the
                 # overview cache fresh and executes pending join directives
                 # (an invite issued from another node).

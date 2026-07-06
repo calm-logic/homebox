@@ -82,6 +82,21 @@ def generate_keypair() -> tuple[str, str]:
     return priv_hex, pub_hex
 
 
+def generate_wg_keypair() -> tuple[str, str]:
+    """Returns (private_b64, public_b64) in WireGuard's key format. WG keys are
+    Curve25519, so an X25519 keypair base64-encoded is exactly a wg key — no
+    `wg genkey` binary needed."""
+    priv = X25519PrivateKey.generate()
+    priv_b64 = base64.b64encode(priv.private_bytes(
+        serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+        serialization.NoEncryption(),
+    )).decode("ascii")
+    pub_b64 = base64.b64encode(priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )).decode("ascii")
+    return priv_b64, pub_b64
+
+
 def _derive(shared: bytes) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=_HKDF_INFO).derive(shared)
 
