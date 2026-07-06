@@ -582,11 +582,30 @@ async def data_related(
     return {"table": table, "columns": schema["columns"], "row": rows[0] if rows else None}
 
 
+async def _redis(container: str, db: int, cmd: str, *, key: str | None = None,
+                 extra_env: dict[str, str] | None = None, timeout: int = 15) -> str:
+    """Run one redis-cli command in the service's container. The key/value are
+    passed as env vars (referenced as "$HB_KEY"/"$HB_VAL" in `cmd`) so they
+    never touch the shell parse — safe for arbitrary key names."""
+    db = max(0, min(int(db), 15))
+    envs: list[str] = []
+    if key is not None:
+        envs += ["-e", f"HB_KEY={key}"]
+    for k, v in (extra_env or {}).items():
+        envs += ["-e", f"{k}={v}"]
+    script = f'exec redis-cli ${{REDIS_PASSWORD:+-a "$REDIS_PASSWORD"}} --no-auth-warning -n {db} {cmd}'
+    code, out = await _docker_run(["docker", "exec", *envs, container, "sh", "-c", script], timeout=timeout)
+    if code:
+        raise HTTPException(502, f"redis error: {out[-300:]}")
+    return out
+
+
 @router.get("/{service_id}/data/keys")
 async def data_keys(
     service_id: int,
     environment_id: int,
     db: int = 0,
+    match: str | None = None,
     user: str = Depends(require_session_api),
     session: AsyncSession = Depends(get_session),
 ):
@@ -596,14 +615,19 @@ async def data_keys(
     _env, container = await _service_container(session, svc, environment_id)
     db = max(0, min(db, 15))
 
+    pattern = ""
+    envs: list[str] = []
+    if match:
+        pattern = ' --pattern "$HB_MATCH"'
+        envs = ["-e", f"HB_MATCH={match}"]
     script = (
         'auth=${REDIS_PASSWORD:+-a "$REDIS_PASSWORD"}; '
-        f'redis-cli $auth --no-auth-warning -n {db} --scan | head -200 | while IFS= read -r k; do '
+        f'redis-cli $auth --no-auth-warning -n {db} --scan{pattern} | head -300 | while IFS= read -r k; do '
         f'printf "%s\\t%s\\t%s\\n" "$k" '
         f'"$(redis-cli $auth --no-auth-warning -n {db} type "$k")" '
         f'"$(redis-cli $auth --no-auth-warning -n {db} ttl "$k")"; done'
     )
-    code, out = await _docker_run(["docker", "exec", container, "sh", "-c", script], timeout=30)
+    code, out = await _docker_run(["docker", "exec", *envs, container, "sh", "-c", script], timeout=30)
     if code:
         raise HTTPException(502, f"redis scan failed: {out[-300:]}")
     keys = []
@@ -612,6 +636,101 @@ async def data_keys(
         if len(parts) == 3:
             keys.append({"key": parts[0], "type": parts[1], "ttl": int(parts[2]) if parts[2].lstrip("-").isdigit() else None})
     return {"db": db, "keys": keys}
+
+
+@router.get("/{service_id}/data/key")
+async def data_key(
+    service_id: int,
+    environment_id: int,
+    key: str,
+    db: int = 0,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """A single key's type, TTL, and typed value (string / hash / list / set /
+    zset), for the value viewer."""
+    svc = await _get_service(session, service_id)
+    if _data_flavor(svc) != "redis":
+        raise HTTPException(400, "Key inspection is only available for redis services.")
+    _env, container = await _service_container(session, svc, environment_id)
+
+    typ = (await _redis(container, db, 'type "$HB_KEY"', key=key)).strip()
+    if typ in ("", "none"):
+        raise HTTPException(404, "Key not found")
+    ttl_raw = (await _redis(container, db, 'ttl "$HB_KEY"', key=key)).strip()
+    ttl = int(ttl_raw) if ttl_raw.lstrip("-").isdigit() else None
+
+    value: Any = None
+    if typ == "string":
+        value = await _redis(container, db, 'get "$HB_KEY"', key=key)
+        if value.endswith("\n"):
+            value = value[:-1]
+    elif typ == "hash":
+        lines = (await _redis(container, db, 'hgetall "$HB_KEY"', key=key)).split("\n")
+        value = {"fields": [{"field": lines[i], "value": lines[i + 1]}
+                            for i in range(0, len(lines) - 1, 2)]}
+    elif typ == "list":
+        value = {"items": (await _redis(container, db, 'lrange "$HB_KEY" 0 500', key=key)).splitlines()}
+    elif typ == "set":
+        value = {"members": (await _redis(container, db, 'smembers "$HB_KEY"', key=key)).splitlines()}
+    elif typ == "zset":
+        lines = (await _redis(container, db, 'zrange "$HB_KEY" 0 500 withscores', key=key)).split("\n")
+        value = {"members": [{"member": lines[i], "score": lines[i + 1]}
+                             for i in range(0, len(lines) - 1, 2)]}
+    return {"key": key, "type": typ, "ttl": ttl, "value": value}
+
+
+class _KeySet(BaseModel):
+    db: int = 0
+    key: str
+    value: str
+
+
+@router.post("/{service_id}/data/key/set")
+async def data_key_set(
+    service_id: int,
+    environment_id: int,
+    body: _KeySet,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Set a string key's value (preserving TTL)."""
+    svc = await _get_service(session, service_id)
+    if _data_flavor(svc) != "redis":
+        raise HTTPException(400, "Editing is only available for redis services.")
+    _env, container = await _service_container(session, svc, environment_id)
+    await _redis(container, body.db, 'set "$HB_KEY" "$HB_VAL" KEEPTTL',
+                 key=body.key, extra_env={"HB_VAL": body.value})
+    return {"ok": True}
+
+
+class _KeyDelete(BaseModel):
+    db: int = 0
+    keys: list[str]
+
+
+@router.post("/{service_id}/data/key/delete")
+async def data_key_delete(
+    service_id: int,
+    environment_id: int,
+    body: _KeyDelete,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Bulk-delete redis keys."""
+    svc = await _get_service(session, service_id)
+    if _data_flavor(svc) != "redis":
+        raise HTTPException(400, "Deleting is only available for redis services.")
+    if not body.keys:
+        raise HTTPException(400, "No keys to delete")
+    if len(body.keys) > 500:
+        raise HTTPException(400, "Refusing to delete more than 500 keys at once")
+    _env, container = await _service_container(session, svc, environment_id)
+    deleted = 0
+    for k in body.keys:
+        out = await _redis(container, body.db, 'del "$HB_KEY"', key=k)
+        deleted += int(out.strip() or 0)
+    return {"ok": True, "deleted": deleted}
 
 
 @router.get("/{service_id}/requests")

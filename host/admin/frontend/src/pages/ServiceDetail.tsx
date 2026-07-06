@@ -230,6 +230,7 @@ function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: Environm
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [editing, setEditing] = useState<{ row: number; col: string } | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [editOrig, setEditOrig] = useState("");
   const [related, setRelated] = useState<{ table: string; column: string; value: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -281,11 +282,15 @@ function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: Environm
       // Editing a PK/identity is a footgun — allow non-PK edits only.
       if (pkCols.includes(col)) { toast.show("Primary-key columns aren't editable.", "info"); return; }
     }
+    const s = cur === null || cur === undefined ? "" : typeof cur === "object" ? JSON.stringify(cur) : String(cur);
     setEditing({ row: rowIdx, col });
-    setEditValue(cur === null || cur === undefined ? "" : typeof cur === "object" ? JSON.stringify(cur) : String(cur));
+    setEditValue(s);
+    setEditOrig(s);
   };
 
   const commitEdit = (row: Record<string, unknown>, col: string) => {
+    // No change → just close the editor. Don't hit the API or toast "saved".
+    if (editValue === editOrig) { setEditing(null); return; }
     const meta = colMeta(col);
     let value: unknown = editValue;
     if (editValue === "" && meta?.nullable) value = null;
@@ -496,44 +501,201 @@ function fmtCell(v: unknown): string {
   return String(v);
 }
 
+interface KeyValue {
+  key: string; type: string; ttl: number | null;
+  value: string | { fields: { field: string; value: string }[] }
+    | { items: string[] } | { members: string[] }
+    | { members: { member: string; score: string }[] } | null;
+}
+const REDIS_TYPE_COLOR: Record<string, string> = {
+  string: "green", hash: "blue", list: "amber", set: "purple", zset: "pink", stream: "gray",
+};
+
 function RedisBrowser({ svc, env, dbs }: { svc: ServiceItem; env: EnvironmentInfo; dbs: { index: number; keys: number }[] }) {
+  const qc = useQueryClient();
+  const toast = useToast();
   const list = dbs.length > 0 ? dbs : [{ index: 0, keys: 0 }];
   const [db, setDb] = useState(list[0].index);
+  const [search, setSearch] = useState("");
+  const [applied, setApplied] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [viewKey, setViewKey] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
+  useEffect(() => { setSelected(new Set()); }, [db, applied]);
+
+  const matchParam = applied ? `&match=${encodeURIComponent(applied.includes("*") ? applied : `*${applied}*`)}` : "";
+  const keysKey = ["svc-keys", svc.id, env.id, db, applied];
   const { data, isFetching } = useQuery<KeysResponse>({
-    queryKey: ["svc-keys", svc.id, env.id, db],
-    queryFn: () => api.get<KeysResponse>(`/api/services/${svc.id}/data/keys?environment_id=${env.id}&db=${db}`),
+    queryKey: keysKey,
+    queryFn: () => api.get<KeysResponse>(`/api/services/${svc.id}/data/keys?environment_id=${env.id}&db=${db}${matchParam}`),
   });
+
+  const del = useMutation({
+    mutationFn: () => api.post<{ deleted: number }>(`/api/services/${svc.id}/data/key/delete?environment_id=${env.id}`,
+      { db, keys: [...selected] }),
+    onSuccess: (r) => { qc.invalidateQueries({ queryKey: keysKey }); toast.show(`Deleted ${r.deleted} key${r.deleted === 1 ? "" : "s"}`, "ok"); setSelected(new Set()); setConfirmDelete(false); },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
+  const keys = data?.keys ?? [];
+  const allSelected = keys.length > 0 && selected.size === keys.length;
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(keys.map(k => k.key)));
+  const toggleKey = (k: string) => setSelected(s => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
 
   return (
     <>
-      <div className="row">
+      <div className="row" style={{ flexWrap: "wrap", gap: "0.5rem" }}>
         <h3 style={{ margin: 0 }}>Data</h3>
-        <select value={db} onChange={e => setDb(Number(e.target.value))} style={{ width: "auto" }}>
+        <select value={db} onChange={e => { setDb(Number(e.target.value)); setApplied(""); setSearch(""); }} style={{ width: "auto" }}>
           {list.map(d => <option key={d.index} value={d.index}>db{d.index} ({d.keys} keys)</option>)}
         </select>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="search keys (glob ok)"
+          onKeyDown={e => { if (e.key === "Enter") setApplied(search.trim()); }} style={{ maxWidth: 220 }} />
+        <button className="btn small" onClick={() => setApplied(search.trim())}>Search</button>
+        {applied && <button className="btn small ghost" onClick={() => { setApplied(""); setSearch(""); }}>Clear</button>}
         {isFetching && <span className="spinner" />}
+        <div className="spacer" />
+        <span className="dim">{keys.length}{keys.length >= 300 ? "+" : ""} key{keys.length === 1 ? "" : "s"}</span>
       </div>
+
+      {selected.size > 0 && (
+        <div className="bulk-bar">
+          <span>{selected.size} selected</span>
+          <div className="spacer" />
+          <button className="btn small ghost" onClick={() => setSelected(new Set())}>Clear</button>
+          <button className="btn small danger" onClick={() => setConfirmDelete(true)}>Delete {selected.size}</button>
+        </div>
+      )}
+
       {data && (
-        data.keys.length === 0 ? (
-          <div className="card" style={{ marginTop: "0.5rem" }}><span className="dim">No keys in db{db}.</span></div>
+        keys.length === 0 ? (
+          <div className="card" style={{ marginTop: "0.5rem" }}>
+            <span className="dim">{applied ? `No keys match “${applied}”.` : `No keys in db${db}.`}</span>
+          </div>
         ) : (
-          <table className="data-table" style={{ marginTop: "0.5rem" }}>
-            <thead><tr><th>Key</th><th>Type</th><th>TTL</th></tr></thead>
-            <tbody>
-              {data.keys.map(k => (
-                <tr key={k.key}>
-                  <td><code>{k.key}</code></td>
-                  <td><span className="badge plain">{k.type}</span></td>
-                  <td className="dim">{k.ttl === null || k.ttl < 0 ? "∞" : `${k.ttl}s`}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="data-scroll">
+            <table className="data-table editor">
+              <thead><tr>
+                <th className="sel-col"><input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="Select all" /></th>
+                <th><div className="th-inner"><span className="th-name">Key</span></div></th>
+                <th><div className="th-inner"><span className="th-name">Type</span></div></th>
+                <th><div className="th-inner"><span className="th-name">TTL</span></div></th>
+              </tr></thead>
+              <tbody>
+                {keys.map(k => (
+                  <tr key={k.key} className={selected.has(k.key) ? "row-selected" : ""}>
+                    <td className="sel-col"><input type="checkbox" checked={selected.has(k.key)} onChange={() => toggleKey(k.key)} aria-label="Select key" /></td>
+                    <td className="data-cell" style={{ cursor: "pointer" }} onClick={() => setViewKey(k.key)} title={k.key}>
+                      <code>{k.key}</code>
+                    </td>
+                    <td><span className={`badge ${REDIS_TYPE_COLOR[k.type] ?? "plain"}`}>{k.type}</span></td>
+                    <td className="dim">{k.ttl === null || k.ttl < 0 ? "∞" : `${k.ttl}s`}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )
       )}
+
+      {viewKey !== null && (
+        <RedisKeyModal svc={svc} env={env} db={db} keyName={viewKey} onClose={() => setViewKey(null)}
+          onChanged={() => qc.invalidateQueries({ queryKey: keysKey })} />
+      )}
+
+      <Modal open={confirmDelete} title={`Delete ${selected.size} key${selected.size === 1 ? "" : "s"}?`}
+        onClose={() => setConfirmDelete(false)}
+        footer={<>
+          <button className="btn ghost" onClick={() => setConfirmDelete(false)}>Cancel</button>
+          <button className="btn danger" onClick={() => del.mutate()} disabled={del.isPending}>Delete</button>
+        </>}>
+        This permanently removes the selected keys from db{db}.
+      </Modal>
     </>
   );
+}
+
+function RedisKeyModal({ svc, env, db, keyName, onClose, onChanged }: {
+  svc: ServiceItem; env: EnvironmentInfo; db: number; keyName: string; onClose: () => void; onChanged: () => void;
+}) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [edit, setEdit] = useState<string | null>(null);
+  const kkey = ["svc-key", svc.id, env.id, db, keyName];
+  const { data } = useQuery<KeyValue>({
+    queryKey: kkey,
+    queryFn: () => api.get<KeyValue>(`/api/services/${svc.id}/data/key?environment_id=${env.id}&db=${db}&key=${encodeURIComponent(keyName)}`),
+  });
+  const save = useMutation({
+    mutationFn: () => api.post(`/api/services/${svc.id}/data/key/set?environment_id=${env.id}`, { db, key: keyName, value: edit ?? "" }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: kkey }); onChanged(); toast.show("Value saved", "ok"); setEdit(null); },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
+  const ttl = data?.ttl;
+  return (
+    <Modal open title={keyName} onClose={onClose}
+      footer={data?.type === "string" ? (
+        edit === null
+          ? <button className="btn" onClick={() => setEdit(typeof data.value === "string" ? data.value : "")}>Edit value</button>
+          : <>
+              <button className="btn ghost" onClick={() => setEdit(null)}>Cancel</button>
+              <button className="btn" onClick={() => save.mutate()} disabled={save.isPending}>Save</button>
+            </>
+      ) : undefined}>
+      {!data ? <span className="spinner" /> : (
+        <>
+          <div className="row" style={{ gap: "0.5rem", marginBottom: "0.7rem" }}>
+            <span className={`badge ${REDIS_TYPE_COLOR[data.type] ?? "plain"}`}>{data.type}</span>
+            <span className="dim">TTL {ttl === null || ttl === undefined || ttl < 0 ? "∞ (no expiry)" : `${ttl}s`}</span>
+          </div>
+          {renderRedisValue(data, edit, setEdit)}
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function renderRedisValue(data: KeyValue, edit: string | null, setEdit: (v: string) => void) {
+  const v = data.value;
+  if (data.type === "string") {
+    return edit !== null ? (
+      <textarea value={edit} onChange={e => setEdit(e.target.value)} rows={8}
+        style={{ width: "100%", fontFamily: "monospace", fontSize: 13 }} />
+    ) : (
+      <pre className="redis-value">{typeof v === "string" ? v : ""}</pre>
+    );
+  }
+  if (v && typeof v === "object" && "fields" in v) {
+    return (
+      <div className="related-grid">
+        {v.fields.map((f, i) => (
+          <div key={i} className="related-field">
+            <div className="related-key">{f.field}</div>
+            <div className="related-val">{f.value}</div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (v && typeof v === "object" && "items" in v) {
+    return <ol className="redis-list">{v.items.map((it, i) => <li key={i}>{it}</li>)}</ol>;
+  }
+  if (v && typeof v === "object" && "members" in v) {
+    const members = v.members;
+    if (members.length && typeof members[0] === "object") {
+      return (
+        <div className="related-grid">
+          {(members as { member: string; score: string }[]).map((m, i) => (
+            <div key={i} className="related-field"><div className="related-key">{m.member}</div><div className="related-val">{m.score}</div></div>
+          ))}
+        </div>
+      );
+    }
+    return <ul className="redis-list">{(members as string[]).map((m, i) => <li key={i}>{m}</li>)}</ul>;
+  }
+  return <span className="dim">Empty.</span>;
 }
 
 // ─── Requests (stateless public services) ────────────────────────────────────

@@ -696,6 +696,7 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
   margin: 0;
   border: none;
   border-radius: 0;
+  overflow: visible;               /* base .data-table sets overflow:hidden, which breaks sticky */
   font-size: 0.82rem;
   font-variant-numeric: tabular-nums;
 }
@@ -709,9 +710,22 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 }
 .data-table.editor th.sortable { cursor: pointer; user-select: none; }
 .data-table.editor th.sortable:hover { background: var(--tint); }
-.data-table.editor .th-inner { display: flex; flex-direction: column; gap: 1px; }
-.data-table.editor .th-name { font-weight: 600; color: var(--text); font-size: 0.8rem; display: flex; align-items: center; gap: 4px; }
-.data-table.editor .th-type { font-weight: 400; color: var(--muted); font-size: 0.68rem; text-transform: none; letter-spacing: 0; }
+/* Name + type on ONE line so the type never wraps to the next row. */
+.data-table.editor .th-inner { display: flex; flex-direction: row; align-items: baseline; gap: 6px; white-space: nowrap; }
+.data-table.editor .th-name { font-weight: 600; color: var(--text); font-size: 0.8rem; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.data-table.editor .th-type { font-weight: 400; color: var(--muted); font-size: 0.68rem; text-transform: none; letter-spacing: 0; white-space: nowrap; }
+
+/* Real checkboxes in the data tables (the global rule renders them as toggles). */
+.data-table.editor input[type="checkbox"],
+.bulk-bar input[type="checkbox"] {
+  appearance: auto;
+  -webkit-appearance: auto;
+  width: 15px; height: 15px;
+  background: none; border: initial; border-radius: 0;
+  accent-color: var(--accent); cursor: pointer;
+  vertical-align: middle;
+}
+.data-table.editor input[type="checkbox"]::after { content: none; }
 .data-table.editor .sort-ind { color: var(--accent); font-size: 0.62rem; }
 .data-table.editor .pk-dot { font-size: 0.66rem; }
 .data-table.editor td { padding: 0.35rem 0.75rem; border-bottom: 1px solid var(--border); }
@@ -759,3 +773,22 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .related-field:last-child { border-bottom: none; }
 .related-key { font-weight: 600; font-size: 0.8rem; word-break: break-word; }
 .related-val { font-size: 0.82rem; word-break: break-word; font-variant-numeric: tabular-nums; }
+
+/* ── Redis value viewer + type badges ───────────────────────────────────── */
+.badge.green  { background: rgba(77,214,164,0.16); color: var(--accent); }
+.badge.blue   { background: rgba(96,165,250,0.16); color: #60a5fa; }
+.badge.amber  { background: rgba(251,191,36,0.16); color: #fbbf24; }
+.badge.purple { background: rgba(167,139,250,0.16); color: #a78bfa; }
+.badge.pink   { background: rgba(244,114,182,0.16); color: #f472b6; }
+.badge.gray   { background: var(--panel-2); color: var(--muted); }
+.redis-value {
+  margin: 0; padding: 0.7rem 0.9rem; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  max-height: 50vh; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font-size: 0.82rem; font-family: monospace;
+}
+.redis-list {
+  margin: 0; padding-left: 1.4rem; max-height: 50vh; overflow: auto;
+  font-size: 0.82rem; font-variant-numeric: tabular-nums;
+}
+.redis-list li { padding: 2px 0; word-break: break-word; }
