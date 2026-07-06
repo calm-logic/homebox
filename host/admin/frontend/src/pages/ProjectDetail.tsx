@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
+import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, ChevronRight, ExternalLink, RefreshCw, Rocket, Square, Settings,
-  LayoutDashboard, Boxes, Workflow,
+  LayoutDashboard, Boxes, Workflow, Trash2,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
 import type {
   DeploymentItem, DeploymentStatus, DomainItem, EnvironmentInfo,
@@ -92,7 +93,11 @@ export function ProjectDetail() {
   const nav = useNavigate();
   const toast = useToast();
   const [section, setSection] = useState<Section>("overview");
-  const [envTab, setEnvTab] = useState<number | null>(null);
+  const [searchParams] = useSearchParams();
+  const [envTab, setEnvTab] = useState<number | null>(() => {
+    const raw = searchParams.get("env");
+    return raw ? Number(raw) : null;
+  });
 
   const { data: project, isError } = useQuery<ProjectDetailData>({
     queryKey: ["project", id],
@@ -368,7 +373,10 @@ function runBadge(status: string, conclusion: string | null) {
 
 // ─── Settings panel (name + domain) ───────────────────────────────────────────
 function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSaved: () => void }) {
+  const qc = useQueryClient();
+  const nav = useNavigate();
   const toast = useToast();
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const [name, setName] = useState(project.name);
   const [domainId, setDomainId] = useState<string>(project.domain_id ? String(project.domain_id) : "");
   const [autoDeploy, setAutoDeploy] = useState(project.auto_deploy);
@@ -417,7 +425,18 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
     onError: (e) => toast.show(String(e), "fail"),
   });
 
+  const remove = useMutation({
+    mutationFn: () => api.post(`/api/projects/${project.id}/release`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      toast.show(`Removed ${project.name} — Homebox resources torn down`, "ok");
+      nav("/projects", { replace: true });
+    },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
   return (
+    <>
     <div className="card">
       <div className="field">
         <label className="lbl">Project name (URL slug)</label>
@@ -507,5 +526,38 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
         </button>
       </div>
     </div>
+
+    <div className="card" style={{ marginTop: "1.25rem", borderColor: "var(--danger)" }}>
+      <strong>Danger zone</strong>
+      <p className="dim" style={{ marginTop: "0.35rem" }}>
+        Stops and removes this project's containers on every environment. The GitHub
+        repository is untouched and can be re-added later.
+      </p>
+      <button className="btn danger" onClick={() => setConfirmRemove(true)}>
+        <Trash2 size={14} /> Remove project
+      </button>
+    </div>
+
+    <Modal
+      open={confirmRemove}
+      onClose={() => { if (!remove.isPending) setConfirmRemove(false); }}
+      title={`Remove ${project.name}?`}
+      footer={<>
+        <span className="spacer" />
+        <button className="btn ghost" onClick={() => setConfirmRemove(false)} disabled={remove.isPending}>Cancel</button>
+        <button className="btn danger" disabled={remove.isPending} onClick={() => remove.mutate()}>
+          {remove.isPending ? <span className="spinner" /> : <><Trash2 size={14} /> Remove</>}
+        </button>
+      </>}
+    >
+      <p style={{ margin: 0 }}>
+        Tears down every environment's containers and networks for <strong>{project.name}</strong>.
+      </p>
+      <p className="dim">
+        The GitHub repository ({project.repo_full_name}) is not deleted or modified — you can
+        add this project again later. Data volumes are kept.
+      </p>
+    </Modal>
+    </>
   );
 }
