@@ -1,4 +1,10 @@
+<p align="center">
+  <img src="https://homebox.sh/logo.svg" width="96" alt="Homebox logo">
+</p>
+
 # 📦 Homebox
+
+**[homebox.sh](https://homebox.sh)**
 
 A self-hosted Internal PaaS for deploying and managing containerized applications. Homebox runs on any machine with Docker (Linux, macOS, or Windows), uses Traefik as a reverse proxy, Cloudflare Tunnel for internet exposure, and provides a CLI for developers to switch between local development and published container routing.
 
@@ -9,7 +15,7 @@ Install on any machine with a single command:
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/calm-logic/homebox/main/host/install.sh | bash
+curl -fsSL https://homebox.sh/install.sh | bash
 ```
 
 **Windows (PowerShell as Administrator):**
@@ -22,7 +28,7 @@ The installer will:
 2. Create the Homebox directory structure
 3. Generate admin credentials (saved to `~/.homebox/secrets.json`)
 4. Bring up the **Homebox Admin UI** on `http://localhost:7765`
-5. Open your browser — domains, Cloudflare tunnel, GitHub runner, and projects are all configured from there
+5. Open your browser: domains, Cloudflare tunnel, GitHub runner, and projects are all configured from there
 
 ## 🏗️ Architecture
 
@@ -52,8 +58,8 @@ flowchart TD
 
 Each project runs in its own Docker Compose stack with isolated networking:
 
-- **🔗 `traefik-net`** (shared) — connects project containers to Traefik for HTTP routing
-- **🔒 `<project>-internal`** (per-project) — connects app, database, and cache containers privately
+- **🔗 `traefik-net`** (shared): connects project containers to Traefik for HTTP routing
+- **🔒 `<project>-internal`** (per-project): connects app, database, and cache containers privately
 
 Backing services (Postgres, Redis) are never exposed to the host network.
 
@@ -105,9 +111,9 @@ host/
 
 ### Prerequisites
 
-- **🖥️ Any machine** — Linux, macOS (including Mac Mini), or Windows
-- **🐳 Docker** — Docker Engine on Linux, Docker Desktop on macOS/Windows
-- **🌐 Cloudflare-managed domain** — required for tunnel access
+- **🖥️ Any machine**: Linux, macOS (including Mac Mini), or Windows
+- **🐳 Docker**: Docker Engine on Linux, Docker Desktop on macOS/Windows
+- **🌐 Cloudflare-managed domain**: required for tunnel access
 
 ### One-liner install (recommended)
 
@@ -167,14 +173,14 @@ To rotate, edit `~/.homebox/secrets.json` and run `make configure` to regenerate
 
 The admin UI's **Domains** page accepts two modes per domain:
 
-- **wildcard** — child subdomains are auto-routed to projects: `myapp.x100.dev` → the `myapp` project. Multiple wildcard domains are supported (`x100.dev`, `calmlogic.dev`, …).
-- **dedicated** — the domain itself (and `*.<domain>`) is bound to one specific project. Use this for customer-facing or branded domains.
+- **wildcard**: child subdomains are auto-routed to projects: `myapp.x100.dev` → the `myapp` project. Multiple wildcard domains are supported (`x100.dev`, `calmlogic.dev`, …).
+- **dedicated**: the domain itself (and `*.<domain>`) is bound to one specific project. Use this for customer-facing or branded domains.
 
 Domains are persisted to `/opt/homebox/base-infrastructure/domains.json`. The Tunnel page renders a ready-to-paste `cloudflared` config and DNS-routing commands for the host.
 
 ### 🤖 GitHub Actions runner
 
-Connect a GitHub organization with a fine-grained PAT (`repo` + `admin:org` scopes) on the **Organizations** page. The **Runner** page can mint registration tokens via the API and lists the host's runner registration. Org-scoped runners are recommended — every repo in the org can target the host via:
+Connect a GitHub organization with a fine-grained PAT (`repo` + `admin:org` scopes) on the **Organizations** page. The **Runner** page can mint registration tokens via the API and lists the host's runner registration. Org-scoped runners are recommended; every repo in the org can target the host via:
 
 ```yaml
 runs-on: [self-hosted, homebox]
@@ -237,17 +243,9 @@ With explicit options:
 homebox db sync myapp --db myapp_db --user myapp_user --local-db myapp_dev --container myapp-db-1
 ```
 
-## 🧩 Making a Project Homebox-Ready
-
-Any git repo works out of the box — there's nothing required. On adopt (and every sync), Homebox dissects the repo: it reuses backing services and any app service from a `docker-compose.yml` if one exists, builds from a `Dockerfile` or a detected language via Nixpacks if not, and falls back to a generic build from the repo root if it finds neither. Traefik labels, networking, and hostnames are generated automatically — you never write them yourself. See the full guide: **[homebox-ready.md](host/docs/homebox-ready.md)**.
-
-For explicit control (custom ports, subdomains, build commands, env vars), drop an optional `homebox.yaml` manifest at the repo root — see the guide for the format.
-
-To scaffold a new project or add Homebox support to an existing repo, see the [bootstrap skill](host/docs/claude-bootstrap-skill.md).
-
 ## 🔄 Development Workflow
 
-1. **Start developing** — run your app locally and switch routing to dev mode:
+1. **Start developing**: run your app locally and switch routing to dev mode:
    ```bash
    homebox switch myapp dev --port 8000
    ```
@@ -258,7 +256,7 @@ To scaffold a new project or add Homebox support to an existing repo, see the [b
    homebox db sync myapp
    ```
 
-3. **Deploy** — push to your branch. GitHub Actions runs tests in the cloud, then deploys to your host:
+3. **Deploy**: push to your branch. GitHub Actions runs tests in the cloud, then deploys to your host:
    ```bash
    homebox switch myapp pub
    ```
