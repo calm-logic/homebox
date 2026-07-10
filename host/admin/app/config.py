@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     session_max_age_seconds: int = 60 * 60 * 24 * 14  # 14 days
     homebox_oauth_proxy_url: str = "https://oauth.homebox.sh"
     homebox_control_plane_url: str = "https://control.homebox.sh"
+    homebox_site_url: str = "https://homebox.sh"  # marketing/cloud site (env HOMEBOX_SITE_URL)
     # This node's cluster role. "peer" nodes serve app traffic active-active and
     # count toward the license max_nodes. "mirror" nodes run drained (standby),
     # stay hot via replication + peer deploys, and auto-promote to serving when

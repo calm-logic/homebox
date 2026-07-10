@@ -15,8 +15,9 @@ Purposes:
             login is rejected.
 """
 
+import socket
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -25,6 +26,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import clusterlib
 from ..auth import issue_session, require_session_api, _read_session
 from ..config import settings
 from ..crypto import encrypt
@@ -66,22 +68,50 @@ async def _installation_url(request: Request, session: AsyncSession) -> str:
     return f"{fwd_proto}://{host}"
 
 
-def _proxy_redirect(response: Response, state: str, provider: str, purpose: str, installation: str) -> dict:
-    """Set the CSRF state cookie and point the response at the proxy /start."""
+def _start_url(state: str, provider: str, purpose: str, installation: str) -> str:
+    """The proxy /start URL carrying the signed state, provider and purpose."""
     qs = urlencode({
         "installation": installation,
         "state": state,
         "provider": provider,
         "purpose": purpose,
     })
-    target = f"{settings.homebox_oauth_proxy_url}/start?{qs}"
-    response.headers["location"] = target
-    response.status_code = 302
+    return f"{settings.homebox_oauth_proxy_url}/start?{qs}"
+
+
+def _set_state_cookie(response: Response, state: str) -> None:
+    """Persist the single-use CSRF state so /finish can match it on return."""
     response.set_cookie(
         OAUTH_STATE_COOKIE, state,
         max_age=OAUTH_STATE_TTL_SEC, httponly=True, samesite="lax", path="/",
     )
+
+
+def _proxy_redirect(response: Response, state: str, provider: str, purpose: str, installation: str) -> dict:
+    """Set the CSRF state cookie and point the response at the proxy /start."""
+    target = _start_url(state, provider, purpose, installation)
+    response.headers["location"] = target
+    response.status_code = 302
+    _set_state_cookie(response, state)
     return {"redirect": target}
+
+
+async def installation_url(request: Request, session: AsyncSession) -> str:
+    """Public wrapper around the callback origin resolver (see _installation_url)."""
+    return await _installation_url(request, session)
+
+
+def build_account_link_start(response: Response, provider: str, user: str, installation: str) -> str:
+    """Mint a signed ACCOUNT-LINK state, set the CSRF cookie on `response`, and
+    return the proxy /start URL for a caller that wants to open it in a popup
+    (rather than 302-redirect). The proxy `purpose` stays `login` so it hands
+    back the raw provider access token as `code`; the node distinguishes this
+    from an actual login purely by the state's `mode` field."""
+    state = _state_serializer().dumps(
+        {"purpose": "login", "provider": provider, "mode": "account-link", "u": user}
+    )
+    _set_state_cookie(response, state)
+    return _start_url(state, provider, "login", installation)
 
 
 # ───── Provider/settings probes ───────────────────────────────────────────────
@@ -180,10 +210,74 @@ async def oauth_finish(
 
     purpose = payload.get("purpose", "connect")
     provider = (payload.get("provider") or "github").lower()
+    mode = payload.get("mode")
 
+    # ACCOUNT-LINK rides the login round-trip (proxy purpose=login → raw access
+    # token in `code`) but is a distinct flow, chosen by the state's `mode`.
+    if mode == "account-link":
+        return await _finish_account_link(provider, access_token, request, session)
     if purpose == "login":
         return await _finish_login(provider, access_token, response, session)
     return await _finish_connect(access_token, request, session)
+
+
+async def _finish_account_link(provider: str, access_token: str, request: Request, session: AsyncSession) -> dict:
+    """Register (or re-authenticate) a homebox.sh account from a provider access
+    token and link this node to it. Never raises: on failure it returns a
+    browser redirect to /system carrying an `account_error` so the SPA can show
+    it inline, matching the success redirect to /system?account=linked."""
+
+    def _err(msg: str) -> dict:
+        return {"ok": False, "purpose": "account-link",
+                "redirect": f"/system?account_error={quote(msg)}"}
+
+    # Linking an account is privileged — require an existing admin session.
+    if not _read_session(request.cookies.get(settings.session_cookie)):
+        return _err("Sign in before linking an account.")
+
+    # Control plane: the active cluster's stored URL if any, else the default.
+    state = await clusterlib.load_cluster(session)
+    acct = await clusterlib.load_account(session)
+    cp_url = (state.get("control_plane_url") if state else None) or settings.homebox_control_plane_url
+
+    # Node identity for the account label + node registration. Prefer any name
+    # already chosen for this node (account/cluster), else the OS hostname.
+    node_name = (
+        (acct.get("node_name") if acct else None)
+        or (state.get("node_name") if state else None)
+        or socket.gethostname()
+        or "homebox"
+    )
+    peer_url = (acct.get("peer_url") if acct else None) or (state.get("peer_url") if state else None) or ""
+
+    try:
+        reg = await clusterlib._cp(
+            "POST", cp_url, "/v1/accounts/register",
+            body={"provider": provider, "access_token": access_token, "label": f"node {node_name}"},
+        )
+    except clusterlib.ControlPlaneError as e:
+        if e.status_code == 401:
+            return _err("Provider sign-in was rejected. Please try again.")
+        if e.status_code == 502:
+            return _err(f"Couldn't reach {provider.title()}. Please try again.")
+        return _err(e.detail or "Account sign-in failed.")
+
+    account_token = (reg.get("account_token") or "").strip()
+    if not account_token:
+        return _err("The account service returned no token.")
+
+    try:
+        await clusterlib.link_account_flow(
+            session,
+            control_plane_url=cp_url,
+            account_token_plain=account_token,
+            node_name=node_name,
+            peer_url=peer_url,
+        )
+    except clusterlib.ControlPlaneError as e:
+        return _err(e.detail or "Linking this node to the account failed.")
+
+    return {"ok": True, "purpose": "account-link", "redirect": "/system?account=linked"}
 
 
 async def _finish_login(provider: str, access_token: str, response: Response, session: AsyncSession) -> dict:

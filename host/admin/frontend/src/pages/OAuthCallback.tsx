@@ -5,7 +5,7 @@ import { api } from "../lib/api";
 import { useToast } from "../lib/toast";
 
 interface FinishResult {
-  purpose: "login" | "connect";
+  purpose: "login" | "connect" | "account-link";
   redirect: string;
 }
 
@@ -31,6 +31,11 @@ export function OAuthCallback() {
         // New session was issued — refresh auth state and land on the app.
         qc.invalidateQueries({ queryKey: ["me"] });
         nav(res.redirect || "/", { replace: true });
+      } else if (res.purpose === "account-link") {
+        // System page reads ?account=linked / ?account_error=... and handles
+        // messaging (and popup self-close) itself.
+        qc.invalidateQueries({ queryKey: ["cluster"] });
+        nav(res.redirect || "/system", { replace: true });
       } else {
         toast.show("GitHub organization connected", "ok");
         nav(res.redirect || "/projects", { replace: true });

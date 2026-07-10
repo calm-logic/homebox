@@ -511,6 +511,29 @@ the account lacks the `cluster` feature. The node surfaces that 402 verbatim
 (`routes/cluster.py` maps `ControlPlaneError.status_code == 402` to a real 402
 instead of a generic 502) so the UI can show "upgrade to continue".
 
+### Accounts, signup & linking a node
+Creating a homebox.sh account is **free** — you only pay when you choose a plan.
+
+- **Sign up / sign in.** Either on the web at **`homebox.sh/cloud`**, or in-admin
+  via OAuth: the System page opens a popup to
+  `GET /api/cluster/account/oauth-url?provider=github|google`, which rides the
+  same oauth-proxy rails as node login (`routes/oauth.py`). The signed `state`
+  carries `mode=account-link`, so the shared `/oauth/callback` routes it to the
+  account-link branch, which `POST`s the provider access token to
+  `{control_plane}/v1/accounts/register` and links this node with the returned
+  `account_token`. Available providers come from
+  `GET /api/cluster/account/providers` (proxying the oauth-proxy `/providers`).
+- **Choosing / managing a plan** happens entirely on the web
+  (`homebox.sh/cloud`, Stripe). The node never launches checkout:
+  `POST /api/cluster/upgrade` simply returns `{"url": "<HOMEBOX_SITE_URL>/cloud"}`
+  for the UI to open.
+- **Linking a node** to an existing account: use the in-admin OAuth sign-in
+  above, or paste a link token via `POST /api/cluster/account/link` (unchanged).
+
+Feature gating is unchanged — the plan and its `features` are enforced by the
+control plane exactly as described above, regardless of how the account was
+created or the node linked.
+
 ### License object & token verification
 Every create/join/heartbeat response carries a `license`:
 

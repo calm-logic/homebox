@@ -7,7 +7,8 @@ endpoints the Cluster page calls into.
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +16,7 @@ from .. import clusterlib
 from ..auth import require_session_api
 from ..config import settings
 from ..db import get_session
+from .oauth import build_account_link_start, installation_url
 
 log = logging.getLogger("homebox.cluster.api")
 
@@ -334,6 +336,42 @@ async def account_status(
     }
 
 
+@router.get("/account/oauth-url")
+async def account_oauth_url(
+    provider: str,
+    request: Request,
+    response: Response,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Mint the oauth-proxy /start URL for signing in / signing up a homebox.sh
+    account from the admin (the frontend opens {"url"} in a popup). Reuses the
+    node-login OAuth machinery: same signed-state + CSRF cookie, same callback
+    origin — the state carries mode=account-link so /oauth/callback routes it to
+    the account-link branch instead of a node login."""
+    provider = provider.lower()
+    if provider not in ("github", "google"):
+        raise HTTPException(400, "Unknown provider")
+    installation = await installation_url(request, session)
+    url = build_account_link_start(response, provider, user, installation)
+    return {"url": url}
+
+
+@router.get("/account/providers")
+async def account_providers(user: str = Depends(require_session_api)):
+    """Which OAuth providers the proxy can drive, for rendering the sign-in
+    buttons. Falls back to GitHub-only when the proxy is unreachable."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{settings.homebox_oauth_proxy_url}/providers")
+            if r.status_code == 200:
+                data = r.json()
+                return {"github": bool(data.get("github")), "google": bool(data.get("google"))}
+    except (httpx.HTTPError, OSError, ValueError):
+        pass
+    return {"github": True, "google": False}
+
+
 class LinkBody(BaseModel):
     account_token: str
     node_name: str = ""
@@ -508,16 +546,11 @@ async def _account_token(session: AsyncSession) -> tuple[str, str]:
 @router.post("/upgrade")
 async def upgrade(
     user: str = Depends(require_session_api),
-    session: AsyncSession = Depends(get_session),
 ):
-    """Start a billing checkout to upgrade the linked account to Premium.
-    Returns {"url"} to redirect the user to. 503 when billing is unconfigured."""
-    token, cp_url = await _account_token(session)
-    try:
-        resp = await clusterlib._cp("POST", cp_url, "/v1/billing/checkout", token=token)
-    except clusterlib.ControlPlaneError as e:
-        raise _cp_http(e)
-    return {"url": resp.get("url")}
+    """Plan management moved to the website — the node no longer launches Stripe
+    checkout. Always hand back the cloud page URL; the caller redirects there.
+    No account/cluster preconditions."""
+    return {"url": f"{settings.homebox_site_url}/cloud"}
 
 
 async def _mirror_ctx(session: AsyncSession) -> tuple[str, str, str]:
