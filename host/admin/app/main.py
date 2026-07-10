@@ -56,7 +56,7 @@ async def _seed_primary_domain() -> None:
         # No row at all yet — create it as the primary wildcard.
         for d in (await session.execute(select(Domain).where(Domain.is_primary == True))).scalars():
             d.is_primary = False
-        session.add(Domain(name=root, mode="wildcard", is_primary=True, cloudflare_routed=True))
+        session.add(Domain(name=root, is_primary=True, cloudflare_routed=True))
         await session.commit()
 
 
@@ -132,6 +132,10 @@ async def lifespan(app: FastAPI):
         )
         await conn.exec_driver_sql(
             "ALTER TABLE deployments ADD COLUMN IF NOT EXISTS node_id VARCHAR(64)"
+        )
+        await conn.exec_driver_sql(
+            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS domain_mode "
+            "VARCHAR(32) NOT NULL DEFAULT 'container'"
         )
     settings.projects_host_dir.mkdir(parents=True, exist_ok=True)
     await _fail_interrupted_deployments()

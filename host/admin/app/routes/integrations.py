@@ -138,6 +138,29 @@ async def disconnect_integration(
         await session.flush()
         await sync_project_webhook(session, project)
 
+    # Record tombstones for everything this delete cascades away (the
+    # integration and every project under it, plus those projects' services and
+    # environments) so peers/mirrors converge on the removal.
+    from .. import cluster_sync
+    from ..models import Environment, Service
+    all_projects = (await session.execute(
+        select(Project).where(Project.integration_id == integ.id)
+    )).scalars().all()
+    tombs: list[tuple[str, object]] = [
+        ("integration", [integ.provider, integ.account_login]),
+    ]
+    for project in all_projects:
+        tombs.append(("project", project.repo_full_name))
+        for svc in (await session.execute(
+            select(Service).where(Service.project_id == project.id)
+        )).scalars():
+            tombs.append(("service", [project.name, svc.name]))
+        for env in (await session.execute(
+            select(Environment).where(Environment.project_id == project.id)
+        )).scalars():
+            tombs.append(("environment", [project.name, env.name]))
+    await cluster_sync.record_tombstones(session, tombs, commit=False)
+
     await session.delete(integ)  # cascades to projects -> environments/services
     await session.commit()
     return {"ok": True}

@@ -18,7 +18,6 @@ export interface MetricsSummary {
 export interface DomainItem {
   id: number;
   name: string;
-  mode: "wildcard" | "dedicated";
   is_primary: boolean;
   cloudflare_routed: boolean;
   zone_status: "active" | "pending";
@@ -109,7 +108,7 @@ export interface ProjectItem {
   require_checks: boolean;
   domain_id: number | null;
   domain: string | null;
-  domain_mode: "wildcard" | "dedicated" | null;
+  domain_mode: "container" | "base" | null;
   description: string | null;
   dissected_at: string | null;
   detected_stack: { services?: DetectedStackEntry[] };

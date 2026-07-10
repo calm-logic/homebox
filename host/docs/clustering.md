@@ -492,6 +492,125 @@ Phases are independently shippable; each ends in a demo.
 
 ---
 
+## 11a. Premium (plan gating, license verification, cloud mirror)
+
+Clustering and the cloud mirror are **Premium** features. Enforcement is
+deliberately gentle: nothing here ever drains a serving node, tears down the
+mesh, or stops a running app. Gating happens at the *control-plane* boundary
+(you can't create/grow a cluster without the plan) and, once expired, only at
+the *edges of growth* (no new deploys / no new DB subscriptions).
+
+### Plans
+- **Free** — single node, forever. No cluster, no cloud mirror.
+- **Premium** — `features: ["cluster", "cloud-mirror"]`. Multi-node active-active
+  clusters plus an off-site cloud mirror.
+
+The account plan is checked by the control plane. Creating a cluster, minting a
+join token, or inviting a node all **402** (with a human-readable `detail`) when
+the account lacks the `cluster` feature. The node surfaces that 402 verbatim
+(`routes/cluster.py` maps `ControlPlaneError.status_code == 402` to a real 402
+instead of a generic 502) so the UI can show "upgrade to continue".
+
+### License object & token verification
+Every create/join/heartbeat response carries a `license`:
+
+```
+{valid, plan, max_nodes, node_count, features, issued_at, expires_at,
+ grace_days: 14, token: "hbl.<b64url(payload)>.<b64url(ed25519_sig)>"}
+```
+
+The `token` payload is canonical JSON (sorted keys, compact) of
+`{cluster_id, plan, max_nodes, features, issued_at, expires_at}`; the signature
+is **Ed25519 over the exact b64url payload segment bytes**. The node fetches the
+signing key from `GET {control_plane}/v1/license-key` → `{algo, key_id,
+public_key}` and **pins it trust-on-first-use** (settings key `license_pubkey`).
+A later fetch that disagrees with the pin is logged and ignored — a compromised
+control plane can't silently re-key a running cluster.
+
+`licenselib.verify_license(license, pubkey)` returns `(verified, reason)`:
+- valid signature + payload agrees with the outer dict + sane expiry → `verified`
+- no `token` (old/dev control plane) → `(False, "legacy")`, treated as
+  **legacy-valid** so pre-token clusters keep working
+- tampered/mismatched → `(False, "<why>")`
+
+The verdict is stashed on the cluster blob at every license arrival
+(`license_verified`). `license_status(state)` derives the effective view:
+`{plan, features, valid, verified, expires_at, in_grace, expired}`.
+
+### Grace & expiry behavior
+`grace_days` (default 14) defines a grace window after `expires_at`:
+- **in grace** (`expires_at ≤ now < expires_at + grace_days·86400`): a warning is
+  logged once; everything keeps working.
+- **expired** (beyond grace): the cluster loop **skips fanout deploys** and
+  **skips creating new Spock subscriptions** (`ensure_db_replication` is not
+  called that cycle). Existing subscriptions, running apps, ingress, and the
+  mesh are all left untouched. A single "license expired" line is logged per
+  state transition.
+
+Legacy/unsigned licenses never count as expired unless they carry a real
+`expires_at`.
+
+### Node roles: peer vs mirror
+Each node has a role (env `HOMEBOX_NODE_ROLE`, `peer|mirror`, default `peer`),
+sent in the create/join body and echoed in `/peer/ping`. Roster entries carry
+`role` (defaulting to `peer` for pre-role control planes). Mirrors don't count
+toward `max_nodes`.
+
+- **peer** — normal active-active node; serves app traffic.
+- **mirror** — a standby (typically off-site / cloud). After joining it forces
+  `app_serving = False` (drained), but stays hot: it accepts `/peer/deploy` and
+  reconciles like any node, and it replicates DB state. A mirror never
+  originates deploys.
+
+**Auto-failover** (`mirror_failover_tick`, every cluster-loop cycle when
+`role == mirror`): a non-mirror peer is *healthy* only when a live `/peer/ping`
+succeeds **and** reports `serving = True` (unreachable ⇒ not healthy). With **no
+healthy serving peer for 3 consecutive cycles (~180s)** the mirror **promotes**:
+`apply_app_serving(True)`, sets `mirror_promoted = true`, logs loudly. Once a
+healthy serving peer returns for **2 consecutive cycles (~120s)** it **demotes**
+back to standby. Counters live in module memory; the persisted `mirror_promoted`
+flag keeps a mirror that restarts while promoted serving until demote conditions
+are met.
+
+**Last-serving-node guard interaction**: draining the last serving *non-mirror*
+node is now allowed when the roster holds a non-evicted mirror that is online
+(fresh roster entry or a live `/peer/ping`) — the mirror auto-promotes. Both the
+UI guard (`routes/cluster.py`) and the peer guard (`routes/peer.py`) use
+`serving_peers_excluding` (now returning `{node_id, role}` dicts) plus
+`online_mirror_standby`; otherwise they still 409.
+
+### Deletion tombstones (mirror correctness)
+Previously deletions didn't propagate (a mirror could resurrect a deleted
+project). Now each delete path records a `{kind, key, deleted_at}` entry in the
+`cluster_tombstones` setting; `export_state` ships them and `import_state`
+applies a deletion for any tombstone newer than the local row's `updated_at` (or
+unconditionally when the row has no timestamp), then upserts — a row with a
+pending tombstone won't be re-added by a stale peer export in the same import.
+Tombstones are pruned past 30 days and capped at 500. Covered kinds:
+integration (+ its project/environment/service cascade), project, service,
+environment, domain, identity. On import only DB rows are removed (a project
+cascades to its children); running stacks are left to the reconcile/teardown
+logic.
+
+### New /api/cluster endpoints (Premium UI)
+- **`GET /api/cluster`** — extended: `license` now includes the `license_status`
+  fields (`plan, features, valid, verified, expires_at, in_grace, expired`);
+  each roster entry carries `role`; plus top-level `node_role` (this node's
+  role), `mirror` (cached CP mirror status, `{"status": ...}`), and
+  `account_linked: bool`.
+- **`POST /api/cluster/upgrade`** — requires a linked account (else 409 "Link
+  your homebox.sh account first"); calls CP `POST /v1/billing/checkout` with the
+  account token; returns `{"url"}`. Passes through 503 "Billing is not
+  configured".
+- **`GET /api/cluster/mirror`** — proxies CP `GET /v1/clusters/{id}/mirror`
+  (account token; 409 if no account/cluster). Caches the result on the cluster
+  blob (`mirror`) so `GET /api/cluster` can serve it cheaply; the cache is also
+  refreshed in the cluster loop's reconcile branch.
+- **`POST /api/cluster/mirror`** — CP `POST` (enable). **`DELETE`** — CP `DELETE`
+  (disable). Both surface CP 402 detail cleanly.
+
+---
+
 ## 12. Open questions
 
 1. Mode 1 replica behavior on a LAN (all connectors ≈ same distance) — measure actual CF

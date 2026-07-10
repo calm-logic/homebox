@@ -20,12 +20,24 @@ Modes:
           newer-wins comparison). Avoids two nodes ping-ponging stale copies
           of rows that have no timestamp to compare.
 
-Deletions do NOT propagate yet (documented limitation — needs tombstones or
-the Spock-based replication from the design doc).
+Deletions propagate via TOMBSTONES: each delete path records a
+{kind, key, deleted_at} entry in the "cluster_tombstones" setting; export_state
+ships them, and import_state applies a deletion for any tombstone that is newer
+than the local row's updated_at (or unconditionally when the row has no
+timestamp — most cluster entities don't), then upserts as before. A row with a
+pending tombstone won't be re-added by a stale peer export in the same import.
+Tombstones are pruned past 30 days and capped at 500.
+
+Covered kinds: integration (+ its cascade of projects/environments/services),
+project, service, environment, domain, identity. On import a project deletion
+only removes DB rows (cascading to its environments/services/env-vars); a
+running stack is left to the existing reconcile/teardown logic, mirroring how
+import_state never touches stacks directly. Service env vars have no standalone
+tombstone — they follow their service/environment cascade.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -43,6 +55,80 @@ SCHEMA = 1
 # is node-local: install_id, node_keys, cluster, dns_status, …).
 CLUSTER_SETTINGS = ("webhook", "admin_domain")
 
+# ───── deletion tombstones ────────────────────────────────────────────────────
+TOMBSTONES_KEY = "cluster_tombstones"
+TOMBSTONE_MAX_AGE_DAYS = 30
+TOMBSTONE_CAP = 500
+# Composite keys are stored as lists in JSON (project-scoped children).
+TOMBSTONE_KINDS = ("integration", "project", "service", "environment", "domain", "identity")
+
+
+def _canon(kind: str, key: Any) -> tuple:
+    """Hashable canonical form of a tombstone's natural key for indexing."""
+    if isinstance(key, (list, tuple)):
+        return (kind, tuple(key))
+    return (kind, key)
+
+
+async def _get_setting_row(session: AsyncSession, key: str):
+    return (await session.execute(select(Setting).where(Setting.key == key))).scalar_one_or_none()
+
+
+async def _load_tombstones(session: AsyncSession) -> list[dict[str, Any]]:
+    row = await _get_setting_row(session, TOMBSTONES_KEY)
+    return list(row.value) if row and isinstance(row.value, list) else []
+
+
+def _dedup_and_prune(tombs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the newest tombstone per (kind, key), drop any older than
+    TOMBSTONE_MAX_AGE_DAYS, and cap the list at the TOMBSTONE_CAP newest."""
+    cutoff = (datetime.utcnow() - timedelta(days=TOMBSTONE_MAX_AGE_DAYS)).isoformat()
+    newest: dict[tuple, dict[str, Any]] = {}
+    for t in tombs:
+        kind = t.get("kind")
+        if kind not in TOMBSTONE_KINDS or "key" not in t:
+            continue
+        da = t.get("deleted_at") or ""
+        if da and da < cutoff:
+            continue
+        ck = _canon(kind, t["key"])
+        prev = newest.get(ck)
+        if prev is None or (t.get("deleted_at") or "") >= (prev.get("deleted_at") or ""):
+            newest[ck] = t
+    out = sorted(newest.values(), key=lambda t: t.get("deleted_at") or "", reverse=True)
+    return out[:TOMBSTONE_CAP]
+
+
+async def _save_tombstones(session: AsyncSession, tombs: list[dict[str, Any]]) -> None:
+    tombs = _dedup_and_prune(tombs)
+    row = await _get_setting_row(session, TOMBSTONES_KEY)
+    if row is None:
+        session.add(Setting(key=TOMBSTONES_KEY, value=tombs))
+    else:
+        row.value = tombs
+
+
+async def record_tombstone(session: AsyncSession, kind: str, key: Any, *, commit: bool = True) -> None:
+    """Record a single deletion so it propagates to peers. Call from delete
+    paths BEFORE (or right after) the row is removed. `key` is the natural key
+    import_state matches on (str, or a list for project-scoped children)."""
+    await record_tombstones(session, [(kind, key)], commit=commit)
+
+
+async def record_tombstones(session: AsyncSession, entries: list[tuple[str, Any]], *, commit: bool = True) -> None:
+    if not entries:
+        return
+    tombs = await _load_tombstones(session)
+    now = datetime.utcnow().isoformat()
+    for kind, key in entries:
+        if kind not in TOMBSTONE_KINDS:
+            log.warning("ignoring tombstone of unknown kind %r", kind)
+            continue
+        tombs.append({"kind": kind, "key": key, "deleted_at": now})
+    await _save_tombstones(session, tombs)
+    if commit:
+        await session.commit()
+
 
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
@@ -55,6 +141,82 @@ def _parse_dt(s: str | None) -> datetime | None:
         return datetime.fromisoformat(s)
     except ValueError:
         return None
+
+
+async def _apply_tombstones(session: AsyncSession, tombs: list[dict[str, Any]]) -> int:
+    """Delete local rows matched by tombstones. Only DB rows are removed (a
+    project cascades to its environments/services/env-vars via FK); running
+    stacks are left to the reconcile/teardown logic, matching how import_state
+    never touches stacks. Integrations honour updated_at (a locally-newer
+    integration survives a stale tombstone); the other kinds carry no timestamp
+    and delete unconditionally."""
+    deleted = 0
+
+    async def _project_by_name(name: str) -> Project | None:
+        return (await session.execute(
+            select(Project).where(Project.name == name)
+        )).scalar_one_or_none()
+
+    for t in tombs:
+        kind, key = t.get("kind"), t.get("key")
+        try:
+            if kind == "integration":
+                provider, login = (key + [None])[:2] if isinstance(key, list) else (key, None)
+                row = (await session.execute(select(Integration).where(
+                    Integration.provider == provider, Integration.account_login == login,
+                ))).scalar_one_or_none()
+                if row is not None:
+                    da = t.get("deleted_at") or ""
+                    if row.updated_at and da and row.updated_at.isoformat() > da:
+                        continue  # locally newer than the deletion → keep
+                    await session.delete(row)
+                    deleted += 1
+            elif kind == "project":
+                row = (await session.execute(
+                    select(Project).where(Project.repo_full_name == key)
+                )).scalar_one_or_none()
+                if row is not None:
+                    await session.delete(row)
+                    deleted += 1
+            elif kind == "service":
+                proj_name, svc_name = key
+                proj = await _project_by_name(proj_name)
+                if proj is not None:
+                    row = (await session.execute(select(Service).where(
+                        Service.project_id == proj.id, Service.name == svc_name,
+                    ))).scalar_one_or_none()
+                    if row is not None:
+                        await session.delete(row)
+                        deleted += 1
+            elif kind == "environment":
+                proj_name, env_name = key
+                proj = await _project_by_name(proj_name)
+                if proj is not None:
+                    row = (await session.execute(select(Environment).where(
+                        Environment.project_id == proj.id, Environment.name == env_name,
+                    ))).scalar_one_or_none()
+                    if row is not None:
+                        await session.delete(row)
+                        deleted += 1
+            elif kind == "domain":
+                row = (await session.execute(
+                    select(Domain).where(Domain.name == key)
+                )).scalar_one_or_none()
+                if row is not None:
+                    await session.delete(row)
+                    deleted += 1
+            elif kind == "identity":
+                row = (await session.execute(
+                    select(Identity).where(Identity.email == key)
+                )).scalar_one_or_none()
+                if row is not None:
+                    await session.delete(row)
+                    deleted += 1
+        except Exception:  # noqa: BLE001 — one bad tombstone must not abort the sync
+            log.exception("failed applying tombstone %s", t)
+    if deleted:
+        log.info("cluster sync: applied %d deletion(s) from tombstones", deleted)
+    return deleted
 
 
 # ───── export ─────────────────────────────────────────────────────────────────
@@ -90,7 +252,7 @@ async def export_state(session: AsyncSession, node_id: str) -> dict[str, Any]:
         ],
         "domains": [
             {
-                "name": d.name, "mode": d.mode, "is_primary": d.is_primary,
+                "name": d.name, "is_primary": d.is_primary,
                 "cloudflare_routed": d.cloudflare_routed,
                 "zone_status": d.zone_status, "zone_id": d.zone_id,
                 "name_servers": d.name_servers,
@@ -107,6 +269,7 @@ async def export_state(session: AsyncSession, node_id: str) -> dict[str, Any]:
                     if p.integration_id in integ_by_id else None
                 ),
                 "domain_name": domain_by_id[p.domain_id].name if p.domain_id in domain_by_id else None,
+                "domain_mode": p.domain_mode,
                 "managed": p.managed, "auto_deploy": p.auto_deploy,
                 "require_checks": p.require_checks, "description": p.description,
                 "detected_stack": p.detected_stack or {},
@@ -155,6 +318,7 @@ async def export_state(session: AsyncSession, node_id: str) -> dict[str, Any]:
         "identities": [{"email": i.email, "enabled": i.enabled} for i in identities],
         "settings": {},
         "deployments": [],
+        "tombstones": await _load_tombstones(session),
     }
 
     for key in CLUSTER_SETTINGS:
@@ -189,10 +353,35 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
     """Upsert an exported state into the local DB. `mode`: full | deploy | update
     (see module docstring). Returns counters for logging."""
     overwrite = mode in ("full", "deploy")
-    counts = {"added": 0, "updated": 0}
+    counts = {"added": 0, "updated": 0, "deleted": 0}
 
     def bump(created: bool) -> None:
         counts["added" if created else "updated"] += 1
+
+    # ── tombstones: merge incoming into the local store, then apply deletions
+    #    BEFORE upserting. The merged index also blocks a stale peer export from
+    #    re-adding a row that has a pending deletion in this same import.
+    incoming_tombs = data.get("tombstones") or []
+    merged = await _load_tombstones(session) + [
+        t for t in incoming_tombs
+        if isinstance(t, dict) and t.get("kind") in TOMBSTONE_KINDS and "key" in t
+    ]
+    merged = _dedup_and_prune(merged)
+    await _save_tombstones(session, merged)
+    tomb_index: dict[tuple, str] = {
+        _canon(t["kind"], t["key"]): (t.get("deleted_at") or "") for t in merged
+    }
+    counts["deleted"] = await _apply_tombstones(session, merged)
+    await session.commit()
+
+    def _tombstoned(kind: str, key: Any, incoming_ts: datetime | None = None) -> bool:
+        """Whether a pending tombstone should suppress (re-)adding this row."""
+        da = tomb_index.get(_canon(kind, key))
+        if not da:
+            return False
+        if incoming_ts is None:
+            return True  # no timestamp to beat → the tombstone wins
+        return da >= incoming_ts.isoformat()
 
     # integrations — natural key (provider, account_login); newer-wins always
     # (they carry updated_at).
@@ -201,8 +390,10 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
         integ_map[(row.provider, row.account_login)] = row
     for item in data.get("integrations") or []:
         key = (item["provider"], item.get("account_login"))
-        local = integ_map.get(key)
         incoming_ts = _parse_dt(item.get("updated_at"))
+        if _tombstoned("integration", [item["provider"], item.get("account_login")], incoming_ts):
+            continue
+        local = integ_map.get(key)
         if local is None:
             local = Integration(provider=item["provider"], account_login=item.get("account_login"))
             session.add(local)
@@ -227,6 +418,8 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
     }
     saw_primary = False
     for item in data.get("domains") or []:
+        if _tombstoned("domain", item["name"]):
+            continue
         local = domain_map.get(item["name"])
         if local is None:
             local = Domain(name=item["name"])
@@ -237,7 +430,6 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
             continue
         else:
             bump(False)
-        local.mode = item.get("mode") or "wildcard"
         local.is_primary = bool(item.get("is_primary"))
         saw_primary = saw_primary or local.is_primary
         local.cloudflare_routed = bool(item.get("cloudflare_routed"))
@@ -259,6 +451,8 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
     }
     names_in_use = {p.name for p in project_map.values()}
     for item in data.get("projects") or []:
+        if _tombstoned("project", item["repo_full_name"]):
+            continue
         local = project_map.get(item["repo_full_name"])
         if local is None:
             # Respect Project.name uniqueness if an unrelated local project
@@ -281,6 +475,7 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
         dom = domain_map.get(item.get("domain_name") or "")
         local.domain_id = dom.id if dom else None
         local.default_branch = item.get("default_branch") or "main"
+        local.domain_mode = item.get("domain_mode") or "container"
         local.managed = bool(item.get("managed"))
         local.auto_deploy = bool(item.get("auto_deploy"))
         local.require_checks = bool(item.get("require_checks"))
@@ -300,6 +495,8 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
     for item in data.get("environments") or []:
         proj = project_by_name.get(item["project_name"])
         if not proj:
+            continue
+        if _tombstoned("environment", [item["project_name"], item["name"]]):
             continue
         key = (proj.name, item["name"])
         local = env_map.get(key)
@@ -339,6 +536,8 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
     for item in data.get("services") or []:
         proj = project_by_name.get(item["project_name"])
         if not proj:
+            continue
+        if _tombstoned("service", [item["project_name"], item["name"]]):
             continue
         key = (proj.name, item["name"])
         local = svc_map.get(key)
@@ -405,6 +604,8 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
         email = (item.get("email") or "").strip().lower()
         if not email:
             continue
+        if _tombstoned("identity", email):
+            continue
         local = id_map.get(email)
         if local is None:
             session.add(Identity(email=email, enabled=bool(item.get("enabled", True))))
@@ -428,6 +629,6 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
             bump(False)
     await session.commit()
 
-    log.info("cluster sync import (%s): +%d added, %d updated",
-             mode, counts["added"], counts["updated"])
+    log.info("cluster sync import (%s): +%d added, %d updated, %d deleted",
+             mode, counts["added"], counts["updated"], counts["deleted"])
     return counts

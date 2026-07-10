@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, Navigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -8,6 +8,7 @@ import { ArrowLeft, RefreshCw } from "lucide-react";
 import { api } from "../lib/api";
 import { useToast } from "../lib/toast";
 import { Modal } from "../components/Modal";
+import { useTabIndicator } from "../lib/useTabIndicator";
 import type { EnvironmentInfo, MetricsResponse, ProjectDetailData, ServiceItem } from "../lib/types";
 
 const WINDOWS = ["1h", "6h", "24h", "7d"] as const;
@@ -59,6 +60,8 @@ export function ServiceDetail() {
   });
 
   const [envId, setEnvId] = useState<number | null>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  useTabIndicator(tabsRef, ".tab.active", [envId, project?.environments?.length]);
 
   if (isError) return <Navigate to="/projects" replace />;
   if (!project) return <span className="spinner" />;
@@ -84,7 +87,8 @@ export function ServiceDetail() {
       </div>
 
       {/* Environment picker applies to the data/requests sections. */}
-      <div className="tabs" role="tablist" style={{ marginTop: "1rem" }}>
+      <div className="tabs" role="tablist" style={{ marginTop: "1rem" }} ref={tabsRef}>
+        <span className="tab-indicator" aria-hidden />
         {project.environments.map(e => (
           <button key={e.id} role="tab" aria-selected={e.id === env?.id}
             className={`tab ${e.id === env?.id ? "active" : ""}`}

@@ -35,6 +35,9 @@ node_modules/
 dist/
 static_spa/
 
+# Copied into place at build time from host/install.sh (single source of truth)
+cloud/site/public/install.sh
+
 # ── Secrets / local config ───────────────────────────────────────────────────
 .env
 .env.*

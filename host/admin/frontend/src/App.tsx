@@ -17,7 +17,6 @@ import { DeploymentDetail } from "./pages/DeploymentDetail";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { Integrations } from "./pages/Integrations";
 import { IntegrationDetail } from "./pages/IntegrationDetail";
-import { Cluster } from "./pages/Cluster";
 import { Identities } from "./pages/Identities";
 import { Onboarding } from "./pages/Onboarding";
 import { OAuthCallback } from "./pages/OAuthCallback";
@@ -43,10 +42,10 @@ function RequireOnboarded({ children }: { children: React.ReactNode }) {
   });
   // Render nothing during the first probe to avoid a redirect flicker.
   if (isLoading) return null;
-  // /cluster stays reachable pre-onboarding: a fresh node can join an existing
+  // /system stays reachable pre-onboarding: a fresh node can join an existing
   // cluster instead of being onboarded from scratch (it inherits the cluster's
   // tunnel, domains and projects through the join sync).
-  const exempt = location.pathname === "/onboarding" || location.pathname === "/cluster";
+  const exempt = location.pathname === "/onboarding" || location.pathname === "/system";
   if (data && !data.complete && !exempt) {
     return <Navigate to="/onboarding" replace />;
   }
@@ -74,13 +73,14 @@ export function App() {
               <Route path="/projects/:projectId" element={<ProjectDetail />} />
               <Route path="/projects/:projectId/deployments/:deploymentId" element={<DeploymentDetail />} />
               <Route path="/projects/:projectId/services/:serviceId" element={<ServiceDetail />} />
-              <Route path="/cluster" element={<Cluster />} />
+              <Route path="/projects/:projectId/:section" element={<ProjectDetail />} />
               <Route path="/identities" element={<Identities />} />
               {/* Legacy routes — pages were merged into the parents above. */}
               <Route path="/tunnel" element={<Navigate to="/domains" replace />} />
               <Route path="/cicd" element={<Navigate to="/projects" replace />} />
               <Route path="/github" element={<Navigate to="/integrations" replace />} />
               <Route path="/runner" element={<Navigate to="/projects" replace />} />
+              <Route path="/cluster" element={<Navigate to="/system" replace />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

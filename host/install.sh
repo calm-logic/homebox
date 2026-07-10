@@ -3,7 +3,7 @@
 # Homebox One-Liner Installer (macOS / Linux)
 # =============================================================================
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/main/host/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/calm-logic/homebox/main/host/install.sh | bash
 #
 # This script:
 #   1. Detects your platform (macOS or Linux)
@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/aleontiev/homebox.git"
+REPO_URL="https://github.com/calm-logic/homebox.git"
 BRANCH="master"
 
 # ── Colors ───────────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ else
                 warn "Docker Desktop has been installed."
                 warn "Open Docker Desktop from Applications, wait for it to start,"
                 warn "then re-run this installer:"
-                warn "  curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/master/host/install.sh | bash"
+                warn "  curl -fsSL https://raw.githubusercontent.com/calm-logic/homebox/master/host/install.sh | bash"
                 exit 0
             else
                 fail "Install Docker Desktop from https://docker.com/products/docker-desktop or install Homebrew (https://brew.sh) first."

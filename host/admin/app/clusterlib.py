@@ -50,11 +50,22 @@ ACCOUNT_OVERVIEW_KEY = "account_overview"
 INSTALL_ID_KEY = "install_id"
 ADMIN_DOMAIN_KEY = "admin_domain"
 APP_SERVING_KEY = "app_serving"  # False → this node is drained of app traffic
+MIRROR_PROMOTED_KEY = "mirror_promoted"  # True → a mirror node has auto-promoted to serving
+MIRROR_CACHE_KEY = "mirror"      # cached CP mirror status (for cheap /api/cluster reads)
 
 VERSION = "0.2-cluster"
 LOOP_INTERVAL = 60          # heartbeat cadence (seconds)
 RECONCILE_EVERY = 5         # deployment reconcile every N cycles
 PEER_TOKEN_WINDOW = 600     # peer auth token validity (seconds)
+
+# Mirror failover thresholds (in cluster_loop ticks ≈ LOOP_INTERVAL seconds).
+MIRROR_PROMOTE_TICKS = 3    # ~180s of no healthy serving peer → promote
+MIRROR_DEMOTE_TICKS = 2     # ~120s of a healthy serving peer → demote
+
+# In-memory failover counters (module state; not persisted — see mirror_failover_tick).
+_mirror_unhealthy_streak = 0
+_mirror_healthy_streak = 0
+_license_state_logged: str | None = None  # last license-state string we logged
 
 
 # ───── settings-table helpers ─────────────────────────────────────────────────
@@ -103,7 +114,96 @@ async def apply_app_serving(session: AsyncSession, serving: bool) -> dict[str, A
         return {"serving": True, "connector": "no token (tunnel not configured)"}
     ok, msg = await asyncio.to_thread(run_cloudflared_remote, token)
     return {"serving": True, "connector": "started" if ok else f"start failed: {msg}"}
-    await session.commit()
+
+
+def roster_role(entry: dict[str, Any]) -> str:
+    """This roster entry's cluster role, defaulting to 'peer' for pre-role
+    control planes / older nodes that never advertised one."""
+    role = (entry or {}).get("role")
+    return role if role in ("peer", "mirror") else "peer"
+
+
+async def serving_peers_excluding(
+    session: AsyncSession, state: dict[str, Any], target_node_id: str
+) -> list[dict[str, Any]]:
+    """Cluster members OTHER than `target` CONFIRMED to be serving app traffic
+    right now, each annotated {node_id, role}. Callers use this to refuse
+    draining the LAST serving node — otherwise every connector goes down and the
+    shared tunnel has nowhere to route.
+
+    Self is judged by the authoritative local flag. Each PEER is checked LIVE
+    over the peer API rather than trusting the roster: the roster's `serving`
+    flag lags a heartbeat, and that stale window is exactly what let a rapid
+    "disable both" slip past. A peer we can't reach doesn't count — refusing the
+    drain is far safer than risking full downtime.
+
+    Returns dicts (not bare ids) so the last-serving-node guards can tell a peer
+    from a mirror: draining the last serving NON-MIRROR node is allowed when an
+    online mirror is standing by to auto-promote."""
+    self_id = await get_node_id(session)
+    secret = cluster_secret(state)
+    out: list[dict[str, Any]] = []
+    for n in state.get("roster") or []:
+        nid = n.get("node_id")
+        if not nid or nid == target_node_id:
+            continue
+        role = roster_role(n)
+        if nid == self_id:
+            if await get_app_serving(session):
+                out.append({"node_id": nid, "role": role})
+            continue
+        peer_url = n.get("peer_url")
+        if not peer_url:
+            continue
+        try:
+            resp = await peer_request(
+                "GET", peer_url, "/peer/ping",
+                secret=secret, self_node_id=self_id, timeout=8,
+            )
+        except PeerError:
+            continue  # unreachable → can't confirm it's serving → don't count it
+        if resp.get("serving") is not False:  # older peers omit the field → assume serving
+            out.append({"node_id": nid, "role": resp.get("role") or role})
+    return out
+
+
+def _roster_fresh(entry: dict[str, Any]) -> bool:
+    """Whether a roster entry looks online: the CP's `online` flag, or a
+    last_seen within ~2 heartbeats when it's provided instead."""
+    if entry.get("online"):
+        return True
+    last_seen = entry.get("last_seen")
+    if not last_seen:
+        return False
+    from . import licenselib
+    ts = licenselib._to_epoch(last_seen)
+    return ts is not None and (time.time() - ts) < LOOP_INTERVAL * 2.5
+
+
+async def online_mirror_standby(
+    session: AsyncSession, state: dict[str, Any], target_node_id: str,
+) -> bool:
+    """True when the roster holds a non-evicted MIRROR (other than target) that
+    is online — via a fresh roster entry or a live /peer/ping. Such a mirror
+    will auto-promote, so draining the last serving non-mirror node is safe."""
+    self_id = await get_node_id(session)
+    secret = cluster_secret(state)
+    for n in state.get("roster") or []:
+        nid = n.get("node_id")
+        if not nid or nid == target_node_id or roster_role(n) != "mirror":
+            continue
+        if _roster_fresh(n):
+            return True
+        peer_url = n.get("peer_url")
+        if not peer_url or nid == self_id:
+            continue
+        try:
+            await peer_request("GET", peer_url, "/peer/ping",
+                               secret=secret, self_node_id=self_id, timeout=8)
+            return True
+        except PeerError:
+            continue
+    return False
 
 
 async def get_node_id(session: AsyncSession) -> str:
@@ -162,7 +262,15 @@ def peers(state: dict[str, Any], self_node_id: str) -> list[dict[str, Any]]:
 
 
 class ControlPlaneError(Exception):
-    pass
+    """A control-plane call failed. Carries the HTTP status (when there was a
+    response) and the CP's human-readable detail so routes can propagate a clean
+    402 (plan gating) or other status instead of collapsing everything to 500."""
+
+    def __init__(self, message: str, *, status_code: int | None = None,
+                 detail: str | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail or message
 
 
 async def _cp(method: str, base: str, path: str, *, token: str | None = None,
@@ -179,7 +287,10 @@ async def _cp(method: str, base: str, path: str, *, token: str | None = None,
             detail = r.json().get("detail")
         except ValueError:
             detail = r.text[:200]
-        raise ControlPlaneError(f"control plane: {detail} (HTTP {r.status_code})")
+        raise ControlPlaneError(
+            f"control plane: {detail} (HTTP {r.status_code})",
+            status_code=r.status_code, detail=detail,
+        )
     return r.json()
 
 
@@ -274,7 +385,8 @@ async def create_cluster_flow(
                      token=account_token_plain,
                      body={"name": name, "node_id": node_id, "node_name": node_name,
                            "pubkey": pub, "peer_url": peer_url, "version": VERSION,
-                           "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT})
+                           "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT,
+                           "role": settings.node_role})
     state = {
         "cluster_id": resp["cluster_id"],
         "name": resp["name"],
@@ -289,6 +401,8 @@ async def create_cluster_flow(
         "initial_sync_done": True,  # seed node IS the source of truth
         "joined_at": datetime.utcnow().isoformat(),
     }
+    from . import licenselib
+    await licenselib.record_license_verification(session, state, control_plane_url.rstrip("/"))
     await save_cluster(session, state)
     # Make the current keys explicit on disk so every future boot (and any
     # compose recreate with stale env) stays on the cluster keys.
@@ -353,7 +467,8 @@ async def join_cluster_flow(
                     body={"join_token": join_token, "node_id": node_id,
                           "node_name": node_name, "pubkey": pub,
                           "peer_url": peer_url, "version": VERSION,
-                          "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT})
+                          "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT,
+                          "role": settings.node_role})
 
     donors = [n for n in reg["nodes"] if n["node_id"] != node_id and n.get("peer_url")]
     if not donors:
@@ -403,8 +518,16 @@ async def join_cluster_flow(
         "initial_sync_done": False,
         "joined_at": datetime.utcnow().isoformat(),
     }
+    from . import licenselib
+    await licenselib.record_license_verification(session, state, control_plane_url.rstrip("/"))
     await save_cluster(session, state)
     _write_cluster_keys(new_enc, new_app)
+    # A mirror node runs drained (standby): it stays hot via replication + peer
+    # deploys but never serves app traffic until it auto-promotes on failover.
+    if settings.node_role == "mirror":
+        await _set_setting(session, APP_SERVING_KEY, False)
+        await _set_setting(session, MIRROR_PROMOTED_KEY, False)
+        await session.commit()
     await ensure_peer_route(session)
     restart_self_soon()
     return state
@@ -641,6 +764,8 @@ async def _heartbeat(session: AsyncSession, state: dict[str, Any]) -> dict[str, 
     )
     state["roster"] = resp["nodes"]
     state["license"] = resp.get("license")
+    from . import licenselib
+    await licenselib.record_license_verification(session, state, state["control_plane_url"])
     state["last_heartbeat"] = datetime.utcnow().isoformat()
     await save_cluster(session, state)
     return state
@@ -807,6 +932,15 @@ async def fanout_deploy(project_name: str, env_name: str, commit_sha: str | None
         state = await load_cluster(session)
         if not state or not state.get("initial_sync_done"):
             return
+        # License gate (gentle): an expired license (beyond grace) stops NEW
+        # fan-out but never touches what's already running. A mirror never
+        # originates deploys.
+        from . import licenselib
+        if licenselib.license_status(state).get("expired"):
+            log.warning("fanout skipped: license expired (beyond grace) — existing deploys untouched")
+            return
+        if settings.node_role == "mirror":
+            return
         node_id = await get_node_id(session)
         secret = cluster_secret(state)
         my_url = state.get("peer_url") or ""
@@ -875,6 +1009,126 @@ async def check_network_conflicts(session: AsyncSession, state: dict[str, Any]) 
     return conflicts
 
 
+# ───── mirror mode (standby node with auto-failover) ─────────────────────────
+
+
+async def _healthy_serving_nonmirror_peer(
+    session: AsyncSession, state: dict[str, Any],
+) -> bool:
+    """True when at least one NON-MIRROR peer is healthy: a live /peer/ping
+    succeeds AND it reports serving=True. Unreachable ⇒ not healthy (that's what
+    lets a mirror promote when the peers are actually down). Falls back to a
+    fresh roster entry that shows serving only when a live check isn't possible
+    to attempt (no peer_url)."""
+    self_id = await get_node_id(session)
+    secret = cluster_secret(state)
+    for n in state.get("roster") or []:
+        nid = n.get("node_id")
+        if not nid or nid == self_id or roster_role(n) != "peer":
+            continue
+        peer_url = n.get("peer_url")
+        if peer_url:
+            try:
+                resp = await peer_request("GET", peer_url, "/peer/ping",
+                                          secret=secret, self_node_id=self_id, timeout=8)
+            except PeerError:
+                continue  # unreachable → not healthy
+            if resp.get("serving") is not False:
+                return True
+            continue
+        # No peer_url to ping: trust a fresh roster entry that still shows serving.
+        if _roster_fresh(n) and n.get("serving") is not False:
+            return True
+    return False
+
+
+async def mirror_failover_tick(session: AsyncSession, state: dict[str, Any]) -> None:
+    """One failover evaluation for a mirror node (called each cluster_loop cycle
+    when role==mirror). Promotes to serving after MIRROR_PROMOTE_TICKS
+    consecutive cycles with NO healthy serving non-mirror peer, and demotes back
+    to standby after MIRROR_DEMOTE_TICKS consecutive cycles once a healthy
+    serving peer reappears. Counters live in module memory; the persisted
+    `mirror_promoted` flag keeps a restarted-while-promoted mirror serving until
+    demote conditions are met."""
+    global _mirror_unhealthy_streak, _mirror_healthy_streak
+    healthy = await _healthy_serving_nonmirror_peer(session, state)
+    promoted = bool(await _get_setting(session, MIRROR_PROMOTED_KEY))
+
+    if healthy:
+        _mirror_healthy_streak += 1
+        _mirror_unhealthy_streak = 0
+    else:
+        _mirror_unhealthy_streak += 1
+        _mirror_healthy_streak = 0
+
+    if not promoted:
+        if not healthy and _mirror_unhealthy_streak >= MIRROR_PROMOTE_TICKS:
+            log.error(
+                "MIRROR FAILOVER: no healthy serving peer for %d cycles — PROMOTING "
+                "this mirror to serve app traffic", _mirror_unhealthy_streak,
+            )
+            await apply_app_serving(session, True)
+            await _set_setting(session, MIRROR_PROMOTED_KEY, True)
+            await session.commit()
+            _mirror_unhealthy_streak = 0
+    else:
+        if healthy and _mirror_healthy_streak >= MIRROR_DEMOTE_TICKS:
+            log.warning(
+                "MIRROR: healthy serving peer back for %d cycles — DEMOTING this "
+                "mirror to standby", _mirror_healthy_streak,
+            )
+            await apply_app_serving(session, False)
+            await _set_setting(session, MIRROR_PROMOTED_KEY, False)
+            await session.commit()
+            _mirror_healthy_streak = 0
+
+
+async def refresh_mirror_status(session: AsyncSession, state: dict[str, Any]) -> dict[str, Any] | None:
+    """Refresh the cached cloud-mirror status from the control plane (account
+    token) and stash it under state["mirror"] so GET /api/cluster can serve it
+    cheaply. Best-effort; returns the status dict or None."""
+    acct = account_token(state)
+    if not acct:
+        blob = await load_account(session)
+        acct = crypto.decrypt(blob["token_encrypted"]) if blob else ""
+    if not acct or not state.get("cluster_id"):
+        return None
+    try:
+        status = await _cp("GET", state["control_plane_url"],
+                           f"/v1/clusters/{state['cluster_id']}/mirror", token=acct)
+    except ControlPlaneError as e:
+        log.warning("mirror status refresh failed: %s", e)
+        return None
+    state[MIRROR_CACHE_KEY] = status
+    await save_cluster(session, state)
+    return status
+
+
+def _log_license_state_once(state: dict[str, Any]) -> None:
+    """Log a license-state transition (expired / in-grace / ok) at most once per
+    change, so the loop doesn't spam every cycle."""
+    global _license_state_logged
+    from . import licenselib
+    st = licenselib.license_status(state)
+    if st["expired"]:
+        tag = "expired"
+    elif st["in_grace"]:
+        tag = "grace"
+    else:
+        tag = "ok"
+    if tag == _license_state_logged:
+        return
+    _license_state_logged = tag
+    if tag == "expired":
+        log.error("LICENSE EXPIRED (beyond %s-day grace): new deploys and new DB "
+                  "subscriptions are paused; running apps and the mesh are untouched. "
+                  "Renew at your homebox.sh account.",
+                  (state.get("license") or {}).get("grace_days", licenselib.GRACE_DAYS_DEFAULT))
+    elif tag == "grace":
+        log.warning("LICENSE in grace period (expired but within grace) — renew soon "
+                    "to avoid pausing new deploys.")
+
+
 async def cluster_loop() -> None:
     cycle = 0
     while True:
@@ -892,16 +1146,29 @@ async def cluster_loop() -> None:
                         state = await _heartbeat(session, state)
                     except ControlPlaneError as e:
                         log.warning("heartbeat failed (data plane unaffected): %s", e)
+                    # License gate (gentle): an expired license (beyond grace)
+                    # pauses NEW Spock subscriptions; existing ones and running
+                    # apps are never touched, and the mesh is never torn down.
+                    from . import licenselib
+                    _log_license_state_once(state)
+                    lic_expired = licenselib.license_status(state).get("expired")
                     if not state.get("initial_sync_done"):
                         await initial_sync(session, state)
                     elif cycle % RECONCILE_EVERY == 0:
                         await reconcile_from_peers(session, state)
-                        await ensure_db_replication(session, state)
+                        if not lic_expired:
+                            await ensure_db_replication(session, state)
+                        else:
+                            log.warning("license expired — skipping new DB subscription "
+                                        "creation (existing replication untouched)")
                         # Keep the admin/peer Traefik routes current (cheap,
                         # idempotent — heals a route file written before
                         # admin_domain was known).
                         await ensure_peer_route(session)
                         await check_network_conflicts(session, state)
+                        # Refresh the cached cloud-mirror status for cheap
+                        # /api/cluster reads (best-effort).
+                        await refresh_mirror_status(session, state)
                     # WireGuard mesh: reconcile every cycle (cheap; peer
                     # endpoints/keys change as the roster does). Best-effort.
                     if state.get("initial_sync_done"):
@@ -910,6 +1177,12 @@ async def cluster_loop() -> None:
                             await meshlib.ensure_mesh(session, state)
                         except Exception:  # noqa: BLE001
                             log.exception("mesh reconcile failed")
+                    # Mirror node: evaluate auto-failover every cycle.
+                    if settings.node_role == "mirror" and state.get("initial_sync_done"):
+                        try:
+                            await mirror_failover_tick(session, state)
+                        except Exception:  # noqa: BLE001
+                            log.exception("mirror failover tick failed")
                 # Account link is independent of membership: keeps the
                 # overview cache fresh and executes pending join directives
                 # (an invite issued from another node).

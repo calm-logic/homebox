@@ -261,7 +261,7 @@ async def _assemble_stack(
     rd: Path, project: Project, env: Environment, domain_name: str,
     detected: list[dissect.DetectedService], user_env: dict[str, dict[str, str]],
     cluster_ctx: dict[str, Any] | None = None,
-    *, dedicated: bool = False,
+    *, base: bool = False,
 ) -> tuple[Path, dict[str, dict]]:
     """Build a single compose for the (project, env): compose-origin backing
     services reused as-is (ports stripped, joined to traefik-net), build-origin
@@ -292,19 +292,19 @@ async def _assemble_stack(
     services_out: dict[str, Any] = {}
     plan: dict[str, dict] = {}
 
-    # Entry host: on a DEDICATED domain the domain root (or <env>.<domain>) is
+    # Entry host: on a BASE domain the domain root (or <env>.<domain>) is
     # the single hostname for the whole env — non-main public services are
-    # path-proxied under it (infinitescroll.io/api). On a wildcard domain each
+    # path-proxied under it (infinitescroll.io/api). On a container domain each
     # service gets its own derived hostname, with /api additionally path-routed
     # on the main host (path_prefix).
-    entry_host = urls.full_host(project.name, "", env.slug_suffix, domain_name, dedicated=dedicated)
+    entry_host = urls.full_host(project.name, "", env.slug_suffix, domain_name, base=base)
     main_host = entry_host if any(x.is_public and not x.subdomain_label for x in detected) else None
 
     for d in detected:
         path: str | None = None
         if not d.is_public:
             host = None
-        elif dedicated:
+        elif base:
             host = entry_host
             if d.subdomain_label:
                 path = d.path_prefix or f"/{d.subdomain_label}"
@@ -344,7 +344,7 @@ async def _assemble_stack(
         if d.is_public and host:
             router = _router_name(project.name, d.subdomain_label, env.name)
             if path:
-                # Dedicated domain: this service lives at <entry host><path>.
+                # Base domain: this service lives at <entry host><path>.
                 labels = {
                     "traefik.enable": "true",
                     f"traefik.http.routers.{router}.rule": f"Host(`{host}`) && PathPrefix(`{path}`)",
@@ -358,7 +358,7 @@ async def _assemble_stack(
                     plan[d.name]["cluster_db"] = cluster_db_info
                 continue
             labels = _traefik_labels(router, host, port)
-            if not dedicated and d.path_prefix and main_host and main_host != host:
+            if not base and d.path_prefix and main_host and main_host != host:
                 # Same-origin path route: <main host><prefix> → this service.
                 # Traefik prefers the longer (more specific) rule, so this wins
                 # over the main service's bare Host rule for matching paths.
@@ -560,7 +560,7 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
     domain_obj = env_domain or (await session.get(Domain, project.domain_id) if project.domain_id else None)
     effective_domain = domain_obj or primary
     domain_name = effective_domain.name if effective_domain else None
-    dedicated = bool(effective_domain and effective_domain.mode == "dedicated")
+    base = project.domain_mode == "base"
     if not domain_name:
         raise DeployError("No domain configured. Set a primary domain (Routes) or assign one to this project.")
     if not project.integration_id:
@@ -602,7 +602,7 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
     # (Nixpacks/Dockerfile/static). Raises if no public app was detected.
     compose_path, plan = await _assemble_stack(
         rd, project, env, domain_name, detected, user_env, cluster_ctx,
-        dedicated=dedicated,
+        base=base,
     )
 
     _touch(dep, status="starting")

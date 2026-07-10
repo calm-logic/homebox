@@ -114,6 +114,11 @@ async def dissect_project(session: AsyncSession, project: Project) -> list[disse
             session.add(ServiceEnvVar(service_id=svc.id, key=k, value=v, source="auto"))
     for name, svc in existing.items():
         if name not in seen:
+            # Record a tombstone so peers drop the vanished service too.
+            from .. import cluster_sync
+            await cluster_sync.record_tombstone(
+                session, "service", [project.name, svc.name], commit=False,
+            )
             await session.delete(svc)
 
     project.detected_stack = {
@@ -205,7 +210,7 @@ def _serialize_project(p: Project, integration: Integration | None, domain: Doma
         "require_checks": p.require_checks,
         "domain_id": p.domain_id,
         "domain": domain.name if domain else None,
-        "domain_mode": domain.mode if domain else None,
+        "domain_mode": p.domain_mode,
         "description": p.description,
         "dissected_at": p.dissected_at.isoformat() if p.dissected_at else None,
         "detected_stack": p.detected_stack or {},
@@ -322,6 +327,7 @@ async def release_project(
 class PatchBody(BaseModel):
     name: str | None = None
     domain_id: int | None = None
+    domain_mode: str | None = None
     auto_deploy: bool | None = None
     require_checks: bool | None = None
 
@@ -348,6 +354,10 @@ async def patch_project(
         if body.domain_id and not await session.get(Domain, body.domain_id):
             raise HTTPException(404, "Domain not found.")
         p.domain_id = body.domain_id or None
+    if body.domain_mode is not None:
+        if body.domain_mode not in ("container", "base"):
+            raise HTTPException(400, "domain_mode must be container or base")
+        p.domain_mode = body.domain_mode
     if body.auto_deploy is not None:
         p.auto_deploy = body.auto_deploy
     if body.require_checks is not None:

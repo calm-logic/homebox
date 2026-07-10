@@ -5,6 +5,7 @@ endpoints the Cluster page calls into.
 """
 
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -19,6 +20,27 @@ log = logging.getLogger("homebox.cluster.api")
 
 router = APIRouter(prefix="/api/cluster")
 
+# When this node toggles a PEER's serving state, the peer applies it instantly
+# but the roster (control plane) only reflects it a heartbeat later — so the UI
+# would show stale "enabled" until then. Remember the intent locally and overlay
+# it into /api/cluster until the roster agrees (or a safety TTL elapses). Node-
+# local + in-memory on purpose: it's this UI's belief, not cluster state, so it
+# must not replicate. Self is handled separately via the authoritative flag.
+_peer_serving_overrides: dict[str, tuple[bool, float]] = {}  # node_id -> (serving, set_at)
+_OVERRIDE_TTL = 300.0  # seconds — cap in case the roster never catches up
+
+
+def _cp_http(e: clusterlib.ControlPlaneError) -> HTTPException:
+    """Map a control-plane error to a clean HTTP response, PRESERVING plan-gating
+    (402) and other meaningful statuses with the CP's human-readable detail —
+    instead of collapsing everything to a generic 502/500. Unreachable/no-status
+    errors stay 502 (bad gateway)."""
+    if e.status_code == 402:
+        return HTTPException(402, e.detail)
+    if e.status_code == 503:
+        return HTTPException(503, e.detail)
+    return HTTPException(502, str(e))
+
 
 @router.get("")
 async def cluster_status(
@@ -31,26 +53,57 @@ async def cluster_status(
         return {
             "active": False,
             "node_id": node_id,
+            "node_role": settings.node_role,
+            "account_linked": await clusterlib.load_account(session) is not None,
             "control_plane_url": settings.homebox_control_plane_url,
         }
-    # Overlay this node's authoritative serving state onto its roster entry so
-    # the acting node's UI reflects a drain immediately, without waiting for the
-    # heartbeat→control-plane→roster round-trip (peers reflect on the next poll).
+    # Overlay serving state so the UI reflects a toggle immediately, without
+    # waiting for the heartbeat→control-plane→roster round-trip:
+    #  - this node: its authoritative local flag
+    #  - a peer we just toggled: the remembered intent, until the roster agrees
     serving = await clusterlib.get_app_serving(session)
-    roster = [
-        {**n, "serving": serving} if n.get("node_id") == node_id else n
-        for n in (state.get("roster") or [])
-    ]
+    now = time.time()
+    roster = []
+    for n in (state.get("roster") or []):
+        nid = n.get("node_id")
+        # Always surface a role on every entry (default 'peer' for pre-role CPs).
+        n = {**n, "role": clusterlib.roster_role(n)}
+        if nid == node_id:
+            roster.append({**n, "serving": serving})
+            continue
+        ov = _peer_serving_overrides.get(nid)
+        if ov is not None:
+            ov_serving, ov_ts = ov
+            if now - ov_ts > _OVERRIDE_TTL or bool(n.get("serving")) == ov_serving:
+                _peer_serving_overrides.pop(nid, None)  # roster caught up (or TTL) → drop
+                roster.append(n)
+            else:
+                roster.append({**n, "serving": ov_serving})
+        else:
+            roster.append(n)
+
+    # License: the stored dict extended with derived status fields (plan,
+    # features, valid, verified, expires_at, in_grace, expired).
+    from .. import licenselib
+    status = licenselib.license_status(state)
+    lic = dict(state.get("license") or {})
+    lic.update(status)
+
+    account_linked = await clusterlib.load_account(session) is not None
+    mirror_cache = state.get(clusterlib.MIRROR_CACHE_KEY)
     return {
         "active": True,
         "node_id": node_id,
         "cluster_id": state["cluster_id"],
         "name": state.get("name"),
         "node_name": state.get("node_name"),
+        "node_role": settings.node_role,
         "peer_url": state.get("peer_url"),
         "control_plane_url": state.get("control_plane_url"),
         "roster": roster,
-        "license": state.get("license"),
+        "license": lic,
+        "mirror": mirror_cache if isinstance(mirror_cache, dict) else {"status": "none"},
+        "account_linked": account_linked,
         "initial_sync_done": bool(state.get("initial_sync_done")),
         "last_heartbeat": state.get("last_heartbeat"),
         "last_sync_at": state.get("last_sync_at"),
@@ -87,7 +140,7 @@ async def create_cluster(
             node_name=body.node_name.strip(),
         )
     except clusterlib.ControlPlaneError as e:
-        raise HTTPException(502, str(e))
+        raise _cp_http(e)
     return {"ok": True, "cluster_id": state["cluster_id"]}
 
 
@@ -142,7 +195,7 @@ async def mint_join_token(
             token=acct,
         )
     except clusterlib.ControlPlaneError as e:
-        raise HTTPException(502, str(e))
+        raise _cp_http(e)
     return resp
 
 
@@ -225,12 +278,24 @@ async def set_node_serving(
     LAN peer API — which stays reachable because draining only stops the app
     connector, not the admin/control-plane path."""
     node_id = await clusterlib.get_node_id(session)
-    if body.node_id == node_id:
-        result = await clusterlib.apply_app_serving(session, body.serving)
-        return {"ok": True, "node_id": node_id, **result}
     state = await clusterlib.load_cluster(session)
     if not state:
         raise HTTPException(404, "This node is not part of a cluster.")
+    # Never let the cluster lose ALL app ingress: refuse to drain the last node
+    # that's still serving. At least one connector must stay up for the shared
+    # tunnel to have somewhere to route — UNLESS an online mirror is standing by,
+    # in which case draining the last serving peer is safe (the mirror
+    # auto-promotes within ~3 cycles).
+    if not body.serving and not await clusterlib.serving_peers_excluding(session, state, body.node_id):
+        if not await clusterlib.online_mirror_standby(session, state, body.node_id):
+            raise HTTPException(
+                409,
+                "Can't disable the last serving node — at least one node must keep "
+                "serving app traffic. Enable another node (or add an online mirror) first.",
+            )
+    if body.node_id == node_id:
+        result = await clusterlib.apply_app_serving(session, body.serving)
+        return {"ok": True, "node_id": node_id, **result}
     peer = next((n for n in state.get("roster") or [] if n.get("node_id") == body.node_id), None)
     if not peer or not peer.get("peer_url"):
         raise HTTPException(404, "Unknown node or it has no peer URL.")
@@ -242,6 +307,8 @@ async def set_node_serving(
         )
     except clusterlib.PeerError as e:
         raise HTTPException(502, str(e))
+    # Remember the intent so this UI shows the peer's new state right away.
+    _peer_serving_overrides[body.node_id] = (body.serving, time.time())
     return {"ok": True, "node_id": body.node_id, **resp}
 
 
@@ -349,7 +416,7 @@ async def account_create_cluster(
             node_name=acct.get("node_name") or "",
         )
     except clusterlib.ControlPlaneError as e:
-        raise HTTPException(502, str(e))
+        raise _cp_http(e)
     return {"ok": True, "cluster_id": state["cluster_id"]}
 
 
@@ -384,7 +451,9 @@ async def account_join_cluster(
             peer_url=acct.get("peer_url") or "",
             node_name=acct.get("node_name") or "",
         )
-    except (clusterlib.ControlPlaneError, clusterlib.PeerError) as e:
+    except clusterlib.ControlPlaneError as e:
+        raise _cp_http(e)
+    except clusterlib.PeerError as e:
         raise HTTPException(502, str(e))
     return {"ok": True, "cluster_id": state["cluster_id"], "restarting": True}
 
@@ -419,5 +488,91 @@ async def account_invite(
             body={"node_id": body.node_id},
         )
     except clusterlib.ControlPlaneError as e:
-        raise HTTPException(502, str(e))
+        raise _cp_http(e)
     return {"ok": True, "invited": body.node_id, "cluster_id": cluster_id}
+
+
+# ───── premium: billing upgrade + cloud mirror ────────────────────────────────
+
+
+async def _account_token(session: AsyncSession) -> tuple[str, str]:
+    """(account token plain, control_plane_url) for the linked homebox.sh
+    account, or raise 409 if unlinked."""
+    from .. import crypto
+    acct = await clusterlib.load_account(session)
+    if not acct:
+        raise HTTPException(409, "Link your homebox.sh account first")
+    return crypto.decrypt(acct["token_encrypted"]), acct["control_plane_url"]
+
+
+@router.post("/upgrade")
+async def upgrade(
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Start a billing checkout to upgrade the linked account to Premium.
+    Returns {"url"} to redirect the user to. 503 when billing is unconfigured."""
+    token, cp_url = await _account_token(session)
+    try:
+        resp = await clusterlib._cp("POST", cp_url, "/v1/billing/checkout", token=token)
+    except clusterlib.ControlPlaneError as e:
+        raise _cp_http(e)
+    return {"url": resp.get("url")}
+
+
+async def _mirror_ctx(session: AsyncSession) -> tuple[str, str, str]:
+    """(account_token, control_plane_url, cluster_id) for mirror calls; 409 when
+    no account is linked or this node isn't in a cluster."""
+    token, cp_url = await _account_token(session)
+    state = await clusterlib.load_cluster(session)
+    if not state:
+        raise HTTPException(409, "This node is not part of a cluster.")
+    return token, state["control_plane_url"], state["cluster_id"]
+
+
+@router.get("/mirror")
+async def mirror_status(
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Cloud-mirror status for this cluster (proxied from the control plane)."""
+    token, cp_url, cluster_id = await _mirror_ctx(session)
+    try:
+        resp = await clusterlib._cp("GET", cp_url, f"/v1/clusters/{cluster_id}/mirror", token=token)
+    except clusterlib.ControlPlaneError as e:
+        raise _cp_http(e)
+    # Refresh the cheap-read cache on the cluster blob too.
+    state = await clusterlib.load_cluster(session)
+    if state is not None:
+        state[clusterlib.MIRROR_CACHE_KEY] = resp
+        await clusterlib.save_cluster(session, state)
+        await session.commit()
+    return resp
+
+
+@router.post("/mirror")
+async def mirror_enable(
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Enable the cloud mirror for this cluster (Premium)."""
+    token, cp_url, cluster_id = await _mirror_ctx(session)
+    try:
+        resp = await clusterlib._cp("POST", cp_url, f"/v1/clusters/{cluster_id}/mirror", token=token)
+    except clusterlib.ControlPlaneError as e:
+        raise _cp_http(e)
+    return resp
+
+
+@router.delete("/mirror")
+async def mirror_disable(
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Disable the cloud mirror for this cluster."""
+    token, cp_url, cluster_id = await _mirror_ctx(session)
+    try:
+        resp = await clusterlib._cp("DELETE", cp_url, f"/v1/clusters/{cluster_id}/mirror", token=token)
+    except clusterlib.ControlPlaneError as e:
+        raise _cp_http(e)
+    return resp

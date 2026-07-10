@@ -1,7 +1,7 @@
-import { useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useRef, useState } from "react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { LogOut, Moon, Sun, Globe, Boxes, Workflow, Users, Plug, Activity, Network } from "lucide-react";
+import { LogOut, Moon, Sun, Globe, Boxes, Workflow, Users, Plug, Activity } from "lucide-react";
 
 import { Logo } from "./Logo";
 import { Modal } from "./Modal";
@@ -10,6 +10,7 @@ import { api } from "../lib/api";
 import { useToast } from "../lib/toast";
 import { useTheme } from "../lib/theme";
 import { useAccent } from "../lib/accent";
+import { useTabIndicator } from "../lib/useTabIndicator";
 import type { Me } from "../lib/types";
 
 export function Layout() {
@@ -18,11 +19,14 @@ export function Layout() {
 
   const qc = useQueryClient();
   const nav = useNavigate();
+  const location = useLocation();
   const toast = useToast();
   const theme = useTheme();
   const accent = useAccent();
   const [confirmLogout, setConfirmLogout] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const navRef = useRef<HTMLElement>(null);
+  useTabIndicator(navRef, "a.active", [location.pathname]);
 
   const logout = useMutation({
     mutationFn: () => api.post("/api/auth/logout"),
@@ -37,12 +41,12 @@ export function Layout() {
           <Logo size={39} />
           <span>Homebox</span>
         </NavLink>
-        <nav className="app-nav">
+        <nav className="app-nav" ref={navRef}>
+          <span className="tab-indicator" aria-hidden />
           <NavLink to="/domains"><Globe size={15} aria-hidden /> <span className="nav-label">Domains</span></NavLink>
           <NavLink to="/integrations"><Plug size={15} aria-hidden /> <span className="nav-label">Integrations</span></NavLink>
           <NavLink to="/projects"><Boxes size={15} aria-hidden /> <span className="nav-label">Projects</span></NavLink>
           <NavLink to="/identities"><Users size={15} aria-hidden /> <span className="nav-label">Identities</span></NavLink>
-          <NavLink to="/cluster"><Network size={15} aria-hidden /> <span className="nav-label">Cluster</span></NavLink>
           <NavLink to="/system"><Activity size={15} aria-hidden /> <span className="nav-label">System</span></NavLink>
         </nav>
         <div className="app-user">

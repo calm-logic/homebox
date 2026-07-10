@@ -2,14 +2,14 @@
 # Homebox One-Liner Installer (Windows)
 # =============================================================================
 # Usage:
-#   irm https://raw.githubusercontent.com/aleontiev/homebox/master/host/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/calm-logic/homebox/master/host/install.ps1 | iex
 #
 # Requires: PowerShell 5.1+ and Administrator privileges.
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
 
-$RepoUrl = "https://github.com/aleontiev/homebox.git"
+$RepoUrl = "https://github.com/calm-logic/homebox.git"
 $Branch = "master"
 $HomeboxDir = "$env:USERPROFILE\homebox"
 
@@ -55,7 +55,7 @@ if (-not $dockerOk) {
         exit 1
     }
     Write-Host "[WARN]  Docker Desktop installed. Start it, then re-run this script:" -ForegroundColor Yellow
-    Write-Host "        irm https://raw.githubusercontent.com/aleontiev/homebox/main/host/install.ps1 | iex" -ForegroundColor Yellow
+    Write-Host "        irm https://raw.githubusercontent.com/calm-logic/homebox/main/host/install.ps1 | iex" -ForegroundColor Yellow
     exit 0
 }
 

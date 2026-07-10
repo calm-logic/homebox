@@ -89,6 +89,9 @@ class Project(Base):
     domain_id: Mapped[int | None] = mapped_column(
         ForeignKey("domains.id", ondelete="SET NULL"), nullable=True
     )
+    # How this project's hostnames are shaped (see app/urls.py): container =
+    # name-prefixed subdomains; base = this project owns the whole domain.
+    domain_mode: Mapped[str] = mapped_column(String(32), default="container")
     managed: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_deploy: Mapped[bool] = mapped_column(Boolean, default=True)
     # Gate push auto-deploys on GitHub checks passing (no-op for repos with no
@@ -295,7 +298,6 @@ class Domain(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    mode: Mapped[str] = mapped_column(String(32), default="wildcard")  # wildcard | dedicated
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
     cloudflare_routed: Mapped[bool] = mapped_column(Boolean, default=False)
     # Zone lifecycle for domains created in Cloudflare by Homebox:

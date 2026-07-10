@@ -14,7 +14,6 @@ router = APIRouter(prefix="/api/domains")
 
 class AddDomainBody(BaseModel):
     name: str
-    mode: str = "wildcard"
     primary: bool = False
 
 
@@ -22,7 +21,6 @@ def _serialize(d: Domain) -> dict:
     return {
         "id": d.id,
         "name": d.name,
-        "mode": d.mode,
         "is_primary": d.is_primary,
         "cloudflare_routed": d.cloudflare_routed,
         "zone_status": d.zone_status,
@@ -36,7 +34,7 @@ async def _sync_to_disk(session: AsyncSession) -> None:
     cloudflared config — there is no local config any more."""
     rows = (await session.execute(select(Domain).order_by(Domain.is_primary.desc(), Domain.name))).scalars().all()
     write_domains([
-        {"name": d.name, "mode": d.mode, "primary": d.is_primary}
+        {"name": d.name, "primary": d.is_primary}
         for d in rows
     ])
 
@@ -69,8 +67,6 @@ async def add_domain(
     name = body.name.strip().lower().strip(".")
     if not name:
         raise HTTPException(400, "Domain name is required")
-    if body.mode not in ("wildcard", "dedicated"):
-        raise HTTPException(400, "Mode must be wildcard or dedicated")
 
     if body.primary:
         for d in (await session.execute(select(Domain))).scalars():
@@ -78,13 +74,12 @@ async def add_domain(
 
     existing = (await session.execute(select(Domain).where(Domain.name == name))).scalar_one_or_none()
     if existing:
-        existing.mode = body.mode
         if body.primary:
             existing.is_primary = True
         result = existing
     else:
         result = Domain(
-            name=name, mode=body.mode,
+            name=name,
             is_primary=body.primary,
         )
         session.add(result)
@@ -107,6 +102,8 @@ async def delete_domain(
     d = await session.get(Domain, domain_id)
     if not d:
         raise HTTPException(404, "Domain not found")
+    from .. import cluster_sync
+    await cluster_sync.record_tombstone(session, "domain", d.name, commit=False)
     await session.delete(d)
     await session.commit()
     await _sync_to_disk(session)
@@ -122,7 +119,6 @@ async def delete_domain(
 
 class ConnectCloudflareBody(BaseModel):
     zone_id: str
-    mode: str = "wildcard"
     primary: bool = False
 
 
@@ -135,9 +131,6 @@ async def connect_cloudflare_domain(
     """Pick a Cloudflare zone and route it through the active tunnel:
     creates apex + wildcard CNAMEs to <tunnel>.cfargotunnel.com, inserts a
     Domain row, and pushes updated ingress to Cloudflare."""
-    if body.mode not in ("wildcard", "dedicated"):
-        raise HTTPException(400, "Mode must be wildcard or dedicated")
-
     state = await cf.load_state(session)
     token = cf.get_token(state)
     if not token:
@@ -174,14 +167,13 @@ async def connect_cloudflare_domain(
         await session.execute(select(Domain).where(Domain.name == name))
     ).scalar_one_or_none()
     if existing:
-        existing.mode = body.mode
         existing.cloudflare_routed = True
         if body.primary:
             existing.is_primary = True
         result = existing
     else:
         result = Domain(
-            name=name, mode=body.mode,
+            name=name,
             is_primary=body.primary,
             cloudflare_routed=True,
         )
@@ -203,26 +195,24 @@ async def connect_cloudflare_domain(
 
 class CloudflareAddBody(BaseModel):
     name: str
-    mode: str = "wildcard"
     primary: bool = False
 
 
 async def _upsert_domain_row(
-    session: AsyncSession, name: str, mode: str, primary: bool, **fields
+    session: AsyncSession, name: str, primary: bool, **fields
 ) -> Domain:
     if primary:
         for d in (await session.execute(select(Domain))).scalars():
             d.is_primary = False
     existing = (await session.execute(select(Domain).where(Domain.name == name))).scalar_one_or_none()
     if existing:
-        existing.mode = mode
         if primary:
             existing.is_primary = True
         for k, v in fields.items():
             setattr(existing, k, v)
         result = existing
     else:
-        result = Domain(name=name, mode=mode, is_primary=primary, **fields)
+        result = Domain(name=name, is_primary=primary, **fields)
         session.add(result)
     await session.commit()
     await session.refresh(result)
@@ -242,8 +232,6 @@ async def add_cloudflare_domain(
     name = body.name.strip().lower().strip(".")
     if not name or "." not in name:
         raise HTTPException(400, "Enter a full domain name, e.g. example.com")
-    if body.mode not in ("wildcard", "dedicated"):
-        raise HTTPException(400, "Mode must be wildcard or dedicated")
 
     state = await cf.load_state(session)
     token = cf.get_token(state)
@@ -265,13 +253,14 @@ async def add_cloudflare_domain(
         target = cf.tunnel_target(tunnel_id)
         try:
             await cf.upsert_cname(token, zone["id"], name, target, proxied=True)
-            # Wildcard record in BOTH modes: dedicated domains still serve
+            # A wildcard record is always created — some project assigned to
+            # this domain later might use base mode, which still serves
             # env subdomains (dev.<domain>).
             await cf.upsert_cname(token, zone["id"], f"*.{name}", target, proxied=True)
         except cf.CloudflareError as e:
             raise HTTPException(400, f"DNS update failed: {e}")
         result = await _upsert_domain_row(
-            session, name, body.mode, body.primary,
+            session, name, body.primary,
             cloudflare_routed=True, zone_status="active",
             zone_id=zone["id"], name_servers=zone.get("name_servers") or [],
         )
@@ -285,7 +274,7 @@ async def add_cloudflare_domain(
     if zone:
         # Zone exists but NS delegation hasn't landed yet — track it as pending.
         result = await _upsert_domain_row(
-            session, name, body.mode, body.primary,
+            session, name, body.primary,
             cloudflare_routed=False, zone_status="pending",
             zone_id=zone["id"], name_servers=zone.get("name_servers") or [],
         )
@@ -306,7 +295,7 @@ async def add_cloudflare_domain(
         raise HTTPException(400, f"Zone creation failed: {e}")
 
     result = await _upsert_domain_row(
-        session, name, body.mode, body.primary,
+        session, name, body.primary,
         cloudflare_routed=False, zone_status="pending",
         zone_id=created.get("id"), name_servers=created.get("name_servers") or [],
     )
@@ -315,7 +304,6 @@ async def add_cloudflare_domain(
 
 
 class PatchDomainBody(BaseModel):
-    mode: str | None = None       # wildcard | dedicated
     primary: bool | None = None
 
 
@@ -326,17 +314,12 @@ async def patch_domain(
     user: str = Depends(require_session_api),
     session: AsyncSession = Depends(get_session),
 ):
-    """Edit a domain's mode/primary. A mode change on a Cloudflare-routed
-    domain also adds (wildcard) or removes (dedicated) the *.domain CNAME."""
+    """Set a domain as primary (the fallback for projects with no domain
+    assigned)."""
     d = await session.get(Domain, domain_id)
     if not d:
         raise HTTPException(404, "Domain not found")
-    if body.mode is not None and body.mode not in ("wildcard", "dedicated"):
-        raise HTTPException(400, "Mode must be wildcard or dedicated")
 
-    mode_changed = body.mode is not None and body.mode != d.mode
-    if body.mode is not None:
-        d.mode = body.mode
     if body.primary is not None:
         if body.primary:
             for other in (await session.execute(select(Domain))).scalars():
@@ -347,25 +330,6 @@ async def patch_domain(
     await session.commit()
     await session.refresh(d)
     await _sync_to_disk(session)
-
-    # Both modes keep apex + wildcard records (dedicated still serves env
-    # subdomains like dev.<domain>) — just make sure the wildcard exists for
-    # legacy dedicated domains that were connected without one.
-    if mode_changed and d.cloudflare_routed:
-        state = await cf.load_state(session)
-        token = cf.get_token(state)
-        tunnel_id = state.get("tunnel_id")
-        if token and tunnel_id:
-            try:
-                zone_id = d.zone_id
-                if not zone_id:
-                    zones = await cf.list_zones(token, account_id=state.get("account_id"))
-                    zone = cf.resolve_zone_for(zones, d.name)
-                    zone_id = zone["id"] if zone else None
-                if zone_id:
-                    await cf.upsert_cname(token, zone_id, f"*.{d.name}", cf.tunnel_target(tunnel_id), proxied=True)
-            except cf.CloudflareError:
-                pass  # hourly DNS check will reconcile
 
     try:
         await _push_remote_ingress(session)

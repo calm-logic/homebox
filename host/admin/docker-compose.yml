@@ -36,6 +36,10 @@ services:
       HOMEBOX_ADMIN_USERNAME: ${HOMEBOX_ADMIN_USERNAME:-homebox}
       DASHBOARD_AUTH: ${DASHBOARD_AUTH}
       HOMEBOX_OAUTH_PROXY_URL: ${HOMEBOX_OAUTH_PROXY_URL:-https://oauth.homebox.sh}
+      # "peer" (default) or "mirror" — a mirror joins a cluster as a drained
+      # standby and auto-promotes when all peer nodes go down. Set by the
+      # cloud-mirror provisioner's VM bootstrap; see app/config.py:node_role.
+      HOMEBOX_NODE_ROLE: ${HOMEBOX_NODE_ROLE:-peer}
     ports:
       # Bind to localhost by default — the public URL is set up later through
       # the onboarding wizard (Cloudflare Tunnel → Traefik → admin). Override

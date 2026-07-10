@@ -93,6 +93,8 @@ async def delete_identity(
     identity = await session.get(Identity, identity_id)
     if identity is None:
         raise HTTPException(404, "Identity not found")
+    from .. import cluster_sync
+    await cluster_sync.record_tombstone(session, "identity", identity.email, commit=False)
     await session.delete(identity)
     await session.commit()
     return {"ok": True}

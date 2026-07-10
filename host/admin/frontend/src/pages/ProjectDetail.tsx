@@ -1,13 +1,14 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, UseMutationResult, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, ChevronRight, ExternalLink, RefreshCw, Rocket, Square, Settings,
-  LayoutDashboard, Boxes, Workflow, Trash2,
+  LayoutDashboard, Boxes, Trash2,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
+import { useTabIndicator } from "../lib/useTabIndicator";
 import type {
   DeploymentItem, DeploymentStatus, DomainItem, EnvironmentInfo,
   ProjectDetailData, ProjectWorkflowRun,
@@ -18,12 +19,11 @@ export const BUSY: DeploymentStatus[] = ["queued", "cloning", "dissecting", "bui
 // Backend timestamps are naive UTC — tag them so Date() doesn't read them as local.
 export const utcDate = (iso: string) => new Date(/Z$|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z");
 
-type Section = "overview" | "deployments" | "services" | "cicd" | "settings";
+type Section = "overview" | "deployments" | "services" | "settings";
 const SECTIONS: { key: Section; label: string; icon: typeof Settings }[] = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
   { key: "deployments", label: "Deployments", icon: Rocket },
   { key: "services", label: "Services", icon: Boxes },
-  { key: "cicd", label: "CI/CD", icon: Workflow },
   { key: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -65,6 +65,15 @@ export function historyBadge(status: string) {
   return <span className="badge info">{status[0].toUpperCase() + status.slice(1)}…</span>;
 }
 
+function serviceEnvBadge(env: EnvironmentInfo, serviceName: string) {
+  const inst = env.instances.find(i => i.service_name === serviceName);
+  if (!inst) return <span key={env.id} className="badge muted plain" style={{ textTransform: "capitalize" }}>{env.name}</span>;
+  if (inst.status === "unreachable") {
+    return <span key={env.id} className="badge fail" style={{ textTransform: "capitalize" }} title="Not responding">{env.name}</span>;
+  }
+  return <span key={env.id} className="badge ok" style={{ textTransform: "capitalize" }}>{env.name}</span>;
+}
+
 export function envUnreachable(env: EnvironmentInfo): boolean {
   return env.deployment?.status === "running"
     && env.instances.some(i => i.url && i.status === "unreachable");
@@ -72,10 +81,10 @@ export function envUnreachable(env: EnvironmentInfo): boolean {
 
 export function predictedHost(
   name: string, label: string, slugSuffix: string,
-  domain: string | null, mode: "wildcard" | "dedicated" | null,
+  domain: string | null, mode: "container" | "base" | null,
 ): string | null {
   if (!domain) return null;
-  if (mode === "dedicated") {
+  if (mode === "base") {
     // The project owns the domain: prod at the root, envs as subdomains,
     // non-main services path-proxied (infinitescroll.io/api).
     const envPart = (slugSuffix || "").replace(/^-+/, "");
@@ -87,17 +96,22 @@ export function predictedHost(
 }
 
 export function ProjectDetail() {
-  const { projectId } = useParams();
+  const { projectId, section: sectionParam } = useParams();
   const id = Number(projectId);
   const qc = useQueryClient();
   const nav = useNavigate();
   const toast = useToast();
-  const [section, setSection] = useState<Section>("overview");
+  const section: Section = SECTIONS.some(s => s.key === sectionParam) ? (sectionParam as Section) : "overview";
   const [searchParams] = useSearchParams();
   const [envTab, setEnvTab] = useState<number | null>(() => {
     const raw = searchParams.get("env");
     return raw ? Number(raw) : null;
   });
+
+  function goToSection(key: Section) {
+    const path = key === "overview" ? `/projects/${id}` : `/projects/${id}/${key}`;
+    nav({ pathname: path, search: searchParams.toString() });
+  }
 
   const { data: project, isError } = useQuery<ProjectDetailData>({
     queryKey: ["project", id],
@@ -111,18 +125,21 @@ export function ProjectDetail() {
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["project", id] });
-  const sync = useMutation({
-    mutationFn: () => api.post(`/api/projects/${id}/sync`),
-    onSuccess: () => { invalidate(); toast.show("Re-dissected services", "ok"); },
-    onError: (e) => toast.show(String(e), "fail"),
-  });
   const refreshRuns = useMutation({
     mutationFn: () => api.post(`/api/workflows/refresh`),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["project-workflows", id] }); toast.show("Refreshed", "ok"); },
     onError: (e) => toast.show(String(e), "fail"),
   });
 
+  const vtabsRef = useRef<HTMLDivElement>(null);
+  useTabIndicator(vtabsRef, ".vtab.active", [section]);
+  const envTabsRef = useRef<HTMLDivElement>(null);
+  useTabIndicator(envTabsRef, ".tab.active", [section, envTab, project?.environments?.length]);
+
   if (isError) return <Navigate to="/projects" replace />;
+  if (sectionParam && !SECTIONS.some(s => s.key === sectionParam)) {
+    return <Navigate to={{ pathname: `/projects/${id}`, search: searchParams.toString() }} replace />;
+  }
   if (!project) return <span className="spinner" />;
   if (!project.managed) return <Navigate to="/projects" replace />;
 
@@ -132,24 +149,15 @@ export function ProjectDetail() {
         <ArrowLeft size={14} /> Projects
       </Link>
 
-      <div className="row" style={{ marginTop: "0.5rem" }}>
-        <h1 style={{ margin: 0 }}>{project.name}</h1>
-        <div className="spacer" />
-        <button className="btn" disabled={sync.isPending} onClick={() => sync.mutate()} title="Re-read repo and refresh services">
-          {sync.isPending ? <span className="spinner" /> : <RefreshCw size={14} />} Sync
-        </button>
-        <a className="btn ghost" href={`https://github.com/${project.repo_full_name}`} target="_blank" rel="noopener">
-          <ExternalLink size={14} /> GitHub
-        </a>
-      </div>
+      <h1 style={{ margin: "0.5rem 0 0" }}>{project.name}</h1>
       <p className="dim" style={{ marginTop: "0.25rem" }}>
-        {project.repo_full_name} · domain <strong>{project.domain ?? "none (set one in Settings)"}</strong>
-        {project.dissected_at && <> · {project.services.length} service{project.services.length === 1 ? "" : "s"}</>}
+        {project.services.length} service{project.services.length === 1 ? "" : "s"} · {project.environments.length} environment{project.environments.length === 1 ? "" : "s"}
       </p>
 
       <div className="project-layout">
         {/* ─── Section nav (vertical tabs) ─────────────────────── */}
-        <div className="vtabs" role="tablist" aria-orientation="vertical">
+        <div className="vtabs" role="tablist" aria-orientation="vertical" ref={vtabsRef}>
+          <span className="tab-indicator" aria-hidden />
           {SECTIONS.map(s => {
             const Icon = s.icon;
             return (
@@ -158,7 +166,7 @@ export function ProjectDetail() {
                 role="tab"
                 aria-selected={section === s.key}
                 className={`vtab ${section === s.key ? "active" : ""}`}
-                onClick={() => setSection(s.key)}
+                onClick={() => goToSection(s.key)}
               >
                 <Icon size={16} aria-hidden /> {s.label}
               </button>
@@ -167,15 +175,16 @@ export function ProjectDetail() {
         </div>
 
         <div className="project-panel">
-          {/* ─── Overview / Deployments (one horizontal tab per env) ── */}
-          {(section === "overview" || section === "deployments") && (() => {
+          {/* ─── Overview / Deployments / Services (one horizontal tab per env) ── */}
+          {(section === "overview" || section === "deployments" || section === "services") && (() => {
             const activeEnv = project.environments.find(e => e.id === envTab) ?? project.environments[0];
             if (!activeEnv) {
               return <div className="card"><span className="dim">No environments yet.</span></div>;
             }
             return (
               <>
-                <div className="tabs" role="tablist">
+                <div className="tabs" role="tablist" ref={envTabsRef}>
+                  <span className="tab-indicator" aria-hidden />
                   {project.environments.map(env => (
                     <button
                       key={env.id}
@@ -189,72 +198,50 @@ export function ProjectDetail() {
                     </button>
                   ))}
                 </div>
-                {section === "overview"
-                  ? <EnvironmentCard key={activeEnv.id} projectId={id} env={activeEnv} onChange={invalidate} />
-                  : <Deployments key={activeEnv.id} projectId={id} envId={activeEnv.id} />}
+                {section === "overview" && (
+                  <EnvironmentCard key={activeEnv.id} projectId={id} env={activeEnv} onChange={invalidate} />
+                )}
+                {section === "deployments" && (
+                  <>
+                    <Deployments key={activeEnv.id} projectId={id} envId={activeEnv.id} />
+                    <WorkflowRuns runs={runs} refreshRuns={refreshRuns} />
+                  </>
+                )}
+                {section === "services" && (
+                  project.services.length === 0 ? (
+                    <div className="card">
+                      <span className="dim">No services detected yet. Click <strong>Sync</strong> to dissect the repo.</span>
+                    </div>
+                  ) : (
+                    <table className="data-table">
+                      <thead><tr><th>Service</th><th>Kind</th><th>Exposure</th><th>Environments</th><th>Hostname</th><th className="right" /></tr></thead>
+                      <tbody>
+                        {project.services.map(s => {
+                          const host = s.is_public
+                            ? predictedHost(project.name, s.subdomain_label, activeEnv.slug_suffix, project.domain, project.domain_mode)
+                            : null;
+                          return (
+                            <tr key={s.id} className="clickable" onClick={() => nav(`/projects/${id}/services/${s.id}`)}>
+                              <td><strong>{s.name}</strong>{s.internal_port && <span className="dim"> :{s.internal_port}</span>}</td>
+                              <td><span className="badge plain">{s.kind}</span></td>
+                              <td>{s.is_public ? <span className="badge ok">Public</span> : <span className="badge muted plain">Internal</span>}</td>
+                              <td>
+                                <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap" }}>
+                                  {project.environments.map(env => serviceEnvBadge(env, s.name))}
+                                </div>
+                              </td>
+                              <td className="dim">{host ? <code>{host}</code> : "—"}</td>
+                              <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )
+                )}
               </>
             );
           })()}
-
-          {/* ─── Services ───────────────────────────────────────── */}
-          {section === "services" && (
-            project.services.length === 0 ? (
-              <div className="card">
-                <span className="dim">No services detected yet. Click <strong>Sync</strong> to dissect the repo.</span>
-              </div>
-            ) : (
-              <table className="data-table">
-                <thead><tr><th>Service</th><th>Kind</th><th>Exposure</th><th>Hostname</th><th>Env</th><th className="right" /></tr></thead>
-                <tbody>
-                  {project.services.map(s => {
-                    const host = s.is_public ? predictedHost(project.name, s.subdomain_label, "", project.domain, project.domain_mode) : null;
-                    return (
-                      <tr key={s.id} className="clickable" onClick={() => nav(`/projects/${id}/services/${s.id}`)}>
-                        <td><strong>{s.name}</strong>{s.internal_port && <span className="dim"> :{s.internal_port}</span>}</td>
-                        <td><span className="badge plain">{s.kind}</span></td>
-                        <td>{s.is_public ? <span className="badge ok">Public</span> : <span className="badge muted plain">Internal</span>}</td>
-                        <td className="dim">{host ? <code>{host}</code> : "—"}</td>
-                        <td className="dim">{s.env_vars.length}{s.env_vars.some(v => v.source === "auto") && <span className="badge info plain" style={{ marginLeft: 6 }}>auto</span>}</td>
-                        <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )
-          )}
-
-          {/* ─── CI/CD runs ─────────────────────────────────────── */}
-          {section === "cicd" && (
-            <>
-              <div className="row">
-                <div className="spacer" />
-                <button className="btn small" disabled={refreshRuns.isPending} onClick={() => refreshRuns.mutate()}>
-                  <RefreshCw size={12} /> Refresh
-                </button>
-              </div>
-              {runs && runs.length > 0 ? (
-                <table className="data-table" style={{ marginTop: "0.5rem" }}>
-                  <thead><tr><th>Workflow</th><th>Branch</th><th>Status</th><th>When</th><th className="right" /></tr></thead>
-                  <tbody>
-                    {runs.map(run => (
-                      <tr key={run.id}>
-                        <td>{run.name}</td>
-                        <td><span className="badge muted plain">{run.head_branch}</span></td>
-                        <td>{runBadge(run.status, run.conclusion)}</td>
-                        <td className="dim">{run.created_at ? new Date(run.created_at).toLocaleString() : "—"}</td>
-                        <td className="actions"><a className="btn small ghost" href={run.html_url} target="_blank" rel="noopener"><ExternalLink size={12} /></a></td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <div className="card" style={{ marginTop: "0.5rem" }}>
-                  <span className="dim">No GitHub Actions runs cached. Click <strong>Refresh</strong> to pull them.</span>
-                </div>
-              )}
-            </>
-          )}
 
           {/* ─── Settings ────────────────────────────────────────── */}
           {section === "settings" && <SettingsPanel project={project} onSaved={invalidate} />}
@@ -359,6 +346,43 @@ function Deployments({ projectId, envId }: { projectId: number; envId: number })
   );
 }
 
+function WorkflowRuns({ runs, refreshRuns }: {
+  runs: ProjectWorkflowRun[] | undefined;
+  refreshRuns: UseMutationResult<unknown, unknown, void, unknown>;
+}) {
+  return (
+    <>
+      <div className="row" style={{ marginTop: "1.75rem" }}>
+        <h3 style={{ margin: 0 }}>GitHub Actions</h3>
+        <div className="spacer" />
+        <button className="btn small" disabled={refreshRuns.isPending} onClick={() => refreshRuns.mutate()}>
+          <RefreshCw size={12} /> Refresh
+        </button>
+      </div>
+      {runs && runs.length > 0 ? (
+        <table className="data-table" style={{ marginTop: "0.5rem" }}>
+          <thead><tr><th>Workflow</th><th>Branch</th><th>Status</th><th>When</th><th className="right" /></tr></thead>
+          <tbody>
+            {runs.map(run => (
+              <tr key={run.id}>
+                <td>{run.name}</td>
+                <td><span className="badge muted plain">{run.head_branch}</span></td>
+                <td>{runBadge(run.status, run.conclusion)}</td>
+                <td className="dim">{run.created_at ? new Date(run.created_at).toLocaleString() : "—"}</td>
+                <td className="actions"><a className="btn small ghost" href={run.html_url} target="_blank" rel="noopener"><ExternalLink size={12} /></a></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="card" style={{ marginTop: "0.5rem" }}>
+          <span className="dim">No GitHub Actions runs cached. Click <strong>Refresh</strong> to pull them.</span>
+        </div>
+      )}
+    </>
+  );
+}
+
 function runBadge(status: string, conclusion: string | null) {
   if (status === "completed") {
     if (conclusion === "success") return <span className="badge ok">Success</span>;
@@ -381,6 +405,19 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
   const [domainId, setDomainId] = useState<string>(project.domain_id ? String(project.domain_id) : "");
   const [autoDeploy, setAutoDeploy] = useState(project.auto_deploy);
   const [requireChecks, setRequireChecks] = useState(project.require_checks);
+  // "By environment" reveals the per-env override rows below each toggle;
+  // saving while collapsed clears any stale overrides back to the default.
+  const [domainScope, setDomainScope] = useState<"single" | "by_env">(
+    () => project.environments.some(e => e.domain_id) ? "by_env" : "single"
+  );
+  const [deployMode, setDeployMode] = useState<"simple" | "by_env">(
+    () => project.environments.some(e => e.promotion_gate) ? "by_env" : "simple"
+  );
+  // How this project's hostnames are shaped (see app/urls.py) — a
+  // project-level setting, not tied to whichever domain it's assigned to.
+  const [domainMode, setDomainMode] = useState<"container" | "base">(
+    project.domain_mode ?? "container"
+  );
   // Per-environment domain overrides ("" = inherit the project domain).
   const [envDomains, setEnvDomains] = useState<Record<number, string>>(
     Object.fromEntries(project.environments.map(e => [e.id, e.domain_id ? String(e.domain_id) : ""]))
@@ -398,23 +435,22 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
     id ? (domains ?? []).find(d => d.id === Number(id)) : (domains ?? []).find(d => d.is_primary);
   const domainName = (id: string): string => resolveDomain(id)?.name ?? "…";
   const projectDomain = domainName(domainId);
-  const projectDomainMode = resolveDomain(domainId)?.mode ?? null;
   const effectiveEnvDomainObj = (envId: number) =>
     envDomains[envId] ? resolveDomain(envDomains[envId]) : resolveDomain(domainId);
 
   const save = useMutation({
     mutationFn: async () => {
       await api.patch(`/api/projects/${project.id}`, {
-        name, domain_id: domainId ? Number(domainId) : 0,
+        name, domain_id: domainId ? Number(domainId) : 0, domain_mode: domainMode,
         auto_deploy: autoDeploy, require_checks: requireChecks,
       });
       for (const env of project.environments) {
         const body: Record<string, unknown> = {};
-        const chosen = envDomains[env.id] ?? "";
+        const chosen = domainScope === "by_env" ? (envDomains[env.id] ?? "") : "";
         if (chosen !== (env.domain_id ? String(env.domain_id) : "")) body.domain_id = chosen ? Number(chosen) : 0;
-        const gate = envGates[env.id] ?? false;
+        const gate = deployMode === "by_env" ? (envGates[env.id] ?? false) : false;
         if (gate !== env.promotion_gate) body.promotion_gate = gate;
-        const e2e = (envE2e[env.id] ?? "").trim();
+        const e2e = deployMode === "by_env" ? (envE2e[env.id] ?? "").trim() : "";
         if (e2e !== (env.e2e_workflow ?? "")) body.e2e_workflow = e2e;
         if (Object.keys(body).length > 0) {
           await api.patch(`/api/projects/${project.id}/environments/${env.id}`, body);
@@ -435,48 +471,102 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
     onError: (e) => toast.show(String(e), "fail"),
   });
 
+  const sync = useMutation({
+    mutationFn: () => api.post(`/api/projects/${project.id}/sync`),
+    onSuccess: () => { onSaved(); toast.show("Re-dissected services", "ok"); },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
   return (
     <>
     <div className="card">
       <div className="field">
+        <label className="lbl">Repository</label>
+        <div className="row" style={{ gap: "0.5rem" }}>
+          <a
+            href={`https://github.com/${project.repo_full_name}`} target="_blank" rel="noopener"
+            style={{ flex: 1, display: "flex", alignItems: "center", gap: "0.4rem" }}
+          >
+            <code>{project.repo_full_name}</code> <ExternalLink size={12} />
+          </a>
+          <button className="btn small" disabled={sync.isPending} onClick={() => sync.mutate()} title="Re-read repo and refresh services">
+            {sync.isPending ? <span className="spinner" /> : <RefreshCw size={12} />} Sync
+          </button>
+        </div>
+        <span className="hint">Changing the bound repository isn't supported yet.</span>
+      </div>
+      <div className="field">
         <label className="lbl">Project name (URL slug)</label>
         <input value={name} onChange={e => setName(e.target.value)} placeholder={project.name} />
         <span className="hint">
-          {projectDomainMode === "dedicated"
-            ? <>Dedicated domain — the app lives at <code>{projectDomain}</code> (name is used for stacks and wildcard fallbacks).</>
-            : <>Used as the hostname base, e.g. <code>{predictedHost(name || project.name, "", "", projectDomain, projectDomainMode)}</code>.</>}
+          {domainMode === "base"
+            ? <>Base domain — the app lives at <code>{projectDomain}</code> (name is used for stacks and wildcard fallbacks).</>
+            : <>Used as the hostname base, e.g. <code>{predictedHost(name || project.name, "", "", projectDomain, domainMode)}</code>.</>}
         </span>
       </div>
       <div className="field">
         <label className="lbl">Domain</label>
-        <select value={domainId} onChange={e => setDomainId(e.target.value)}>
+        <select
+          value={domainScope === "by_env" ? "__by_env" : domainId}
+          onChange={e => {
+            if (e.target.value === "__by_env") setDomainScope("by_env");
+            else { setDomainScope("single"); setDomainId(e.target.value); }
+          }}
+        >
           <option value="">Primary (default)</option>
           {(domains ?? []).map(d => <option key={d.id} value={d.id}>{d.name}{d.is_primary ? " (primary)" : ""}</option>)}
+          <option value="__by_env">By environment</option>
         </select>
       </div>
 
-      <div className="lbl" style={{ marginTop: "0.75rem", marginBottom: "0.3rem" }}>Per-environment overrides</div>
-      {project.environments.map(env => (
-        <div key={env.id} className="row" style={{ gap: "0.6rem", marginBottom: "0.4rem" }}>
-          <span style={{ textTransform: "capitalize", flex: "0 0 5.5rem" }}>{env.name}</span>
-          <select
-            value={envDomains[env.id] ?? ""}
-            onChange={e => setEnvDomains({ ...envDomains, [env.id]: e.target.value })}
-            style={{ flex: 1 }}
-          >
-            <option value="">Project domain</option>
-            {(domains ?? []).map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-          </select>
-          <code style={{ flex: "0 0 auto" }}>
-            {predictedHost(name || project.name, "", env.slug_suffix,
-              effectiveEnvDomainObj(env.id)?.name ?? "…", effectiveEnvDomainObj(env.id)?.mode ?? null)}
-          </code>
-        </div>
-      ))}
-      <span className="hint">Point environments at different domains, e.g. production on its own domain.</span>
+      {domainScope === "by_env" && (
+        <>
+          {project.environments.map(env => (
+            <div key={env.id} className="row" style={{ gap: "0.6rem", marginBottom: "0.4rem" }}>
+              <span style={{ textTransform: "capitalize", flex: "0 0 5.5rem" }}>{env.name}</span>
+              <select
+                value={envDomains[env.id] ?? ""}
+                onChange={e => setEnvDomains({ ...envDomains, [env.id]: e.target.value })}
+                style={{ flex: 1 }}
+              >
+                <option value="">Project domain</option>
+                {(domains ?? []).map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </select>
+              <code style={{ flex: "0 0 auto" }}>
+                {predictedHost(name || project.name, "", env.slug_suffix,
+                  effectiveEnvDomainObj(env.id)?.name ?? "…", domainMode)}
+              </code>
+            </div>
+          ))}
+          <span className="hint">Point environments at different domains, e.g. production on its own domain.</span>
+        </>
+      )}
 
-      <div className="lbl" style={{ marginTop: "0.85rem", marginBottom: "0.3rem" }}>Deploy pipeline</div>
-      {project.environments.map(env => {
+      <div className="field" style={{ marginTop: "0.85rem" }}>
+        <label className="lbl">Domain type</label>
+        <select value={domainMode} onChange={e => setDomainMode(e.target.value as "container" | "base")}>
+          <option value="container">Container — e.g. appname.{projectDomain === "…" ? "domain.com" : projectDomain}</option>
+          <option value="base">Base — e.g. {projectDomain === "…" ? "domain.com" : projectDomain}</option>
+        </select>
+        <span className="hint">
+          {domainMode === "base"
+            ? <>This project owns the domain outright. Production lives at the root, other public services path-proxied (e.g. <code>/api</code>), dev at <code>dev.&lt;domain&gt;</code>.</>
+            : <>Every environment gets a name-prefixed subdomain, so multiple projects can share one domain.</>}
+        </span>
+      </div>
+
+      <div className="field" style={{ marginTop: "0.85rem" }}>
+        <label className="lbl">Deploy pipeline</label>
+        <select
+          value={deployMode}
+          onChange={e => setDeployMode(e.target.value as "simple" | "by_env")}
+        >
+          <option value="simple">Deploy on push</option>
+          <option value="by_env">By environment</option>
+        </select>
+      </div>
+
+      {deployMode === "by_env" && project.environments.map(env => {
         const others = project.environments.filter(e => e.id !== env.id);
         const sourceName = others.find(e => e.id === (env.promote_from_env_id ?? -1))?.name
           ?? others.find(e => e.kind !== "production")?.name ?? "dev";
@@ -503,11 +593,6 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
           </div>
         );
       })}
-      <span className="hint">
-        Promotion waits for the source environment to deploy this commit, then (if set) dispatches the
-        e2e workflow with <code>base_url</code>/<code>environment</code> inputs against it — this
-        environment deploys only when that passes.
-      </span>
 
       <label className="row" style={{ cursor: "pointer", gap: "0.4rem", marginTop: "0.85rem" }}>
         <input type="checkbox" checked={autoDeploy} onChange={e => setAutoDeploy(e.target.checked)} />
@@ -517,7 +602,6 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
         <input type="checkbox" checked={requireChecks} onChange={e => setRequireChecks(e.target.checked)} disabled={!autoDeploy} />
         Wait for GitHub checks to pass before deploying
       </label>
-      <span className="hint">Applies only when the repo has workflows; repos without CI deploy immediately.</span>
 
       <div className="row" style={{ marginTop: "1.25rem", paddingTop: "1rem", borderTop: "1px solid var(--border)" }}>
         <span className="spacer" />

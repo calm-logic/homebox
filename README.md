@@ -9,12 +9,12 @@ Install on any machine with a single command:
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/aleontiev/homebox/main/host/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/calm-logic/homebox/main/host/install.sh | bash
 ```
 
 **Windows (PowerShell as Administrator):**
 ```powershell
-irm https://raw.githubusercontent.com/aleontiev/homebox/main/host/install.ps1 | iex
+irm https://raw.githubusercontent.com/calm-logic/homebox/main/host/install.ps1 | iex
 ```
 
 The installer will:
@@ -239,13 +239,9 @@ homebox db sync myapp --db myapp_db --user myapp_user --local-db myapp_dev --con
 
 ## 🧩 Making a Project Homebox-Ready
 
-Any project with a `docker-compose.yml` that includes Traefik labels and joins the `traefik-net` network is Homebox-compatible. See the full guide: **[homebox-ready.md](host/docs/homebox-ready.md)**.
+Any git repo works out of the box — there's nothing required. On adopt (and every sync), Homebox dissects the repo: it reuses backing services and any app service from a `docker-compose.yml` if one exists, builds from a `Dockerfile` or a detected language via Nixpacks if not, and falls back to a generic build from the repo root if it finds neither. Traefik labels, networking, and hostnames are generated automatically — you never write them yourself. See the full guide: **[homebox-ready.md](host/docs/homebox-ready.md)**.
 
-The minimum requirements:
-
-1. An app service with Traefik routing labels
-2. The app service joins the external `traefik-net` network
-3. Backing services stay on an internal network (no host ports)
+For explicit control (custom ports, subdomains, build commands, env vars), drop an optional `homebox.yaml` manifest at the repo root — see the guide for the format.
 
 To scaffold a new project or add Homebox support to an existing repo, see the [bootstrap skill](host/docs/claude-bootstrap-skill.md).
 

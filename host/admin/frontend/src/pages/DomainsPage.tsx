@@ -1,7 +1,7 @@
 import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, Cloud, Wrench, Copy, Pencil } from "lucide-react";
+import { Plus, Trash2, Cloud, Wrench, Copy, Star } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
@@ -25,7 +25,6 @@ export function DomainsPage() {
   const qc = useQueryClient();
   const toast = useToast();
   const [addOpen, setAddOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<DomainItem | null>(null);
 
   const { data: domains } = useQuery<DomainItem[]>({
     queryKey: ["domains"],
@@ -51,6 +50,11 @@ export function DomainsPage() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["domains"] }); toast.show("Domain removed", "ok"); },
     onError: (e) => toast.show(String(e), "fail"),
   });
+  const makePrimary = useMutation({
+    mutationFn: (id: number) => api.patch(`/api/domains/${id}`, { primary: true }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["domains"] }); toast.show("Primary domain updated", "ok"); },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
   const repair = useMutation({
     mutationFn: () => api.post("/api/tunnel/resync-dns"),
     onSuccess: () => {
@@ -74,8 +78,8 @@ export function DomainsPage() {
         <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add domain</button>
       </div>
       <p className="lede" style={{ marginTop: "0.5rem" }}>
-        Domains routed to this host through your Cloudflare Tunnel. Wildcard domains host many
-        projects at subdomains; dedicated domains serve one project.
+        Domains routed to this host through your Cloudflare Tunnel. Point a project at one from
+        its Settings — including whether it gets a Base domain or a Container (name-prefixed) subdomain.
       </p>
 
       {tunnel && !tokenSet && (
@@ -116,13 +120,14 @@ export function DomainsPage() {
       {domains && domains.length > 0 ? (
         <table className="data-table">
           <thead>
-            <tr><th>Domain</th><th>Mode</th><th>Status</th><th>Primary</th><th className="right" /></tr>
+            <tr><th>Domain</th><th>Status</th><th>Primary</th><th className="right" /></tr>
           </thead>
           <tbody>
             {domains.map(d => (
               <DomainRow key={d.id} d={d}
-                onEdit={() => setEditTarget(d)}
+                onMakePrimary={() => makePrimary.mutate(d.id)}
                 onRemove={() => { if (confirm(`Remove ${d.name}?`)) remove.mutate(d.id); }}
+                makingPrimary={makePrimary.isPending}
                 removing={remove.isPending} />
             ))}
           </tbody>
@@ -136,13 +141,12 @@ export function DomainsPage() {
       ) : <span className="spinner" />}
 
       <AddDomainModal open={addOpen} onClose={() => setAddOpen(false)} cfReady={cfReady} />
-      {editTarget && <EditDomainModal d={editTarget} onClose={() => setEditTarget(null)} />}
     </>
   );
 }
 
-function DomainRow({ d, onEdit, onRemove, removing }: {
-  d: DomainItem; onEdit: () => void; onRemove: () => void; removing: boolean;
+function DomainRow({ d, onMakePrimary, onRemove, makingPrimary, removing }: {
+  d: DomainItem; onMakePrimary: () => void; onRemove: () => void; makingPrimary: boolean; removing: boolean;
 }) {
   const toast = useToast();
   const pending = d.zone_status === "pending";
@@ -150,7 +154,6 @@ function DomainRow({ d, onEdit, onRemove, removing }: {
     <>
       <tr>
         <td><strong>{d.name}</strong></td>
-        <td>{d.mode === "wildcard" ? <span className="badge info plain">Wildcard</span> : <span className="badge plain">Dedicated</span>}</td>
         <td>
           {pending
             ? <span className="badge warn">Pending nameservers</span>
@@ -160,10 +163,14 @@ function DomainRow({ d, onEdit, onRemove, removing }: {
         </td>
         <td>{d.is_primary && <span className="badge ok plain">Primary</span>}</td>
         <td className="actions">
-          <button className="btn small ghost" aria-label={`Edit ${d.name}`} title="Edit"
-            onClick={onEdit}>
-            <Pencil size={12} />
-          </button>{" "}
+          {!d.is_primary && (
+            <>
+              <button className="btn small ghost" aria-label={`Make ${d.name} primary`} title="Make primary"
+                disabled={makingPrimary} onClick={onMakePrimary}>
+                <Star size={12} />
+              </button>{" "}
+            </>
+          )}
           <button className="btn small danger" aria-label={`Remove ${d.name}`} title="Remove"
             disabled={removing} onClick={onRemove}>
             <Trash2 size={12} />
@@ -172,7 +179,7 @@ function DomainRow({ d, onEdit, onRemove, removing }: {
       </tr>
       {pending && (d.name_servers?.length ?? 0) > 0 && (
         <tr>
-          <td colSpan={5} style={{ background: "var(--tint)" }}>
+          <td colSpan={4} style={{ background: "var(--tint)" }}>
             <div className="row" style={{ gap: "0.75rem", flexWrap: "wrap" }}>
               <span className="dim">Set these nameservers at your registrar — routing finishes automatically once they take effect:</span>
               {d.name_servers!.map(ns => (
@@ -195,21 +202,20 @@ function AddDomainModal({ open, onClose, cfReady }: { open: boolean; onClose: ()
   const qc = useQueryClient();
   const toast = useToast();
   const [name, setName] = useState("");
-  const [mode, setMode] = useState<"wildcard" | "dedicated">("wildcard");
   const [primary, setPrimary] = useState(false);
   const [managed, setManaged] = useState(true);
   const [pendingNs, setPendingNs] = useState<string[] | null>(null);
 
-  function reset() { setName(""); setMode("wildcard"); setPrimary(false); setManaged(true); setPendingNs(null); }
+  function reset() { setName(""); setPrimary(false); setManaged(true); setPendingNs(null); }
   function close() { reset(); onClose(); }
 
   const add = useMutation({
     mutationFn: async () => {
       if (managed && cfReady) {
         return api.post<{ pending: boolean; name_servers: string[] }>(
-          "/api/domains/cloudflare", { name, mode, primary });
+          "/api/domains/cloudflare", { name, primary });
       }
-      await api.post("/api/domains", { name, mode, primary });
+      await api.post("/api/domains", { name, primary });
       return { pending: false, name_servers: [] };
     },
     onSuccess: (r) => {
@@ -269,13 +275,6 @@ function AddDomainModal({ open, onClose, cfReady }: { open: boolean; onClose: ()
                 : "DNS is up to you — point the domain at your tunnel manually."}
             </span>
           </div>
-          <div className="field">
-            <label className="lbl">Mode</label>
-            <div className="mode-chips">
-              <span className={`chip ${mode === "wildcard" ? "active" : ""}`} onClick={() => setMode("wildcard")}>Wildcard (root + subdomains)</span>
-              <span className={`chip ${mode === "dedicated" ? "active" : ""}`} onClick={() => setMode("dedicated")}>Dedicated (one project)</span>
-            </div>
-          </div>
           <label className="row" style={{ cursor: "pointer", gap: "0.5rem", marginBottom: "0.6rem" }}>
             <input type="checkbox" checked={primary} onChange={e => setPrimary(e.target.checked)} />
             Set as primary domain
@@ -288,53 +287,6 @@ function AddDomainModal({ open, onClose, cfReady }: { open: boolean; onClose: ()
           )}
         </form>
       )}
-    </Modal>
-  );
-}
-
-
-function EditDomainModal({ d, onClose }: { d: DomainItem; onClose: () => void }) {
-  const qc = useQueryClient();
-  const toast = useToast();
-  const [mode, setMode] = useState<"wildcard" | "dedicated">(d.mode);
-  const [primary, setPrimary] = useState(d.is_primary);
-
-  const save = useMutation({
-    mutationFn: () => api.patch(`/api/domains/${d.id}`, { mode, primary }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["domains"] });
-      toast.show("Domain updated", "ok");
-      onClose();
-    },
-    onError: (e) => toast.show(String(e), "fail"),
-  });
-
-  return (
-    <Modal open onClose={onClose} title={`Edit ${d.name}`} footer={<>
-      <span className="spacer" />
-      <button className="btn ghost" type="button" onClick={onClose}>Cancel</button>
-      <button className="btn primary" type="button" disabled={save.isPending} onClick={() => save.mutate()}>
-        {save.isPending ? <span className="spinner" /> : "Save"}
-      </button>
-    </>}>
-      <div className="field">
-        <label className="lbl">Mode</label>
-        <div className="mode-chips">
-          <span className={`chip ${mode === "wildcard" ? "active" : ""}`} onClick={() => setMode("wildcard")}>Wildcard (root + subdomains)</span>
-          <span className={`chip ${mode === "dedicated" ? "active" : ""}`} onClick={() => setMode("dedicated")}>Dedicated (one project)</span>
-        </div>
-        {mode !== d.mode && (
-          <span className="hint">
-            {mode === "dedicated"
-              ? <>The assigned project's production will live at <code>{d.name}</code>, other public services path-proxied (<code>{d.name}/api</code>), dev at <code>dev.{d.name}</code>. Redeploy to apply.</>
-              : <>Projects get name-prefixed hostnames like <code>app.{d.name}</code>. Redeploy to apply.</>}
-          </span>
-        )}
-      </div>
-      <label className="row" style={{ cursor: "pointer", gap: "0.5rem" }}>
-        <input type="checkbox" checked={primary} onChange={e => setPrimary(e.target.checked)} />
-        Primary domain
-      </label>
     </Modal>
   );
 }

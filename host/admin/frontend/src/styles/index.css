@@ -156,7 +156,7 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .brand img { width: 39px; height: 39px; }
 .brand span { color: var(--text); }
 
-.app-nav { display: flex; gap: 0.25rem; flex: 1; }
+.app-nav { display: flex; align-items: stretch; gap: 0.25rem; flex: 1; align-self: stretch; position: relative; }
 .app-nav a {
   color: var(--text-dim);
   padding: 0.4rem 0.75rem;
@@ -168,7 +168,12 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .app-nav a svg { opacity: 0.85; }
 .app-nav a.active svg { opacity: 1; }
 .app-nav a:hover { background: var(--btn-bg); color: var(--text); }
-.app-nav a.active { color: var(--accent); background: var(--accent-glow); }
+.app-nav a.active { color: var(--accent); }
+.app-nav .tab-indicator {
+  left: 0; bottom: 0; height: 2px; border-radius: 1px 1px 0 0;
+  width: var(--ind-w, 0px);
+  transform: translateX(var(--ind-x, 0px));
+}
 
 .app-user { display: flex; align-items: center; gap: 0.6rem; color: var(--muted); font-size: 0.85rem; }
 .app-main { padding: 2rem 1.5rem 4rem; max-width: 1100px; margin: 0 auto; width: 100%; }
@@ -517,6 +522,7 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
   display: flex; gap: 0.25rem;
   border-bottom: 1px solid var(--border);
   margin: 0.5rem 0 1rem;
+  position: relative;
 }
 .tabs .tab {
   display: inline-flex; align-items: center; gap: 0.45rem;
@@ -525,14 +531,27 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
   color: var(--text-dim);
   font: inherit; font-weight: 500;
   cursor: pointer;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s;
 }
 .tabs .tab:hover { color: var(--text); }
-.tabs .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tabs .tab.active { color: var(--accent); }
 .tabs .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius-sm); }
 .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+
+/* Sliding active-tab indicator — position comes from useTabIndicator (JS
+   measures the active tab and writes --ind-x/--ind-w/--ind-y/--ind-h), the
+   transition here is what makes it glide between tabs instead of jumping. */
+.tab-indicator {
+  position: absolute;
+  background: var(--accent);
+  pointer-events: none;
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), width 0.25s cubic-bezier(0.4, 0, 0.2, 1), height 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.tabs .tab-indicator {
+  left: 0; bottom: -1px; height: 2px; border-radius: 1px;
+  width: var(--ind-w, 0px);
+  transform: translateX(var(--ind-x, 0px));
+}
 
 /* Vertical section tabs (project detail sidebar) */
 .project-layout { display: flex; align-items: flex-start; gap: 1.75rem; margin-top: 1.25rem; }
@@ -554,17 +573,28 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 }
 .vtabs .vtab svg { opacity: 0.85; flex-shrink: 0; }
 .vtabs .vtab:hover { background: var(--btn-bg); color: var(--text); }
-.vtabs .vtab.active { color: var(--accent); background: var(--accent-glow); }
+.vtabs .vtab.active { color: var(--accent); }
 .vtabs .vtab.active svg { opacity: 1; }
 .vtabs .vtab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.vtabs .tab-indicator {
+  left: 0; top: 0; width: 3px; border-radius: 0 2px 2px 0;
+  height: var(--ind-h, 0px);
+  transform: translateY(var(--ind-y, 0px));
+}
 .project-panel { flex: 1; min-width: 0; }
 
 @media (max-width: 720px) {
   .project-layout { flex-direction: column; gap: 0.75rem; }
   .vtabs {
-    flex-direction: row; flex-wrap: wrap; position: static;
+    flex-direction: row; flex-wrap: wrap; position: relative;
     flex: 0 0 auto; width: 100%;
     border-bottom: 1px solid var(--border); padding-bottom: 0.5rem;
+  }
+  /* .vtabs is a horizontal row here, so its indicator behaves like .tabs'. */
+  .vtabs .tab-indicator {
+    left: 0; top: auto; bottom: -0.5rem; width: var(--ind-w, 0px); height: 2px;
+    border-radius: 1px;
+    transform: translateX(var(--ind-x, 0px));
   }
 }
 
@@ -852,3 +882,24 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
   font-size: 0.82rem; font-variant-numeric: tabular-nums;
 }
 .redis-list li { padding: 2px 0; word-break: break-word; }
+
+/* ── Banners — full-width inline notices (license state, upgrade prompts) ── */
+.banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+  padding: 0.65rem 1rem; border-radius: var(--radius-sm); font-size: 0.85rem;
+  flex-wrap: wrap; margin-top: 0.75rem;
+}
+.banner .row { flex-wrap: nowrap; }
+.banner.warn   { background: rgba(243, 201, 105, 0.12); color: var(--warn);   border: 1px solid rgba(243, 201, 105, 0.35); }
+.banner.danger { background: rgba(239, 111, 108, 0.12); color: var(--danger); border: 1px solid rgba(239, 111, 108, 0.35); }
+.banner.info   { background: rgba(111, 177, 243, 0.12); color: var(--info);   border: 1px solid rgba(111, 177, 243, 0.35); }
+
+/* ── Premium callout — upgrade CTA card ─────────────────────────────────── */
+.premium-callout {
+  border: 1px solid var(--accent-2);
+  background:
+    radial-gradient(600px circle at 0% 0%, var(--accent-glow), transparent 60%),
+    var(--panel);
+}
+.premium-callout h3 { display: flex; align-items: center; gap: 0.4rem; margin: 0; color: var(--text); }
+.premium-callout .dim { max-width: 60ch; }

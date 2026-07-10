@@ -1,4 +1,5 @@
 from pathlib import Path
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,7 +22,20 @@ class Settings(BaseSettings):
     session_cookie: str = "homebox_session"
     session_max_age_seconds: int = 60 * 60 * 24 * 14  # 14 days
     homebox_oauth_proxy_url: str = "https://oauth.homebox.sh"
-    homebox_control_plane_url: str = "https://cluster.homebox.sh"
+    homebox_control_plane_url: str = "https://control.homebox.sh"
+    # This node's cluster role. "peer" nodes serve app traffic active-active and
+    # count toward the license max_nodes. "mirror" nodes run drained (standby),
+    # stay hot via replication + peer deploys, and auto-promote to serving when
+    # every non-mirror peer goes unhealthy. Mirrors don't count toward max_nodes.
+    node_role: str = "peer"        # peer | mirror  (env HOMEBOX_NODE_ROLE)
+
+    @field_validator("node_role")
+    @classmethod
+    def _valid_node_role(cls, v: str) -> str:
+        v = (v or "peer").strip().lower()
+        if v not in ("peer", "mirror"):
+            raise ValueError("HOMEBOX_NODE_ROLE must be 'peer' or 'mirror'")
+        return v
 
 
 settings = Settings()

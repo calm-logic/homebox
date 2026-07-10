@@ -53,7 +53,7 @@ def _tunnel_metadata(install_id: str) -> dict[str, str]:
 
 def _serialize_domain(d: Domain) -> dict[str, Any]:
     return {
-        "id": d.id, "name": d.name, "mode": d.mode,
+        "id": d.id, "name": d.name,
         "is_primary": d.is_primary,
         "cloudflare_routed": d.cloudflare_routed,
     }
@@ -82,8 +82,8 @@ async def _push_ingress(state: dict[str, Any], session: AsyncSession) -> None:
 
 def _dns_hostnames(d: Domain) -> list[str]:
     """The CNAME record names Homebox manages for a routed domain: apex +
-    wildcard in BOTH modes (dedicated domains serve env subdomains like
-    dev.<domain>). Mirrors cf.build_ingress."""
+    wildcard, always (a project on base mode still serves env subdomains
+    like dev.<domain>). Mirrors cf.build_ingress."""
     return [d.name, f"*.{d.name}"]
 
 

@@ -59,6 +59,11 @@ async def ping(peer: dict = Depends(require_peer), session: AsyncSession = Depen
         "node_id": await clusterlib.get_node_id(session),
         "cluster_id": peer["state"]["cluster_id"],
         "version": clusterlib.VERSION,
+        # Live serving state, so a peer's last-serving-node guard sees the truth
+        # instead of the lagging roster.
+        "serving": await clusterlib.get_app_serving(session),
+        # This node's cluster role, so peers can distinguish a standby mirror.
+        "role": settings.node_role,
     }
 
 
@@ -166,6 +171,12 @@ async def set_serving(
     requests to healthy peers, while this node's admin + cluster loop keep
     running — so it stays reachable on the LAN, keeps heartbeating, and can be
     re-enabled at any time."""
+    if not body.serving:
+        self_id = await clusterlib.get_node_id(session)
+        if not await clusterlib.serving_peers_excluding(session, peer["state"], self_id):
+            # Allowed when an online mirror is standing by to auto-promote.
+            if not await clusterlib.online_mirror_standby(session, peer["state"], self_id):
+                raise HTTPException(409, "Refusing to drain the last serving node in the cluster.")
     result = await clusterlib.apply_app_serving(session, body.serving)
     log.info("peer %s set serving=%s → %s", peer["caller_id"], body.serving, result)
     return {"ok": True, **result}
