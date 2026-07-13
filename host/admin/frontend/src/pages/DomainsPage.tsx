@@ -78,8 +78,7 @@ export function DomainsPage() {
         <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add domain</button>
       </div>
       <p className="lede" style={{ marginTop: "0.5rem" }}>
-        Domains routed to this host through your Cloudflare Tunnel. Point a project at one from
-        its Settings — including whether it gets a Base domain or a Container (name-prefixed) subdomain.
+        Domains routed to this host through your Cloudflare Tunnel.
       </p>
 
       {tunnel && !tokenSet && (

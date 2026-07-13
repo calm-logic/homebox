@@ -24,7 +24,6 @@ export function Overview() {
   return (
     <>
       <h1>Overview</h1>
-      <p className="lede">Domains, GitHub, and deploys — managed from one place.</p>
 
       <div className="metric-grid">
         <Metric label="Domains" value={data.domain_count} link="/domains" />
