@@ -47,15 +47,18 @@ export function depBadge(status: string | undefined, unreachable = false) {
   if (status === "pending_promotion") return <span className="badge info">Waiting for source env…</span>;
   if (status === "pending_e2e") return <span className="badge info">Running e2e…</span>;
   if (status === "stopped") return <span className="badge muted">Stopped</span>;
-  if (status === "superseded") return <span className="badge muted plain">Skipped</span>;
+  // Superseded = it succeeded and was later replaced by a newer deploy.
+  if (status === "superseded") return <span className="badge muted plain">Succeeded</span>;
   if (!status) return <span className="badge muted plain">Not deployed</span>;
   return <span className="badge info">{status[0].toUpperCase() + status.slice(1)}…</span>;
 }
 
 /** History badge (deployments list/detail): how did this deploy end? */
 export function historyBadge(status: string) {
+  // Green only while this deploy is the live one; once a newer deploy
+  // replaces it (superseded) it still succeeded — render it grey.
   if (status === "running") return <span className="badge success">Succeeded</span>;
-  if (status === "superseded") return <span className="badge muted plain">Skipped</span>;
+  if (status === "superseded") return <span className="badge muted plain">Succeeded</span>;
   if (status === "failed") return <span className="badge fail">Failed</span>;
   if (status === "blocked") return <span className="badge warn">Blocked</span>;
   if (status === "pending_checks") return <span className="badge info">Waiting for checks…</span>;
