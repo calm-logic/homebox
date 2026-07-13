@@ -309,6 +309,69 @@ export interface Identity {
   created_at: string | null;
 }
 
+// ── Cluster / homebox.sh account ────────────────────────────────────────────
+
+export type NodeRole = "peer" | "mirror";
+
+export interface ClusterNode {
+  node_id: string;
+  name: string;
+  peer_url: string;
+  version: string;
+  ordinal?: number;
+  online: boolean;
+  serving?: boolean;
+  role?: NodeRole;
+}
+
+/** A linked node as reported by the account overview (control plane). */
+export interface AccountNode {
+  node_id: string;
+  name: string;
+  peer_url: string;
+  online: boolean;
+  cluster_id?: string | null;
+  /** Epoch seconds of this node's last metadata backup push (null = never). */
+  backup_updated_at?: number | null;
+}
+
+export interface AccountCluster {
+  cluster_id: string;
+  name: string;
+  nodes: ClusterNode[];
+}
+
+export interface AccountOverview {
+  nodes?: AccountNode[];
+  clusters?: AccountCluster[];
+  polled_at?: string;
+}
+
+/** This node's metadata-backup state on the control plane. */
+export interface AccountBackup {
+  pushed_at: string | null;
+  error: string | null;
+}
+
+/** Offered when the admin login identity matches a homebox.sh account provider. */
+export interface AccountSuggestion {
+  provider: "github" | "google";
+  email: string;
+}
+
+export interface AccountStatus {
+  linked: boolean;
+  node_name?: string;
+  peer_url?: string;
+  control_plane_url?: string;
+  email?: string | null;
+  plan?: string | null;
+  backup?: AccountBackup | null;
+  /** Only present when not linked. */
+  suggested?: AccountSuggestion | null;
+  overview?: AccountOverview;
+}
+
 export interface OnboardingState {
   complete: boolean;
   steps: {

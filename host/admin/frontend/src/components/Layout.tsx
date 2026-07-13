@@ -5,11 +5,9 @@ import { LogOut, Moon, Sun, Globe, Boxes, Workflow, Users, Plug, Activity } from
 
 import { Logo } from "./Logo";
 import { Modal } from "./Modal";
-import { ColorPicker } from "./ColorPicker";
 import { api } from "../lib/api";
 import { useToast } from "../lib/toast";
 import { useTheme } from "../lib/theme";
-import { useAccent } from "../lib/accent";
 import { useTabIndicator } from "../lib/useTabIndicator";
 import type { Me } from "../lib/types";
 
@@ -22,9 +20,7 @@ export function Layout() {
   const location = useLocation();
   const toast = useToast();
   const theme = useTheme();
-  const accent = useAccent();
   const [confirmLogout, setConfirmLogout] = useState(false);
-  const [pickerOpen, setPickerOpen] = useState(false);
   const navRef = useRef<HTMLElement>(null);
   useTabIndicator(navRef, "a.active", [location.pathname]);
 
@@ -50,24 +46,6 @@ export function Layout() {
           <NavLink to="/system"><Activity size={15} aria-hidden /> <span className="nav-label">System</span></NavLink>
         </nav>
         <div className="app-user">
-          <div className="accent-wrap">
-            <button
-              type="button"
-              className="accent-swatch"
-              onClick={() => setPickerOpen(o => !o)}
-              aria-label="Change accent color"
-              aria-expanded={pickerOpen}
-              title="Accent color"
-              style={{ background: "var(--accent)" }}
-            />
-            {pickerOpen && (
-              <ColorPicker
-                value={accent.accent}
-                onChange={hex => { void accent.set(hex); }}
-                onClose={() => setPickerOpen(false)}
-              />
-            )}
-          </div>
           <button
             className="icon-btn"
             type="button"

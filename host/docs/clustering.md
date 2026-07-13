@@ -632,6 +632,46 @@ logic.
 - **`POST /api/cluster/mirror`** — CP `POST` (enable). **`DELETE`** — CP `DELETE`
   (disable). Both surface CP 402 detail cleanly.
 
+### Cloud registry view, one-click linking, metadata backup, split-off
+
+Once a node is linked to a homebox.sh account, the System page becomes a window
+onto **all** of that account's homeboxes — not just the node you're looking at.
+
+- **One-click linking.** If the admin session was established via passwordless
+  OAuth (an enabled identity with a `last_login_provider`), `GET
+  /api/cluster/account` returns `suggested: {provider, email}` and the UI offers
+  "Continue with GitHub as <email>" directly — one click opens the same
+  account-link OAuth popup, no modal hop. Linking is still a separate act from
+  logging in: the popup re-verifies the identity with the provider and registers
+  it against the control plane (`/v1/accounts/register`).
+- **Registry ("Your homeboxes").** The node's account poll
+  (`POST /v1/accounts/poll`) returns every linked node and every owned cluster
+  with per-node `online`/`serving`/`role` status; each linked node also carries
+  `cluster_id` (which owned cluster it currently belongs to, else null) and
+  `backup_updated_at`. The poll result is cached in the `account_overview`
+  setting and served via `GET /api/cluster/account` (now also carrying the
+  account's `email` and `plan`), so any linked homebox renders all clusters and
+  nodes — with live online status — whether or not it is itself clustered.
+- **Metadata backup.** Linked nodes (clustered or standalone) push a sanitized
+  config snapshot to the control plane: domains, projects (environments,
+  services, env-var **key names only**), identity emails, and node metadata —
+  never secret values or tokens. `backuplib.build_snapshot` builds it;
+  `push_backup_if_changed` hashes it (excluding `generated_at`) and PUTs
+  `{control_plane}/v1/accounts/nodes/{node_id}/backup` (256 KiB cap) only when
+  it changed, on the cluster loop's reconcile cadence and immediately after a
+  successful link. Status lives in the `cloud_backup` setting
+  (`{hash, pushed_at, error}`) and is surfaced as `backup` on
+  `GET /api/cluster/account`. The CP stores one backup per `(account, node)` in
+  `node_backups` and deletes it on unlink.
+- **Split-off (`POST /api/cluster/split`).** A node can leave its cluster and
+  immediately found a new one, keeping its data: it captures the account token,
+  runs the leave flow (peers drop subscriptions; the shared tunnel is stopped
+  only when other nodes exist; stacks are never torn down; the account link is
+  kept), then `create_cluster_flow(name)` — which adopts the node's current
+  `ENCRYPTION_KEY`/`APP_SECRET`, so everything stays decryptable. CP 402s
+  propagate so the UI can show the upgrade prompt. The old cluster's remaining
+  nodes are unaffected.
+
 ---
 
 ## 12. Open questions

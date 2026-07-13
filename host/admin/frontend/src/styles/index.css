@@ -224,92 +224,8 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .icon-btn svg { width: 16px; height: 16px; }
 
-/* Accent color switcher */
-.accent-wrap { position: relative; display: inline-flex; }
-.accent-swatch {
-  width: 24px; height: 24px; border-radius: 50%;
-  border: 2px solid var(--border-strong);
-  cursor: pointer;
-  padding: 0;
-  transition: border-color 150ms, transform 100ms, box-shadow 150ms;
-  box-shadow: 0 0 0 0 var(--accent-glow);
-}
-.accent-swatch:hover { border-color: var(--text); transform: scale(1.06); box-shadow: 0 0 0 4px var(--accent-glow); }
-.accent-swatch:focus-visible { outline: none; border-color: var(--text); box-shadow: 0 0 0 3px var(--accent-glow); }
-
-.color-picker-popover {
-  position: absolute; top: calc(100% + 0.6rem); right: 0;
-  z-index: 1100;
-  width: 280px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: 0.85rem;
-  display: flex; flex-direction: column; gap: 0.85rem;
-  animation: slide-in 0.15s ease-out;
-}
-.color-picker-row { display: flex; gap: 0.6rem; }
-.sv-pad {
-  flex: 1; height: 160px;
-  border-radius: var(--radius-sm);
-  position: relative;
-  cursor: crosshair;
-  touch-action: none;
-}
-.sv-thumb {
-  position: absolute; width: 14px; height: 14px;
-  border-radius: 50%; border: 2px solid #fff;
-  box-shadow: 0 0 0 1px rgba(0,0,0,0.3), 0 1px 4px rgba(0,0,0,0.4);
-  transform: translate(-50%, -50%);
-  pointer-events: none;
-}
-.hue-strip {
-  width: 16px; height: 160px;
-  border-radius: var(--radius-sm);
-  position: relative;
-  cursor: ns-resize;
-  touch-action: none;
-  background: linear-gradient(to bottom,
-    #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%,
-    #0000ff 67%, #ff00ff 83%, #ff0000 100%);
-}
-.hue-thumb {
-  position: absolute; left: -3px; right: -3px; height: 6px;
-  background: rgba(255,255,255,0.92);
-  border: 1px solid rgba(0,0,0,0.4);
-  border-radius: 3px;
-  transform: translateY(-50%);
-  pointer-events: none;
-}
-
-.color-picker-presets { display: flex; gap: 0.4rem; flex-wrap: wrap; }
-.color-preset {
-  width: 22px; height: 22px; border-radius: 50%;
-  border: 1px solid var(--border-strong);
-  cursor: pointer; padding: 0;
-  transition: transform 100ms, box-shadow 150ms;
-}
-.color-preset:hover { transform: scale(1.1); box-shadow: 0 0 0 2px var(--accent-glow); }
-
-.color-picker-bottom { display: flex; align-items: center; gap: 0.5rem; }
-.color-swatch-current {
-  width: 28px; height: 28px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border-strong);
-  flex-shrink: 0;
-}
-.color-hex-input {
-  flex: 1;
-  font-family: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, monospace;
-  font-size: 0.82rem;
-  text-transform: lowercase;
-  padding: 0.35rem 0.5rem !important;
-  width: auto !important;
-}
-
 /* Mobile: collapse nav labels to icon-only so the rest of the header
-   (logo, accent swatch, theme, sign out) all fit on a phone-width screen. */
+   (logo, theme, sign out) all fit on a phone-width screen. */
 @media (max-width: 720px) {
   .app-header { gap: 0.6rem; padding: 0.6rem 0.85rem; }
   .brand span { display: none; }
@@ -597,6 +513,21 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
     transform: translateX(var(--ind-x, 0px));
   }
 }
+
+/* Standalone chips — small non-interactive markers ("this node", "this
+   cluster"). Interactive picker chips live under .mode-chips below, whose
+   more-specific rules override the sizing/cursor here. */
+.chip {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  padding: 0.12rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem; font-weight: 500;
+  letter-spacing: 0.02em;
+  background: var(--btn-bg);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.chip.active { background: var(--accent-glow); color: var(--accent); }
 
 /* Mode chips */
 .mode-chips { display: flex; gap: 0.4rem; flex-wrap: wrap; }
@@ -903,3 +834,37 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 }
 .premium-callout h3 { display: flex; align-items: center; gap: 0.4rem; margin: 0; color: var(--text); }
 .premium-callout .dim { max-width: 60ch; }
+
+/* ── Cloud registry ("Your homeboxes") — cluster & standalone-node blocks ── */
+.cluster-block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  margin-top: 0.6rem;
+  overflow: hidden;
+}
+.cluster-block.current { border-color: var(--accent-2); }
+.cluster-block-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.75rem; flex-wrap: wrap;
+  padding: 0.55rem 0.9rem;
+  background: var(--tint);
+  border-bottom: 1px solid var(--border);
+}
+.cluster-block-nodes { padding: 0.15rem 0.9rem 0.3rem; }
+.registry-node {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.4rem 0;
+}
+.registry-node + .registry-node { border-top: 1px solid var(--border); }
+
+/* "or" between joining an existing cluster and starting a new one */
+.section-divider {
+  display: flex; align-items: center; gap: 0.6rem;
+  margin: 1rem 0 0.85rem;
+  color: var(--muted); font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 0.08em;
+}
+.section-divider::before, .section-divider::after {
+  content: ""; flex: 1; height: 1px; background: var(--border);
+}

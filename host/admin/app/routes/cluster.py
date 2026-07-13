@@ -10,12 +10,14 @@ import time
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import clusterlib
+from .. import backuplib, clusterlib
 from ..auth import require_session_api
 from ..config import settings
 from ..db import get_session
+from ..models import Identity
 from .oauth import build_account_link_start, installation_url
 
 log = logging.getLogger("homebox.cluster.api")
@@ -243,6 +245,40 @@ async def leave_cluster(
     return {"ok": True, **result}
 
 
+class SplitBody(BaseModel):
+    name: str
+    peer_url: str | None = None
+
+
+@router.post("/split")
+async def split_cluster(
+    body: SplitBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Split off: leave the current cluster and immediately found a new one
+    with this node as the seed, keeping its data and encryption keys. Stacks
+    are never torn down, the shared-tunnel connector only stops when other
+    nodes remain to serve it, and the account link is untouched."""
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(400, "Cluster name is required.")
+    if not await clusterlib.load_cluster(session):
+        raise HTTPException(400, "This node is not part of a cluster.")
+    peer_url = (body.peer_url or "").strip().rstrip("/")
+    if peer_url and not peer_url.startswith("http"):
+        peer_url = f"http://{peer_url}"
+    try:
+        result = await clusterlib.split_off_flow(session, name=name, peer_url=peer_url or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except clusterlib.ControlPlaneError as e:
+        raise _cp_http(e)  # preserves 402 plan gating for the upgrade notice
+    except clusterlib.PeerError as e:
+        raise HTTPException(502, str(e))
+    return {"ok": True, **result}
+
+
 class EvictBody(BaseModel):
     node_id: str
 
@@ -317,6 +353,23 @@ async def set_node_serving(
 # ───── homebox.sh account (token-less create/join) ────────────────────────────
 
 
+async def _suggested_link_identity(session: AsyncSession) -> dict[str, str] | None:
+    """The most recently used OAuth identity, for one-click account linking on
+    an unlinked node: {"provider", "email"}, or None when nobody has signed in
+    via OAuth yet."""
+    row = (await session.execute(
+        select(Identity)
+        .where(Identity.enabled == True,  # noqa: E712
+               Identity.last_login_provider.is_not(None),
+               Identity.last_login_at.is_not(None))
+        .order_by(Identity.last_login_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    if row is None:
+        return None
+    return {"provider": row.last_login_provider, "email": row.email}
+
+
 @router.get("/account")
 async def account_status(
     user: str = Depends(require_session_api),
@@ -324,15 +377,24 @@ async def account_status(
 ):
     acct = await clusterlib.load_account(session)
     if not acct:
-        return {"linked": False}
+        return {"linked": False, "suggested": await _suggested_link_identity(session)}
     overview = await clusterlib._get_setting(session, clusterlib.ACCOUNT_OVERVIEW_KEY)
+    overview = overview if isinstance(overview, dict) else {}
+    account = overview.get("account")
+    account = account if isinstance(account, dict) else {}
+    backup = await clusterlib._get_setting(session, backuplib.CLOUD_BACKUP_KEY)
+    backup = backup if isinstance(backup, dict) else {}
     return {
         "linked": True,
         "control_plane_url": acct.get("control_plane_url"),
         "node_name": acct.get("node_name"),
         "peer_url": acct.get("peer_url"),
         "linked_at": acct.get("linked_at"),
-        "overview": overview if isinstance(overview, dict) else {},
+        "overview": overview,
+        "email": account.get("email"),
+        "plan": account.get("plan"),
+        "backup": {"pushed_at": backup.get("pushed_at"), "error": backup.get("error")},
+        "suggested": None,  # already linked — nothing to suggest
     }
 
 

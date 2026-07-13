@@ -2,13 +2,17 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import {
-  Cloud, Copy, Crown, ExternalLink, Gauge, Github, LogIn, Network, Plus, Power, PowerOff,
-  RefreshCw, Send, ShieldAlert, Ticket, Unplug, UserMinus,
+  Cloud, Copy, Crown, ExternalLink, Gauge, Github, LogIn, Network, Power, PowerOff,
+  RefreshCw, ShieldAlert, Split, Ticket, Unplug, UserMinus,
 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { Modal } from "../components/Modal";
+import { CloudRegistry } from "../components/CloudRegistry";
 import { useToast } from "../lib/toast";
-import type { UptimeReport, UptimeStatus } from "../lib/types";
+import { timeAgo } from "../lib/time";
+import type {
+  AccountOverview, AccountStatus, ClusterNode, NodeRole, UptimeReport, UptimeStatus,
+} from "../lib/types";
 
 const PRICING_URL = "https://homebox.sh/cloud";
 
@@ -32,19 +36,6 @@ function GoogleIcon({ size = 16 }: { size?: number }) {
  * the health of every node in the cluster, with this node's own uptime
  * detail kept below it.
  */
-
-type NodeRole = "peer" | "mirror";
-
-type ClusterNode = {
-  node_id: string;
-  name: string;
-  peer_url: string;
-  version: string;
-  ordinal?: number;
-  online: boolean;
-  serving?: boolean;
-  role?: NodeRole;
-};
 
 type ClusterLicense = {
   valid: boolean;
@@ -157,17 +148,9 @@ function CloudMirrorCard({
   const state: MirrorState = mirror?.status ?? "none";
 
   if (state === "none" || state === "decommissioned") {
-    if (locked) {
-      return (
-        <PremiumCallout
-          pitch="Add a homebox.sh cloud standby that stays in sync with your cluster and automatically serves your apps if every local node goes down."
-          onUpgrade={onUpgrade}
-          pending={upgradePending}
-          accountLinked={accountLinked}
-          onConnectAccount={onConnectAccount}
-        />
-      );
-    }
+    // Premium cloud-standby upsell hidden for now — non-premium plans just don't
+    // see the Cloud Mirror section.
+    if (locked) return null;
     return (
       <div className="card">
         <h3 style={{ marginTop: 0 }}><Cloud size={15} /> Cloud Mirror</h3>
@@ -224,16 +207,6 @@ function CloudMirrorCard({
     </div>
   );
 }
-
-type AccountNode = { node_id: string; name: string; peer_url: string; online: boolean };
-type AccountCluster = { cluster_id: string; name: string; nodes: ClusterNode[] };
-type AccountStatus = {
-  linked: boolean;
-  node_name?: string;
-  peer_url?: string;
-  control_plane_url?: string;
-  overview?: { nodes?: AccountNode[]; clusters?: AccountCluster[]; polled_at?: string };
-};
 
 const UPTIME_COLORS: Record<UptimeStatus, string> = {
   up: "var(--accent)",
@@ -349,6 +322,9 @@ export function System() {
   const [showManualJoin, setShowManualJoin] = useState(false);
   const [upgradeNotice, setUpgradeNotice] = useState<string | null>(null);
   const [confirmDisableMirror, setConfirmDisableMirror] = useState(false);
+  // "Split off" — this node leaves its cluster and immediately founds a new one.
+  const [confirmSplit, setConfirmSplit] = useState(false);
+  const [splitName, setSplitName] = useState("home");
   // "Connect homebox.sh account" modal — OAuth-first, with a collapsed
   // manual-token fallback (the pre-existing link form).
   const [connectModalOpen, setConnectModalOpen] = useState(false);
@@ -516,6 +492,21 @@ export function System() {
     onSuccess: () => { invalidate(); setConfirmLeave(false); toast.show("Left the cluster (disconnected)", "ok"); },
     onError: onErr,
   });
+  const split = useMutation({
+    mutationFn: () =>
+      api.post<{ ok: boolean; cluster_id: string; name: string }>("/api/cluster/split", { name: splitName.trim() }),
+    onSuccess: (d) => {
+      setConfirmSplit(false);
+      invalidate();
+      toast.show(`Split off — this node now founds the "${d.name}" cluster`, "ok");
+    },
+    onError: (e) => {
+      // Plan-limit 402s surface in the upgrade banner behind the modal — close
+      // it so the banner is readable; other errors keep the modal open to retry.
+      if (e instanceof ApiError && e.status === 402) setConfirmSplit(false);
+      onErrOrUpgrade(e);
+    },
+  });
   const upgrade = useMutation({
     mutationFn: () => api.post<{ url: string }>("/api/cluster/upgrade"),
     onSuccess: (d) => { window.open(d.url, "_blank"); },
@@ -600,10 +591,7 @@ export function System() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const overview = account?.overview ?? {};
-  const rosterIds = new Set((status?.roster ?? []).map(n => n.node_id));
-  const invitableNodes = (overview.nodes ?? []).filter(n => !rosterIds.has(n.node_id));
-
+  const overview: AccountOverview = account?.overview ?? {};
   const license = status?.license;
   const clusterLocked = clusterIsLocked(license);
   const mirrorLocked = mirrorIsLocked(license);
@@ -616,14 +604,38 @@ export function System() {
     link.mutate();
   }
 
-  // "Join a cluster" — sign in to homebox.sh, then create or join a cluster
-  // with the linked nodes it reports. Also used (in a smaller role) to invite
-  // other linked nodes once this node is already clustered.
+  // Metadata-backup freshness for THIS node — a quiet reassurance line under
+  // the linked-account header (ok = pushed recently, warn = last push failed).
+  const backupLine = (() => {
+    const b = account?.backup;
+    if (b?.error) {
+      return (
+        <div className="row" style={{ marginTop: "0.6rem", gap: "0.5rem" }}>
+          <span className="badge warn">backup issue</span>
+          <span className="dim">Cloud backup: {b.error}</span>
+        </div>
+      );
+    }
+    const pushed = timeAgo(b?.pushed_at);
+    return (
+      <div className="row" style={{ marginTop: "0.6rem", gap: "0.5rem" }}>
+        <span className={`badge ${pushed ? "ok" : "plain"}`}>{pushed ? "backed up" : "pending"}</span>
+        <span className="dim">Cloud backup: {pushed ?? "pending"}</span>
+      </div>
+    );
+  })();
+
+  // The homebox.sh account card. Linked → identity (email · plan · backup) plus
+  // the cloud registry of ALL your homeboxes (clusters and standalone nodes),
+  // visible from any node. Not linked → one-click connect (with a suggested
+  // identity when the control plane recognizes the admin login) or the modal.
   const accountSection = account?.linked ? (
     <div className="card">
       <div className="card-row">
         <div className="row">
           <span className="badge ok"><LogIn size={12} /> homebox.sh account linked</span>
+          {account.email && <strong>{account.email}</strong>}
+          <span className="badge plain">{planLabel(account.plan ?? undefined)}</span>
           <span className="dim">as {account.node_name || "unnamed node"} · {account.peer_url}</span>
         </div>
         <div className="row" style={{ gap: "0.5rem" }}>
@@ -634,80 +646,23 @@ export function System() {
         </div>
       </div>
 
-      {status?.active ? (
-        // Already in a cluster — the cluster and its nodes are shown in the card
-        // above, so here we only surface OTHER linked nodes available to invite.
-        // Nothing to invite → render nothing.
-        invitableNodes.length > 0 && (
-          <>
-            <h3 style={{ marginTop: "0.9rem" }}>Other linked nodes</h3>
-            {invitableNodes.map(n => (
-              <div key={n.node_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
-                <div className="row" style={{ gap: "0.5rem" }}>
-                  <span className={`badge ${n.online ? "ok" : "fail"}`}>{n.online ? "online" : "offline"}</span>
-                  <strong>{n.name || n.node_id}</strong>
-                  <span className="dim">{n.peer_url}</span>
-                </div>
-                <button className="btn ghost" onClick={() => inviteNode.mutate(n.node_id)} disabled={inviteNode.isPending}>
-                  <Send size={14} /> Invite to this cluster
-                </button>
-              </div>
-            ))}
-          </>
-        )
-      ) : (
-        // Not in a cluster yet — full picker: join an existing cluster, or
-        // create one with this node as the seed.
-        <>
-          {(overview.clusters ?? []).length > 0 && (
-            <>
-              <h3 style={{ marginTop: "0.9rem" }}>Your clusters</h3>
-              {(overview.clusters ?? []).map(cl => (
-                <div key={cl.cluster_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
-                  <div className="row" style={{ gap: "0.5rem" }}>
-                    <strong>{cl.name}</strong>
-                    <span className="dim">{cl.cluster_id}</span>
-                    <span className="badge">{cl.nodes.length} node{cl.nodes.length === 1 ? "" : "s"}</span>
-                  </div>
-                  <button className="btn primary" onClick={() => joinCluster.mutate(cl.cluster_id)}
-                    disabled={joinCluster.isPending || clusterLocked}
-                    title={clusterLocked ? "Upgrade to Homebox Premium to join a cluster" : undefined}>
-                    Join this cluster
-                  </button>
-                </div>
-              ))}
-            </>
-          )}
+      {backupLine}
 
-          <h3 style={{ marginTop: "0.9rem" }}>Linked nodes</h3>
-          {(overview.nodes ?? []).map(n => (
-            <div key={n.node_id} className="row" style={{ justifyContent: "space-between", padding: "0.35rem 0", flexWrap: "wrap", gap: "0.5rem" }}>
-              <div className="row" style={{ gap: "0.5rem" }}>
-                <span className={`badge ${n.online ? "ok" : "fail"}`}>{n.online ? "online" : "offline"}</span>
-                <strong>{n.name || n.node_id}</strong>
-                {n.node_id === status?.node_id && <span className="chip active">this node</span>}
-                <span className="dim">{n.peer_url}</span>
-              </div>
-            </div>
-          ))}
-          {(overview.nodes ?? []).length <= 1 && (
-            <div className="dim" style={{ marginTop: "0.4rem" }}>
-              Sign in on your other homebox nodes with the same account token — they'll appear here,
-              ready to invite.
-            </div>
-          )}
-
-          <div className="row" style={{ marginTop: "0.9rem", gap: "0.5rem" }}>
-            <input value={newClusterName} onChange={e => setNewClusterName(e.target.value)}
-                   placeholder="cluster name" style={{ maxWidth: 200 }} />
-            <button className="btn primary" onClick={() => createCluster.mutate()}
-              disabled={createCluster.isPending || clusterLocked}
-              title={clusterLocked ? "Upgrade to Homebox Premium to create a cluster" : undefined}>
-              <Plus size={14} /> Create cluster with this node
-            </button>
-          </div>
-        </>
-      )}
+      <CloudRegistry
+        overview={overview}
+        thisNodeId={status?.node_id}
+        thisClusterId={status?.cluster_id}
+        clustered={!!status?.active}
+        clusterLocked={clusterLocked}
+        onJoin={(cluster_id) => joinCluster.mutate(cluster_id)}
+        joinPending={joinCluster.isPending}
+        onInvite={(node_id) => inviteNode.mutate(node_id)}
+        invitePending={inviteNode.isPending}
+        newClusterName={newClusterName}
+        onNewClusterName={setNewClusterName}
+        onCreateCluster={() => createCluster.mutate()}
+        createPending={createCluster.isPending}
+      />
     </div>
   ) : (
     <div className="card">
@@ -716,9 +671,31 @@ export function System() {
         Link this node to your account to see all your nodes and clusters from anywhere,
         create clusters, and add nodes with one click.
       </p>
-      <button className="btn primary" onClick={() => setConnectModalOpen(true)}>
-        <LogIn size={14} /> Connect account
-      </button>
+      {account?.suggested ? (
+        // The control plane recognized the admin's login identity — offer a
+        // one-click connect that goes straight to the OAuth popup, no modal hop.
+        <div className="row" style={{ gap: "0.5rem" }}>
+          <button className="btn primary" onClick={() => oauthStart.mutate(account.suggested!.provider)}
+            disabled={oauthStart.isPending || !!oauthPopup}>
+            {oauthStart.isPending || oauthPopup
+              ? <span className="spinner" />
+              : account.suggested.provider === "github" ? <Github size={15} /> : <GoogleIcon size={15} />}
+            Continue with {account.suggested.provider === "github" ? "GitHub" : "Google"} as {account.suggested.email}
+          </button>
+          <button className="btn ghost" onClick={() => setConnectModalOpen(true)}>
+            Use a different account
+          </button>
+        </div>
+      ) : (
+        <button className="btn primary" onClick={() => setConnectModalOpen(true)}>
+          <LogIn size={14} /> Connect account
+        </button>
+      )}
+      {oauthPopup && !connectModalOpen && (
+        <div className="row dim" style={{ marginTop: "0.6rem" }}>
+          <span className="spinner" /> Waiting for you to finish in the popup…
+        </div>
+      )}
     </div>
   );
 
@@ -777,6 +754,15 @@ export function System() {
               <button className="btn ghost" onClick={() => mint.mutate()} disabled={mint.isPending}>
                 <Ticket size={14} /> Join token
               </button>
+              <button className="btn ghost danger"
+                title="Leave this cluster and immediately found a new one with this node"
+                onClick={() => {
+                  const selfName = (status.roster ?? []).find(n => n.node_id === status.node_id)?.name;
+                  setSplitName(selfName || account?.node_name || "home");
+                  setConfirmSplit(true);
+                }}>
+                <Split size={14} /> Split off…
+              </button>
               <button className="btn ghost danger" onClick={() => setConfirmLeave(true)}>
                 <Unplug size={14} /> Leave…
               </button>
@@ -822,8 +808,13 @@ export function System() {
             const isMirror = n.role === "mirror";
             const serving = n.serving !== false;
             const isSelf = n.node_id === status.node_id;
-            const servingCount = (status.roster ?? []).filter(x => x.serving !== false).length;
-            const isLastServing = serving && servingCount <= 1;
+            // Standby mirrors (serving=false by design) don't count toward the
+            // last-serving guard, and an ONLINE mirror lifts it entirely — the
+            // backend allows draining the last peer when a standby can
+            // auto-promote, so the button must too.
+            const servingPeers = (status.roster ?? []).filter(x => x.role !== "mirror" && x.serving !== false).length;
+            const mirrorStandby = (status.roster ?? []).some(x => x.role === "mirror" && x.online);
+            const isLastServing = serving && !isMirror && servingPeers <= 1 && !mirrorStandby;
             return (
             <div key={n.node_id} className="row" style={{ justifyContent: "space-between", gap: "0.75rem", flexWrap: "wrap", padding: "0.4rem 0" }}>
               <div className="row" style={{ gap: "0.5rem", minWidth: 0 }}>
@@ -957,6 +948,38 @@ export function System() {
           <input type="checkbox" checked={teardownStacks} onChange={e => setTeardownStacks(e.target.checked)} />
           Also tear down cluster-replicated app stacks on this node
         </label>
+      </Modal>
+
+      <Modal
+        open={confirmSplit}
+        title="Split off into a new cluster"
+        onClose={() => { if (!split.isPending) setConfirmSplit(false); }}
+        footer={
+          <>
+            <button className="btn ghost" onClick={() => setConfirmSplit(false)} disabled={split.isPending}>
+              Cancel
+            </button>
+            <button className="btn danger" onClick={() => split.mutate()}
+              disabled={split.isPending || !splitName.trim()}>
+              {split.isPending ? <span className="spinner" /> : <><Split size={14} /> Split off</>}
+            </button>
+          </>
+        }
+      >
+        <label>New cluster name
+          <input value={splitName} onChange={e => setSplitName(e.target.value)}
+                 placeholder="home" autoFocus />
+        </label>
+        <ul className="dim" style={{ margin: "0.85rem 0 0", paddingLeft: "1.15rem", display: "grid", gap: "0.35rem" }}>
+          <li>This node leaves the <strong>{status?.name || "current"}</strong> cluster and immediately
+              founds a new one.</li>
+          <li>Projects and data on this node are kept.</li>
+          <li>Other nodes are unaffected and keep serving.</li>
+          {(status?.roster ?? []).length > 1 && (
+            <li>This node disconnects from the shared tunnel — you may need to reconnect a tunnel
+                for public routing.</li>
+          )}
+        </ul>
       </Modal>
 
       <Modal

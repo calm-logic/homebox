@@ -11,7 +11,7 @@ else
 SUDO :=
 endif
 
-.PHONY: help host configure reset-password admin admin-logs admin-down admin-reset reonboard boot enable-boot cli init
+.PHONY: help host configure reset-password admin admin-logs admin-down admin-reset infra reonboard boot enable-boot cli init
 
 DB_CONTAINER := homebox-admin-db
 
@@ -24,6 +24,7 @@ help:
 	@echo "  make admin-logs  Tail admin app logs"
 	@echo "  make admin-down  Stop the admin app stack"
 	@echo "  make admin-reset WIPES the admin DB (down -v) then rebuilds — you re-onboard after"
+	@echo "  make infra       Sync & re-up the base-infrastructure stack (Traefik + docker-proxy)"
 	@echo "  make reonboard   Clear the Cloudflare connection so onboarding runs again (keeps projects/identities)"
 	@echo "  make boot        Bring the whole stack up now (same script systemd runs on boot)"
 	@echo "  make enable-boot Install + enable the systemd unit so Homebox auto-starts on boot"
@@ -64,6 +65,14 @@ admin-reset:
 	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'cluster-keys.json' --exclude 'node_modules' --exclude 'dist' --exclude '__pycache__' --exclude '.venv' host/admin/ /opt/homebox/admin/
 	$(SUDO) bash -c 'cd /opt/homebox/admin && docker compose --env-file .env down -v && docker compose --env-file .env up -d --build'
 	@echo ">>> Admin reset complete. Sign in and re-run onboarding."
+
+infra:
+	@echo ">>> Syncing base-infrastructure from repo to /opt/homebox/base-infrastructure"
+	$(SUDO) rsync -a --delete --exclude '.env' --exclude 'domains.json' host/host-provisioner/base-infrastructure/ /opt/homebox/base-infrastructure/
+	$(SUDO) bash -c 'cd /opt/homebox/base-infrastructure && docker compose --env-file .env up -d'
+	@echo ""
+	@echo ">>> Base infrastructure updated. Traefik image now:"
+	@$(SUDO) docker inspect homebox-traefik --format '    {{.Config.Image}}' 2>/dev/null || true
 
 reonboard:
 	@echo ">>> Clearing the Cloudflare connection so the onboarding wizard runs again."

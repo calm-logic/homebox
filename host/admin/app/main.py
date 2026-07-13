@@ -1,3 +1,4 @@
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,10 +9,10 @@ from fastapi.staticfiles import StaticFiles
 
 from sqlalchemy import select, update
 
-from . import clusterlib, metrics, monitor
+from . import clusterlib, metrics, migrate, monitor
 from .auth import RequiresLogin
 from .config import settings
-from .db import Base, engine, SessionLocal
+from .db import SessionLocal
 from .models import Domain, Deployment, Identity
 from .routes import (
     auth as auth_routes,
@@ -98,45 +99,10 @@ async def _fail_interrupted_deployments() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # create_all never alters existing tables — apply additive columns here.
-        await conn.exec_driver_sql(
-            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS domain_id "
-            "INTEGER REFERENCES domains(id) ON DELETE SET NULL"
-        )
-        await conn.exec_driver_sql(
-            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS require_checks "
-            "BOOLEAN NOT NULL DEFAULT TRUE"
-        )
-        await conn.exec_driver_sql(
-            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS promotion_gate "
-            "BOOLEAN NOT NULL DEFAULT FALSE"
-        )
-        await conn.exec_driver_sql(
-            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS e2e_workflow VARCHAR(255)"
-        )
-        await conn.exec_driver_sql(
-            "ALTER TABLE environments ADD COLUMN IF NOT EXISTS promote_from_env_id "
-            "INTEGER REFERENCES environments(id) ON DELETE SET NULL"
-        )
-        await conn.exec_driver_sql(
-            "ALTER TABLE domains ADD COLUMN IF NOT EXISTS zone_status "
-            "VARCHAR(16) NOT NULL DEFAULT 'active'"
-        )
-        await conn.exec_driver_sql(
-            "ALTER TABLE domains ADD COLUMN IF NOT EXISTS zone_id VARCHAR(64)"
-        )
-        await conn.exec_driver_sql(
-            "ALTER TABLE domains ADD COLUMN IF NOT EXISTS name_servers JSON"
-        )
-        await conn.exec_driver_sql(
-            "ALTER TABLE deployments ADD COLUMN IF NOT EXISTS node_id VARCHAR(64)"
-        )
-        await conn.exec_driver_sql(
-            "ALTER TABLE projects ADD COLUMN IF NOT EXISTS domain_mode "
-            "VARCHAR(32) NOT NULL DEFAULT 'container'"
-        )
+    # Bring the admin DB to head. Alembic is synchronous, so run it off the event
+    # loop. On pre-Alembic databases this auto-adopts (reconcile → stamp 0001 →
+    # upgrade); see app/migrate.py. Replaces the old create_all + ADD COLUMN block.
+    await asyncio.to_thread(migrate.run_migrations)
     settings.projects_host_dir.mkdir(parents=True, exist_ok=True)
     await _fail_interrupted_deployments()
     await _seed_primary_domain()

@@ -408,6 +408,7 @@ async def create_cluster_flow(
     # compose recreate with stale env) stays on the cluster keys.
     _write_cluster_keys(settings.encryption_key, settings.app_secret)
     await ensure_peer_route(session)
+    await session.commit()
     return state
 
 
@@ -527,8 +528,10 @@ async def join_cluster_flow(
     if settings.node_role == "mirror":
         await _set_setting(session, APP_SERVING_KEY, False)
         await _set_setting(session, MIRROR_PROMOTED_KEY, False)
-        await session.commit()
     await ensure_peer_route(session)
+    # get_session never commits — without this the membership blob rolls back
+    # at request close and the restart comes up standalone.
+    await session.commit()
     restart_self_soon()
     return state
 
@@ -575,7 +578,20 @@ async def link_account_flow(
         "linked_at": datetime.utcnow().isoformat(),
     }
     await _set_setting(session, ACCOUNT_KEY, blob)
-    await account_poll(session, blob)
+    # Persist the link before the best-effort extras below — a failure in the
+    # poll/backup must not roll back a link the control plane already recorded.
+    await session.commit()
+    try:
+        await account_poll(session, blob)
+    except ControlPlaneError as e:
+        log.warning("initial account poll failed (overview fills in next cycle): %s", e)
+    # Seed the cloud metadata backup right away so the UI shows a backup
+    # timestamp without waiting for the loop's next reconcile cycle.
+    try:
+        from . import backuplib
+        await backuplib.push_backup_if_changed(session)
+    except Exception:  # noqa: BLE001 — the link itself already succeeded
+        log.exception("initial cloud backup push failed")
     return blob
 
 
@@ -590,6 +606,7 @@ async def unlink_account(session: AsyncSession) -> None:
             log.warning("account unlink at control plane failed: %s", e)
     await _set_setting(session, ACCOUNT_KEY, {})
     await _set_setting(session, ACCOUNT_OVERVIEW_KEY, {})
+    await session.commit()
 
 
 async def account_poll(session: AsyncSession, acct: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -607,6 +624,9 @@ async def account_poll(session: AsyncSession, acct: dict[str, Any] | None = None
     )
     overview["polled_at"] = datetime.utcnow().isoformat()
     await _set_setting(session, ACCOUNT_OVERVIEW_KEY, overview)
+    # Commit here, not in callers: the loop's steady-state cycles have no other
+    # commit, so the registry/online cache would silently roll back every time.
+    await session.commit()
     return overview
 
 
@@ -719,8 +739,71 @@ async def leave_cluster_flow(
         except ControlPlaneError as e:
             log.warning("leave: control-plane deregister failed: %s", e)
     await clear_cluster(session)
+    await session.commit()
     log.info("left cluster %s: %s", state["cluster_id"], result)
     return result
+
+
+async def split_off_flow(
+    session: AsyncSession, *, name: str, peer_url: str | None = None,
+) -> dict[str, Any]:
+    """Leave the current cluster and immediately found a NEW one with this node
+    as the seed, keeping its data and keys. create_cluster_flow adopts the
+    node's current ENCRYPTION_KEY/APP_SECRET, so everything encrypted locally
+    stays decryptable — that's the point of split vs leave+fresh-create.
+
+    Stacks are never torn down. The shared-tunnel connector is stopped only
+    when OTHER nodes remain in the roster to serve it — a lone node splitting
+    off keeps its connector (there's nobody else to route to). The homebox.sh
+    account link is untouched. The leave half is best-effort (same tolerance as
+    leave_cluster_flow); control-plane errors from the create half propagate
+    (esp. 402 plan gating, which routes surface to the UI)."""
+    state = await load_cluster(session)
+    if not state:
+        raise ValueError("This node is not part of a cluster.")
+    acct_token = account_token(state)
+    if not acct_token:
+        blob = await load_account(session)
+        acct_token = crypto.decrypt(blob["token_encrypted"]) if blob else ""
+    if not acct_token:
+        raise ValueError(
+            "No account credential on this node — link a homebox.sh account "
+            "(or split off from the founding node)."
+        )
+    # Capture identity BEFORE leaving (leave clears the cluster blob).
+    node_id = await get_node_id(session)
+    control_plane_url = state["control_plane_url"]
+    node_name = state.get("node_name") or ""
+    new_peer_url = (peer_url or state.get("peer_url") or "").strip()
+    has_other_nodes = bool(peers(state, node_id))
+
+    # Pre-flight the plan gate BEFORE the destructive leave half: peers drop
+    # their replication to us during leave, so a 402 on the create half would
+    # otherwise strand the node half-out of its cluster. An unreachable/old
+    # control plane skips the check — the create call still enforces.
+    try:
+        me = await _cp("GET", control_plane_url, "/v1/accounts/me", token=acct_token)
+    except ControlPlaneError:
+        me = None
+    if me is not None and isinstance(me.get("features"), list) and "cluster" not in me["features"]:
+        raise ControlPlaneError(
+            "plan gate: cluster feature missing",
+            status_code=402,
+            detail="Your plan doesn't include clustering — upgrade at homebox.sh/cloud to split off into a new cluster.",
+        )
+
+    await leave_cluster_flow(session, stop_tunnel=has_other_nodes, teardown_stacks=False)
+    new_state = await create_cluster_flow(
+        session,
+        control_plane_url=control_plane_url,
+        account_token_plain=acct_token,
+        name=name,
+        peer_url=new_peer_url,
+        node_name=node_name,
+    )
+    await session.commit()
+    log.info("split off into new cluster %s (%s)", new_state["cluster_id"], new_state["name"])
+    return {"cluster_id": new_state["cluster_id"], "name": new_state["name"]}
 
 
 async def evict_node(session: AsyncSession, node_id_to_evict: str) -> dict[str, Any]:
@@ -741,6 +824,7 @@ async def evict_node(session: AsyncSession, node_id_to_evict: str) -> dict[str, 
                      token=acct)
     state["roster"] = resp.get("nodes") or state.get("roster")
     await save_cluster(session, state)
+    await session.commit()
     # Clean up our side right away rather than waiting for the next cycle.
     await ensure_db_replication(session, state)
     return resp
@@ -1192,6 +1276,15 @@ async def cluster_loop() -> None:
                         await _maybe_autojoin(session, overview)
                 except ControlPlaneError as e:
                     log.warning("account poll failed: %s", e)
+                # Cloud metadata backup: for account-linked nodes (clustered or
+                # standalone), on the same cadence as the reconcile work.
+                # Deduped by content hash inside push_backup_if_changed.
+                if cycle % RECONCILE_EVERY == 0:
+                    try:
+                        from . import backuplib
+                        await backuplib.push_backup_if_changed(session)
+                    except Exception:  # noqa: BLE001
+                        log.exception("cloud backup push failed")
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — the loop must survive anything

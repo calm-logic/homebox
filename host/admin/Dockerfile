@@ -47,6 +47,8 @@ RUN pip install --no-cache-dir \
     "pydantic-settings>=2.4" \
     "sqlalchemy[asyncio]>=2.0" \
     "asyncpg>=0.29" \
+    "alembic>=1.13" \
+    "psycopg[binary]>=3.2" \
     "httpx>=0.27" \
     "cryptography>=43" \
     "bcrypt>=4.2" \

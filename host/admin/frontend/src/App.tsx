@@ -5,7 +5,6 @@ import { Layout } from "./components/Layout";
 import { RequireAuth } from "./components/RequireAuth";
 import { ToastProvider } from "./lib/toast";
 import { ThemeProvider } from "./lib/theme";
-import { AccentProvider } from "./lib/accent";
 import { api } from "./lib/api";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
@@ -56,7 +55,6 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
-        <AccentProvider>
         <ToastProvider>
           <BrowserRouter>
           <Routes>
@@ -86,7 +84,6 @@ export function App() {
           </Routes>
           </BrowserRouter>
         </ToastProvider>
-        </AccentProvider>
       </ThemeProvider>
     </QueryClientProvider>
   );
