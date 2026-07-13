@@ -143,6 +143,12 @@ def test_fresh_matches_adopted_legacy():
             )
             for tbl, col in _TRANSITIONAL:
                 conn.exec_driver_sql(f"ALTER TABLE {tbl} DROP COLUMN {col}")
+            # Old installs also carried a NOT NULL domains.mode (no default),
+            # which the rework moved to projects.domain_mode. Recreate it so
+            # adoption proves revision 0002 drops it.
+            conn.exec_driver_sql("ALTER TABLE domains ADD COLUMN mode VARCHAR(16)")
+            conn.exec_driver_sql("UPDATE domains SET mode = 'container'")
+            conn.exec_driver_sql("ALTER TABLE domains ALTER COLUMN mode SET NOT NULL")
         eng.dispose()
 
         # Adopt: reconcile → stamp 0001 → upgrade head.
@@ -159,7 +165,7 @@ def test_fresh_matches_adopted_legacy():
         # And the legacy DB really did get re-adopted (columns restored + stamped).
         with create_engine(migrate.sync_url(legacy_url)).connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-            assert ver == "0001"
+            assert ver == "0002"
             assert conn.execute(text(
                 "SELECT domain_mode FROM projects WHERE name='legacy'"
             )).scalar() == "container"
