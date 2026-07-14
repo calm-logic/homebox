@@ -202,6 +202,11 @@ spock.enable_ddl_replication = 'off'
 # GUC name varies across snowflake extension versions — set both.
 snowflake.node = '${NODE_ORDINAL}'
 snowflake.node_id = '${NODE_ORDINAL}'
+# lolor (large-object logical replication): new LO oids are node-encoded from
+# this value, so concurrent lo_create on different nodes can't collide. Must
+# live in postgresql.conf — ALTER SYSTEM rejects the prefix until the module
+# is loaded in the issuing backend.
+lolor.node = '${NODE_ORDINAL}'
 EOF
 """,
     "30-restart.sh": """#!/usr/bin/env bash
@@ -210,7 +215,9 @@ pg_ctl -D "$PGDATA" -m fast restart
 """,
     "40-extensions.sh": """#!/usr/bin/env bash
 set -Eeo pipefail
-for EXT in spock snowflake; do
+# lolor reroutes the lo_* API into replicable lolor.* tables (native
+# pg_largeobject is a catalog and never travels over logical replication).
+for EXT in spock snowflake lolor; do
   psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \\
     -c "CREATE EXTENSION IF NOT EXISTS \\"$EXT\\";"
 done
@@ -516,6 +523,40 @@ async def ensure_replication(
                     f"{table}.{col} is a 32-bit auto-increment — snowflake ids don't fit, "
                     f"so cross-node inserts CAN collide. Migrate it to bigint or uuid."
                 )
+
+    # 1d. lolor: large objects. Native pg_largeobject is a system catalog, so
+    # logical replication (and thus Spock) silently skips it — apps storing
+    # files as LOs would replicate everything EXCEPT the files. lolor reroutes
+    # the lo_* API into replicable lolor.* tables. Init scripts handle fresh
+    # volumes; this self-heals databases initialized before lolor support.
+    # Skipped quietly on images that don't ship the extension.
+    code, out = await _psql(container, admin, pw, db,
+                            "SELECT 1 FROM pg_available_extensions WHERE name='lolor';")
+    if code == 0 and out.strip() == "1":
+        code, out = await _psql(container, admin, pw, db,
+                                "CREATE EXTENSION IF NOT EXISTS lolor;")
+        if code != 0:
+            result["errors"].append(f"lolor extension: {out[:200]}")
+        # The node GUC must live in postgresql.conf: ALTER SYSTEM refuses the
+        # prefix unless the module is loaded in the issuing backend, and psql
+        # runs multi-statement -c strings in one transaction (where ALTER
+        # SYSTEM is forbidden), so LOAD-then-ALTER can't ride one _psql call.
+        # sed-or-append keeps the value converged with the node's current
+        # spock ordinal (leave/rejoin changes it).
+        conf_cmd = (
+            'if grep -q "^lolor.node" "$PGDATA/postgresql.conf"; then '
+            f'sed -i "s|^lolor.node.*|lolor.node = \'{ord_from_db}\'|" "$PGDATA/postgresql.conf"; '
+            f'else echo "lolor.node = \'{ord_from_db}\'" >> "$PGDATA/postgresql.conf"; fi'
+        )
+        code, out = await _docker(["exec", container, "bash", "-c", conf_cmd], timeout=30)
+        if code != 0:
+            result["errors"].append(f"lolor.node conf: {out[:200]}")
+        await _psql(container, admin, pw, db, "SELECT pg_reload_conf();")
+    else:
+        result["warnings"].append(
+            "lolor extension unavailable in this Postgres image — large objects "
+            "will NOT replicate; redeploy with a current pgEdge image."
+        )
 
     # 2. add public tables to the replication set (PK tables → default,
     #    PK-less tables → insert-only). Migration-bookkeeping tables NEVER

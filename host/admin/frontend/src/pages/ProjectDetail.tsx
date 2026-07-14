@@ -406,15 +406,18 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [name, setName] = useState(project.name);
   const [domainId, setDomainId] = useState<string>(project.domain_id ? String(project.domain_id) : "");
-  const [autoDeploy, setAutoDeploy] = useState(project.auto_deploy);
   const [requireChecks, setRequireChecks] = useState(project.require_checks);
   // "By environment" reveals the per-env override rows below each toggle;
   // saving while collapsed clears any stale overrides back to the default.
   const [domainScope, setDomainScope] = useState<"single" | "by_env">(
     () => project.environments.some(e => e.domain_id) ? "by_env" : "single"
   );
-  const [deployMode, setDeployMode] = useState<"simple" | "by_env">(
-    () => project.environments.some(e => e.promotion_gate) ? "by_env" : "simple"
+  // "Manual only" folds the old auto-deploy switch into this select: pushes
+  // are ignored entirely (auto_deploy=false). Per-env promotion settings are
+  // left untouched while manual — they're inert without auto-deploy.
+  const [deployMode, setDeployMode] = useState<"manual" | "simple" | "by_env">(
+    () => !project.auto_deploy ? "manual"
+      : project.environments.some(e => e.promotion_gate) ? "by_env" : "simple"
   );
   // How this project's hostnames are shaped (see app/urls.py) — a
   // project-level setting, not tied to whichever domain it's assigned to.
@@ -445,15 +448,17 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
     mutationFn: async () => {
       await api.patch(`/api/projects/${project.id}`, {
         name, domain_id: domainId ? Number(domainId) : 0, domain_mode: domainMode,
-        auto_deploy: autoDeploy, require_checks: requireChecks,
+        auto_deploy: deployMode !== "manual", require_checks: requireChecks,
       });
       for (const env of project.environments) {
         const body: Record<string, unknown> = {};
         const chosen = domainScope === "by_env" ? (envDomains[env.id] ?? "") : "";
         if (chosen !== (env.domain_id ? String(env.domain_id) : "")) body.domain_id = chosen ? Number(chosen) : 0;
-        const gate = deployMode === "by_env" ? (envGates[env.id] ?? false) : false;
+        const gate = deployMode === "by_env" ? (envGates[env.id] ?? false)
+          : deployMode === "simple" ? false : env.promotion_gate;
         if (gate !== env.promotion_gate) body.promotion_gate = gate;
-        const e2e = deployMode === "by_env" ? (envE2e[env.id] ?? "").trim() : "";
+        const e2e = deployMode === "by_env" ? (envE2e[env.id] ?? "").trim()
+          : deployMode === "simple" ? "" : (env.e2e_workflow ?? "");
         if (e2e !== (env.e2e_workflow ?? "")) body.e2e_workflow = e2e;
         if (Object.keys(body).length > 0) {
           await api.patch(`/api/projects/${project.id}/environments/${env.id}`, body);
@@ -561,8 +566,9 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
         <label className="lbl">Deploy pipeline</label>
         <select
           value={deployMode}
-          onChange={e => setDeployMode(e.target.value as "simple" | "by_env")}
+          onChange={e => setDeployMode(e.target.value as "manual" | "simple" | "by_env")}
         >
+          <option value="manual">Manual only</option>
           <option value="simple">Deploy on push</option>
           <option value="by_env">By environment</option>
         </select>
@@ -597,11 +603,7 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
       })}
 
       <label className="row" style={{ cursor: "pointer", gap: "0.4rem", marginTop: "0.85rem" }}>
-        <input type="checkbox" checked={autoDeploy} onChange={e => setAutoDeploy(e.target.checked)} />
-        Auto-deploy on push to the tracked branch
-      </label>
-      <label className="row" style={{ cursor: "pointer", gap: "0.4rem", marginTop: "0.5rem" }}>
-        <input type="checkbox" checked={requireChecks} onChange={e => setRequireChecks(e.target.checked)} disabled={!autoDeploy} />
+        <input type="checkbox" checked={requireChecks} onChange={e => setRequireChecks(e.target.checked)} disabled={deployMode === "manual"} />
         Wait for GitHub checks to pass before deploying
       </label>
 
