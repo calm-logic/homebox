@@ -47,7 +47,7 @@ export function Projects() {
         <h1 style={{ margin: 0 }}>Projects</h1>
         <div className="spacer" />
         {hasGithub && (
-          <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add project</button>
+          <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add</button>
         )}
       </div>
       <p className="lede" style={{ marginTop: "0.5rem" }}>
@@ -64,7 +64,7 @@ export function Projects() {
         <div className="empty-state">
           <h3>No projects yet</h3>
           <p>Add a project by selecting one of your GitHub repositories.</p>
-          <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add project</button>
+          <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add</button>
         </div>
       ) : (
         <table className="data-table" style={{ marginTop: "1rem" }}>

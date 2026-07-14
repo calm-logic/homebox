@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { UserPlus, Trash2, Github } from "lucide-react";
+import { Plus, Trash2, Github } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
@@ -9,6 +9,7 @@ import type { Identity } from "../lib/types";
 export function Identities() {
   const qc = useQueryClient();
   const toast = useToast();
+  const [addOpen, setAddOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<Identity | null>(null);
 
@@ -23,6 +24,7 @@ export function Identities() {
       qc.invalidateQueries({ queryKey: ["identities"] });
       toast.show("Identity added", "ok");
       setEmail("");
+      setAddOpen(false);
     },
     onError: (e) => toast.show(String(e), "fail"),
   });
@@ -53,24 +55,14 @@ export function Identities() {
 
   return (
     <>
-      <h1>Identities</h1>
-      <p className="lede">
+      <div className="row">
+        <h1 style={{ margin: 0 }}>Identities</h1>
+        <div className="spacer" />
+        <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add</button>
+      </div>
+      <p className="lede" style={{ marginTop: "0.5rem" }}>
         Emails allowed to sign in via Google or GitHub. Anyone else is denied.
       </p>
-
-      <form className="row" onSubmit={submit} style={{ marginBottom: "1rem" }}>
-        <input
-          type="email"
-          value={email}
-          onChange={e => setEmail(e.target.value)}
-          placeholder="name@example.com"
-          style={{ flex: 1, minWidth: "220px" }}
-          required
-        />
-        <button className="btn primary" type="submit" disabled={add.isPending}>
-          {add.isPending ? <span className="spinner" /> : <><UserPlus size={14} /> Add</>}
-        </button>
-      </form>
 
       {identities && identities.length > 0 ? (
         <table className="data-table">
@@ -115,9 +107,38 @@ export function Identities() {
       ) : identities ? (
         <div className="empty-state">
           <h3>No identities yet</h3>
-          <p>Add an email above to let it sign in with Google or GitHub — no password required.</p>
+          <p>Add an email to let it sign in with Google or GitHub — no password required.</p>
+          <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add</button>
         </div>
       ) : <span className="spinner" />}
+
+      <Modal
+        open={addOpen}
+        onClose={() => { setAddOpen(false); setEmail(""); }}
+        title="Add identity"
+        footer={<>
+          <span className="spacer" />
+          <button className="btn ghost" type="button" onClick={() => { setAddOpen(false); setEmail(""); }}>Cancel</button>
+          <button className="btn primary" type="submit" form="add-identity-form" disabled={add.isPending || !email.trim()}>
+            {add.isPending ? <span className="spinner" /> : "Add"}
+          </button>
+        </>}
+      >
+        <form id="add-identity-form" onSubmit={submit}>
+          <div className="field">
+            <label className="lbl">Email</label>
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="name@example.com"
+              autoFocus
+              required
+            />
+            <span className="hint">The verified email of the Google or GitHub account that will sign in.</span>
+          </div>
+        </form>
+      </Modal>
 
       <Modal
         open={deleteTarget !== null}

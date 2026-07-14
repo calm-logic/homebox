@@ -75,7 +75,7 @@ export function DomainsPage() {
       <div className="row">
         <h1 style={{ margin: 0 }}>Domains</h1>
         <div className="spacer" />
-        <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add domain</button>
+        <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add</button>
       </div>
       <p className="lede" style={{ marginTop: "0.5rem" }}>
         Domains routed to this host through your Cloudflare Tunnel.
@@ -135,7 +135,7 @@ export function DomainsPage() {
         <div className="empty-state">
           <h3>No domains yet</h3>
           <p>Add a domain to start routing projects to this host.</p>
-          <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add domain</button>
+          <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add</button>
         </div>
       ) : <span className="spinner" />}
 
