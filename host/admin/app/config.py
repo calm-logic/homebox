@@ -1,10 +1,10 @@
 from pathlib import Path
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=None, extra="ignore")
+    model_config = SettingsConfigDict(env_file=None, extra="ignore", populate_by_name=True)
 
     database_url: str = "postgresql+asyncpg://homebox_admin:homebox_admin@db:5432/homebox_admin"
     app_secret: str = "dev-secret-change-me"
@@ -28,7 +28,35 @@ class Settings(BaseSettings):
     # count toward the license max_nodes. "mirror" nodes run drained (standby),
     # stay hot via replication + peer deploys, and auto-promote to serving when
     # every non-mirror peer goes unhealthy. Mirrors don't count toward max_nodes.
-    node_role: str = "peer"        # peer | mirror  (env HOMEBOX_NODE_ROLE)
+    # NOTE: docker-compose passes HOMEBOX_NODE_ROLE into the container, so the
+    # field needs the explicit alias — the bare field name would only bind
+    # NODE_ROLE and the role would silently stay "peer".
+    node_role: str = Field(
+        "peer", validation_alias=AliasChoices("HOMEBOX_NODE_ROLE", "NODE_ROLE"))
+
+    # ── Mirror failover tuning ────────────────────────────────────────────────
+    # Fast-probe loop (mirror role only): probe every N seconds, promote after
+    # M consecutive failures. Defaults give ~8-10s detection; the slow cluster
+    # loop remains as a backstop and owns demotion (which should stay slow so a
+    # flapping home connection doesn't bounce traffic).
+    mirror_probe_interval: float = Field(
+        2.0, validation_alias=AliasChoices("HOMEBOX_MIRROR_PROBE_INTERVAL",
+                                           "MIRROR_PROBE_INTERVAL"))
+    mirror_probe_failures: int = Field(
+        3, validation_alias=AliasChoices("HOMEBOX_MIRROR_PROBE_FAILURES",
+                                         "MIRROR_PROBE_FAILURES"))
+    # Warm-pool density mode: while drained, keep app containers created but
+    # STOPPED (databases keep running — they are live Spock subscribers);
+    # promotion starts them before the connector comes up.
+    mirror_cold_apps: bool = Field(
+        False, validation_alias=AliasChoices("HOMEBOX_MIRROR_COLD_APPS",
+                                             "MIRROR_COLD_APPS"))
+    # WireGuard port this node ADVERTISES to the control plane. The mesh always
+    # listens on 51820 locally; a warm-pool mirror runs inside a container whose
+    # host publishes some other UDP port, so it must advertise that one.
+    wg_advertise_port: int = Field(
+        51820, validation_alias=AliasChoices("HOMEBOX_WG_ADVERTISE_PORT",
+                                             "WG_ADVERTISE_PORT"))
 
     @field_validator("node_role")
     @classmethod
@@ -36,6 +64,27 @@ class Settings(BaseSettings):
         v = (v or "peer").strip().lower()
         if v not in ("peer", "mirror"):
             raise ValueError("HOMEBOX_NODE_ROLE must be 'peer' or 'mirror'")
+        return v
+
+    @field_validator("mirror_probe_interval")
+    @classmethod
+    def _valid_probe_interval(cls, v: float) -> float:
+        if not (0.5 <= v <= 300):
+            raise ValueError("HOMEBOX_MIRROR_PROBE_INTERVAL must be 0.5-300 seconds")
+        return v
+
+    @field_validator("mirror_probe_failures")
+    @classmethod
+    def _valid_probe_failures(cls, v: int) -> int:
+        if not (1 <= v <= 100):
+            raise ValueError("HOMEBOX_MIRROR_PROBE_FAILURES must be 1-100")
+        return v
+
+    @field_validator("wg_advertise_port")
+    @classmethod
+    def _valid_wg_port(cls, v: int) -> int:
+        if not (1 <= v <= 65535):
+            raise ValueError("HOMEBOX_WG_ADVERTISE_PORT must be a valid port")
         return v
 
 

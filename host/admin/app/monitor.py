@@ -204,6 +204,21 @@ async def _cycle(cycle: int = 0) -> None:
         from .clusterlib import get_app_serving
         serving = await get_app_serving(session)
 
+        # Cold-standby mirrors keep app containers stopped while drained. A
+        # deploy fan-out (or a dockerd restart resurrecting restart=always
+        # containers) brings them back up — re-stop them here each cycle.
+        # Database containers are exempt inside stop_app_containers (they're
+        # live Spock subscribers).
+        from .config import settings as app_settings
+        if app_settings.node_role == "mirror" and app_settings.mirror_cold_apps and not serving:
+            try:
+                from .host import stop_app_containers
+                n = await asyncio.to_thread(stop_app_containers)
+                if n:
+                    log.info("cold standby: re-stopped %d app container(s)", n)
+            except Exception:  # noqa: BLE001
+                log.exception("cold-apps reconcile failed")
+
         samples: list[UptimeSample] = []
 
         cf_status, cf_detail = await _reconcile_cloudflared(state, serving)

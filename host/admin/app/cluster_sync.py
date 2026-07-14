@@ -16,9 +16,17 @@ Modes:
   deploy  pulled by a peer when a deploy is fanned out to it — like full, so
           env-var/domain edits ride along with the deploy that uses them
   update  periodic reconcile — additive only (adds missing rows, updates
-          nothing except integrations, which carry updated_at for a real
-          newer-wins comparison). Avoids two nodes ping-ponging stale copies
-          of rows that have no timestamp to compare.
+          nothing except timestamped kinds; see below). Avoids two nodes
+          ping-ponging stale copies of rows that have no timestamp to compare.
+
+Timestamped kinds — integrations, projects, environments, domains — carry
+`updated_at` (stamped ONLY by user-facing edit routes; derived-data refreshes
+like dissection never touch it) and resolve conflicts newer-wins in EVERY
+mode: a stale export can no longer clobber a fresher local edit during a
+deploy fan-out or full sync, and edits propagate on the periodic reconcile
+without waiting for a deploy. A missing timestamp (pre-upgrade peer, or a row
+never user-edited) loses to any timestamped copy; two missing timestamps fall
+back to the per-mode behaviour above.
 
 Deletions propagate via TOMBSTONES: each delete path records a
 {kind, key, deleted_at} entry in the "cluster_tombstones" setting; export_state
@@ -256,6 +264,7 @@ async def export_state(session: AsyncSession, node_id: str) -> dict[str, Any]:
                 "cloudflare_routed": d.cloudflare_routed,
                 "zone_status": d.zone_status, "zone_id": d.zone_id,
                 "name_servers": d.name_servers,
+                "updated_at": _iso(d.updated_at),
             }
             for d in domains
         ],
@@ -274,6 +283,7 @@ async def export_state(session: AsyncSession, node_id: str) -> dict[str, Any]:
                 "require_checks": p.require_checks, "description": p.description,
                 "detected_stack": p.detected_stack or {},
                 "dissected_at": _iso(p.dissected_at),
+                "updated_at": _iso(p.updated_at),
             }
             for p in projects
         ],
@@ -288,6 +298,7 @@ async def export_state(session: AsyncSession, node_id: str) -> dict[str, Any]:
                     if e.promote_from_env_id in env_by_id else None
                 ),
                 "slug_suffix": e.slug_suffix, "is_default": e.is_default,
+                "updated_at": _iso(e.updated_at),
             }
             for e in environments if e.project_id in project_by_id
         ],
@@ -383,6 +394,17 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
             return True  # no timestamp to beat → the tombstone wins
         return da >= incoming_ts.isoformat()
 
+    def _should_apply(incoming_ts: datetime | None, local_ts: datetime | None) -> bool:
+        """Newer-wins for timestamped kinds, in EVERY mode. A stale (or equal)
+        copy never overwrites a fresher local edit; an untimestamped incoming
+        row falls back to the mode's overwrite semantics but still can't beat
+        a local row a user has actually edited."""
+        if incoming_ts is None:
+            return overwrite and local_ts is None
+        if local_ts is None:
+            return True
+        return incoming_ts > local_ts
+
     # integrations — natural key (provider, account_login); newer-wins always
     # (they carry updated_at).
     integ_map: dict[tuple, Integration] = {}
@@ -399,7 +421,7 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
             session.add(local)
             integ_map[key] = local
             bump(True)
-        elif overwrite or (incoming_ts and local.updated_at and incoming_ts > local.updated_at):
+        elif _should_apply(incoming_ts, local.updated_at):
             bump(False)
         else:
             continue
@@ -416,9 +438,10 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
     domain_map: dict[str, Domain] = {
         d.name: d for d in (await session.execute(select(Domain))).scalars()
     }
-    saw_primary = False
+    applied_primary = False  # exporter's primary-domain row actually applied
     for item in data.get("domains") or []:
-        if _tombstoned("domain", item["name"]):
+        incoming_ts = _parse_dt(item.get("updated_at"))
+        if _tombstoned("domain", item["name"], incoming_ts):
             continue
         local = domain_map.get(item["name"])
         if local is None:
@@ -426,18 +449,22 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
             session.add(local)
             domain_map[item["name"]] = local
             bump(True)
-        elif not overwrite:
+        elif not _should_apply(incoming_ts, local.updated_at):
             continue
         else:
             bump(False)
         local.is_primary = bool(item.get("is_primary"))
-        saw_primary = saw_primary or local.is_primary
+        applied_primary = applied_primary or local.is_primary
         local.cloudflare_routed = bool(item.get("cloudflare_routed"))
         local.zone_status = item.get("zone_status") or "active"
         local.zone_id = item.get("zone_id")
         local.name_servers = item.get("name_servers")
-    if overwrite and saw_primary:
-        # Exactly one primary: the exporter's choice wins.
+        if incoming_ts:
+            local.updated_at = incoming_ts
+    if applied_primary:
+        # Exactly one primary — but only when the exporter's primary-domain row
+        # actually won its newer-wins comparison. A stale exporter must not
+        # flip primary back through this cross-row enforcement.
         exported_primary = next(
             (d["name"] for d in data.get("domains") or [] if d.get("is_primary")), None,
         )
@@ -451,7 +478,8 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
     }
     names_in_use = {p.name for p in project_map.values()}
     for item in data.get("projects") or []:
-        if _tombstoned("project", item["repo_full_name"]):
+        incoming_ts = _parse_dt(item.get("updated_at"))
+        if _tombstoned("project", item["repo_full_name"], incoming_ts):
             continue
         local = project_map.get(item["repo_full_name"])
         if local is None:
@@ -465,7 +493,7 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
             project_map[item["repo_full_name"]] = local
             names_in_use.add(name)
             bump(True)
-        elif not overwrite:
+        elif not _should_apply(incoming_ts, local.updated_at):
             continue
         else:
             bump(False)
@@ -482,6 +510,8 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
         local.description = item.get("description")
         local.detected_stack = item.get("detected_stack") or {}
         local.dissected_at = _parse_dt(item.get("dissected_at"))
+        if incoming_ts:
+            local.updated_at = incoming_ts
     await session.commit()
 
     # environments — natural key: (project, name); promote_from second pass
@@ -492,11 +522,13 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
         if proj:
             env_map[(proj.name, row.name)] = row
     project_by_name = {p.name: p for p in project_map.values()}
+    applied_envs: set[tuple] = set()
     for item in data.get("environments") or []:
         proj = project_by_name.get(item["project_name"])
         if not proj:
             continue
-        if _tombstoned("environment", [item["project_name"], item["name"]]):
+        incoming_ts = _parse_dt(item.get("updated_at"))
+        if _tombstoned("environment", [item["project_name"], item["name"]], incoming_ts):
             continue
         key = (proj.name, item["name"])
         local = env_map.get(key)
@@ -505,10 +537,11 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
             session.add(local)
             env_map[key] = local
             bump(True)
-        elif not overwrite:
+        elif not _should_apply(incoming_ts, local.updated_at):
             continue
         else:
             bump(False)
+        applied_envs.add(key)
         local.kind = item.get("kind") or "dev"
         local.branch = item.get("branch")
         dom = domain_map.get(item.get("domain_name") or "")
@@ -517,9 +550,15 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
         local.e2e_workflow = item.get("e2e_workflow")
         local.slug_suffix = item.get("slug_suffix") or ""
         local.is_default = bool(item.get("is_default"))
+        if incoming_ts:
+            local.updated_at = incoming_ts
     await session.commit()
     for item in data.get("environments") or []:
         if not item.get("promote_from"):
+            continue
+        # Second pass only for rows the first pass actually applied — a skipped
+        # (stale) export row must not rewire promote_from either.
+        if (item["project_name"], item["name"]) not in applied_envs:
             continue
         local = env_map.get((item["project_name"], item["name"]))
         source = env_map.get((item["project_name"], item["promote_from"]))

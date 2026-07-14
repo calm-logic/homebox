@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -10,6 +12,15 @@ from ..models import Domain
 from ..host import write_domains
 
 router = APIRouter(prefix="/api/domains")
+
+
+def _stamp(*rows: Domain) -> None:
+    """Mark rows as user-edited NOW. Cluster sync resolves conflicts
+    newer-wins on updated_at, so every user-driven domain mutation (including
+    is_primary flips on sibling rows) must pass through here."""
+    now = datetime.utcnow()
+    for r in rows:
+        r.updated_at = now
 
 
 class AddDomainBody(BaseModel):
@@ -71,6 +82,7 @@ async def add_domain(
     if body.primary:
         for d in (await session.execute(select(Domain))).scalars():
             d.is_primary = False
+            _stamp(d)
 
     existing = (await session.execute(select(Domain).where(Domain.name == name))).scalar_one_or_none()
     if existing:
@@ -83,6 +95,7 @@ async def add_domain(
             is_primary=body.primary,
         )
         session.add(result)
+    _stamp(result)
     await session.commit()
     await session.refresh(result)
     await _sync_to_disk(session)
@@ -162,6 +175,7 @@ async def connect_cloudflare_domain(
     if body.primary:
         for d in (await session.execute(select(Domain))).scalars():
             d.is_primary = False
+            _stamp(d)
 
     existing = (
         await session.execute(select(Domain).where(Domain.name == name))
@@ -178,6 +192,7 @@ async def connect_cloudflare_domain(
             cloudflare_routed=True,
         )
         session.add(result)
+    _stamp(result)
     await session.commit()
     await session.refresh(result)
     await _sync_to_disk(session)
@@ -204,6 +219,7 @@ async def _upsert_domain_row(
     if primary:
         for d in (await session.execute(select(Domain))).scalars():
             d.is_primary = False
+            _stamp(d)
     existing = (await session.execute(select(Domain).where(Domain.name == name))).scalar_one_or_none()
     if existing:
         if primary:
@@ -214,6 +230,7 @@ async def _upsert_domain_row(
     else:
         result = Domain(name=name, is_primary=primary, **fields)
         session.add(result)
+    _stamp(result)
     await session.commit()
     await session.refresh(result)
     return result
@@ -324,9 +341,11 @@ async def patch_domain(
         if body.primary:
             for other in (await session.execute(select(Domain))).scalars():
                 other.is_primary = False
+                _stamp(other)
             d.is_primary = True
         else:
             d.is_primary = False
+        _stamp(d)
     await session.commit()
     await session.refresh(d)
     await _sync_to_disk(session)

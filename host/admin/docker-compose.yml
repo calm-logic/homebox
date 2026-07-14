@@ -40,6 +40,13 @@ services:
       # standby and auto-promotes when all peer nodes go down. Set by the
       # cloud-mirror provisioner's VM bootstrap; see app/config.py:node_role.
       HOMEBOX_NODE_ROLE: ${HOMEBOX_NODE_ROLE:-peer}
+      # Mirror failover tuning + warm-pool support. Defaults are right for
+      # peers and dedicated-VM mirrors; the warm-pool bootstrap writes
+      # overrides into .env (see cloud/mirror/).
+      HOMEBOX_MIRROR_PROBE_INTERVAL: ${HOMEBOX_MIRROR_PROBE_INTERVAL:-2}
+      HOMEBOX_MIRROR_PROBE_FAILURES: ${HOMEBOX_MIRROR_PROBE_FAILURES:-3}
+      HOMEBOX_MIRROR_COLD_APPS: ${HOMEBOX_MIRROR_COLD_APPS:-0}
+      HOMEBOX_WG_ADVERTISE_PORT: ${HOMEBOX_WG_ADVERTISE_PORT:-51820}
     ports:
       # Bind to localhost by default — the public URL is set up later through
       # the onboarding wizard (Cloudflare Tunnel → Traefik → admin). Override

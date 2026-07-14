@@ -113,12 +113,17 @@ async def lifespan(app: FastAPI):
     health = monitor.start()
     # Cluster heartbeat/sync loop (no-op while the node isn't in a cluster).
     cluster_task = clusterlib.start()
+    # Mirror nodes also run the fast failover prober (seconds-scale promote;
+    # the slow loop above keeps demote + acts as backstop).
+    probe_task = clusterlib.start_mirror_probe() if settings.node_role == "mirror" else None
     try:
         yield
     finally:
         await metrics.stop(sampler)
         await monitor.stop(health)
         await clusterlib.stop(cluster_task)
+        if probe_task:
+            await clusterlib.stop(probe_task)
 
 
 app = FastAPI(title="Homebox Admin", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json")

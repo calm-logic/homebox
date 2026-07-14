@@ -255,6 +255,90 @@ def list_runner_containers() -> list[dict[str, Any]]:
     return out
 
 
+def _is_db_image(image: str) -> bool:
+    """Database containers in an app stack (plain postgres or the pgEdge build
+    cluster_db.py swaps in). A drained mirror must keep these RUNNING — they're
+    live Spock subscribers; stopping them stalls replication for the cluster."""
+    name = (image or "").split(":", 1)[0].lower()
+    return "pgedge" in name or "postgres" in name or "postgis" in name
+
+
+def list_app_containers() -> list[dict[str, Any]]:
+    """Containers belonging to deployed APP stacks: compose-labelled, excluding
+    homebox infra (homebox-* names, the admin's own stack) and database
+    services. Includes stopped containers — cold-standby reconcile needs both
+    directions."""
+    try:
+        code, body = _docker_request(
+            "GET",
+            '/containers/json?all=1&filters=' +
+            quote('{"label":["com.docker.compose.project"]}'),
+        )
+    except (FileNotFoundError, ConnectionError, OSError):
+        return []
+    if code != 200:
+        return []
+    text = body.decode("utf-8", "ignore")
+    start, end = text.find("["), text.rfind("]")
+    if start < 0 or end < 0:
+        return []
+    try:
+        data = json.loads(text[start:end + 1])
+    except (ValueError, json.JSONDecodeError):
+        return []
+    out = []
+    for c in data:
+        names = c.get("Names") or []
+        name = (names[0] if names else "").lstrip("/")
+        labels = c.get("Labels") or {}
+        project = labels.get("com.docker.compose.project") or ""
+        if not name or not project:
+            continue
+        if name.startswith("homebox-") or project == "admin":
+            continue
+        if _is_db_image(c.get("Image") or ""):
+            continue
+        out.append({
+            "name": name,
+            "project": project,
+            "running": c.get("State") == "running",
+            "image": c.get("Image"),
+        })
+    return out
+
+
+def stop_app_containers() -> int:
+    """Stop every running app container (cold standby). Returns how many were
+    stopped. Database containers are never touched (see list_app_containers)."""
+    stopped = 0
+    for c in list_app_containers():
+        if not c["running"]:
+            continue
+        try:
+            code, _ = _docker_request("POST", f"/containers/{quote(c['name'])}/stop?t=10")
+        except (FileNotFoundError, ConnectionError, OSError):
+            continue
+        if code in (204, 304):
+            stopped += 1
+    return stopped
+
+
+def start_app_containers() -> int:
+    """Start every stopped app container (mirror promotion). Returns how many
+    were started."""
+    started = 0
+    for c in list_app_containers():
+        if c["running"]:
+            continue
+        try:
+            code, _ = _docker_request("POST", f"/containers/{quote(c['name'])}/start")
+        except (FileNotFoundError, ConnectionError, OSError):
+            continue
+        if code in (204, 304):
+            started += 1
+    return started
+
+
 def run_runner_container(
     *,
     name: str,

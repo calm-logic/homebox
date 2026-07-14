@@ -294,6 +294,7 @@ async def adopt_project(
         p.domain_id = body.domain_id or None
 
     p.managed = True
+    p.updated_at = datetime.utcnow()  # cluster sync: newer-wins config edit
     await ensure_environments(session, p)
     await session.commit()
 
@@ -319,6 +320,7 @@ async def release_project(
     for env in await _project_envs(session, p.id):
         await engine.teardown_stack(p.name, env.name)
     p.managed = False
+    p.updated_at = datetime.utcnow()  # cluster sync: newer-wins config edit
     await session.commit()
     await sync_project_webhook(session, p)  # best-effort hook removal
     return {"ok": True, "id": p.id}
@@ -362,6 +364,7 @@ async def patch_project(
         p.auto_deploy = body.auto_deploy
     if body.require_checks is not None:
         p.require_checks = body.require_checks
+    p.updated_at = datetime.utcnow()  # cluster sync: newer-wins config edit
     await session.commit()
     if body.auto_deploy is not None:
         await sync_project_webhook(session, p)
@@ -481,6 +484,7 @@ async def patch_environment(
         env.e2e_workflow = body.e2e_workflow.strip() or None
     if body.promote_from_env_id is not None:
         env.promote_from_env_id = body.promote_from_env_id or None
+    env.updated_at = datetime.utcnow()  # cluster sync: newer-wins config edit
     await session.commit()
     return {"ok": True, "id": env.id, "domain_id": env.domain_id, "branch": env.branch,
             "promotion_gate": env.promotion_gate, "e2e_workflow": env.e2e_workflow}

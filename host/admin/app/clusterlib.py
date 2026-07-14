@@ -59,13 +59,45 @@ RECONCILE_EVERY = 5         # deployment reconcile every N cycles
 PEER_TOKEN_WINDOW = 600     # peer auth token validity (seconds)
 
 # Mirror failover thresholds (in cluster_loop ticks ≈ LOOP_INTERVAL seconds).
+# The slow loop is the BACKSTOP; when the node runs the fast probe loop
+# (mirror_probe_loop, settings.mirror_probe_*) promotion normally happens there
+# in seconds. Demotion stays here on purpose: it must be slow so a flapping
+# home connection doesn't bounce traffic between the cluster and the mirror.
 MIRROR_PROMOTE_TICKS = 3    # ~180s of no healthy serving peer → promote
 MIRROR_DEMOTE_TICKS = 2     # ~120s of a healthy serving peer → demote
 
-# In-memory failover counters (module state; not persisted — see mirror_failover_tick).
-_mirror_unhealthy_streak = 0
-_mirror_healthy_streak = 0
 _license_state_logged: str | None = None  # last license-state string we logged
+
+
+class FailoverCounter:
+    """Consecutive-streak tracker shared by the slow tick and the fast probe
+    loop. record() returns "promote", "demote", or None. In-memory only: a
+    restart resets streaks, which only delays a decision by one window."""
+
+    def __init__(self, promote_after: int, demote_after: int) -> None:
+        self.promote_after = promote_after
+        self.demote_after = demote_after
+        self.unhealthy = 0
+        self.healthy = 0
+
+    def reset(self) -> None:
+        self.unhealthy = 0
+        self.healthy = 0
+
+    def record(self, healthy: bool, promoted: bool) -> str | None:
+        if healthy:
+            self.healthy += 1
+            self.unhealthy = 0
+        else:
+            self.unhealthy += 1
+            self.healthy = 0
+        if not promoted and not healthy and self.unhealthy >= self.promote_after:
+            self.unhealthy = 0
+            return "promote"
+        if promoted and healthy and self.healthy >= self.demote_after:
+            self.healthy = 0
+            return "demote"
+        return None
 
 
 # ───── settings-table helpers ─────────────────────────────────────────────────
@@ -385,7 +417,7 @@ async def create_cluster_flow(
                      token=account_token_plain,
                      body={"name": name, "node_id": node_id, "node_name": node_name,
                            "pubkey": pub, "peer_url": peer_url, "version": VERSION,
-                           "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT,
+                           "wg_pubkey": wg_pub, "wg_port": settings.wg_advertise_port,
                            "role": settings.node_role})
     state = {
         "cluster_id": resp["cluster_id"],
@@ -468,7 +500,7 @@ async def join_cluster_flow(
                     body={"join_token": join_token, "node_id": node_id,
                           "node_name": node_name, "pubkey": pub,
                           "peer_url": peer_url, "version": VERSION,
-                          "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT,
+                          "wg_pubkey": wg_pub, "wg_port": settings.wg_advertise_port,
                           "role": settings.node_role})
 
     donors = [n for n in reg["nodes"] if n["node_id"] != node_id and n.get("peer_url")]
@@ -843,7 +875,7 @@ async def _heartbeat(session: AsyncSession, state: dict[str, Any]) -> dict[str, 
         token=node_token(state),
         body={"node_id": node_id, "peer_url": state.get("peer_url") or "",
               "version": VERSION, "name": state.get("node_name") or "",
-              "wg_pubkey": wg_pub, "wg_port": meshlib.WG_PORT,
+              "wg_pubkey": wg_pub, "wg_port": settings.wg_advertise_port,
               "serving": await get_app_serving(session)},
     )
     state["roster"] = resp["nodes"]
@@ -1126,6 +1158,37 @@ async def _healthy_serving_nonmirror_peer(
     return False
 
 
+async def promote_mirror(session: AsyncSession) -> None:
+    """Promote this mirror to serving. In cold-apps mode the app containers are
+    started FIRST (they're created-but-stopped while drained) so they're coming
+    up while the connector registers — the edge only routes here once the
+    connector is live."""
+    if settings.mirror_cold_apps:
+        from .host import start_app_containers
+        started = await asyncio.to_thread(start_app_containers)
+        if started:
+            log.warning("MIRROR: started %d cold app container(s)", started)
+    await apply_app_serving(session, True)
+    await _set_setting(session, MIRROR_PROMOTED_KEY, True)
+    await session.commit()
+
+
+async def demote_mirror(session: AsyncSession) -> None:
+    """Return this mirror to drained standby; in cold-apps mode also stop the
+    app containers again (databases keep running — live Spock subscribers)."""
+    await apply_app_serving(session, False)
+    await _set_setting(session, MIRROR_PROMOTED_KEY, False)
+    await session.commit()
+    if settings.mirror_cold_apps:
+        from .host import stop_app_containers
+        stopped = await asyncio.to_thread(stop_app_containers)
+        if stopped:
+            log.info("MIRROR: stopped %d app container(s) (cold standby)", stopped)
+
+
+_slow_counter = FailoverCounter(MIRROR_PROMOTE_TICKS, MIRROR_DEMOTE_TICKS)
+
+
 async def mirror_failover_tick(session: AsyncSession, state: dict[str, Any]) -> None:
     """One failover evaluation for a mirror node (called each cluster_loop cycle
     when role==mirror). Promotes to serving after MIRROR_PROMOTE_TICKS
@@ -1133,38 +1196,108 @@ async def mirror_failover_tick(session: AsyncSession, state: dict[str, Any]) -> 
     to standby after MIRROR_DEMOTE_TICKS consecutive cycles once a healthy
     serving peer reappears. Counters live in module memory; the persisted
     `mirror_promoted` flag keeps a restarted-while-promoted mirror serving until
-    demote conditions are met."""
-    global _mirror_unhealthy_streak, _mirror_healthy_streak
+    demote conditions are met. Promotion normally lands earlier via the fast
+    probe loop; this tick is the backstop and owns demotion."""
     healthy = await _healthy_serving_nonmirror_peer(session, state)
     promoted = bool(await _get_setting(session, MIRROR_PROMOTED_KEY))
 
-    if healthy:
-        _mirror_healthy_streak += 1
-        _mirror_unhealthy_streak = 0
-    else:
-        _mirror_unhealthy_streak += 1
-        _mirror_healthy_streak = 0
+    action = _slow_counter.record(healthy, promoted)
+    if action == "promote":
+        log.error(
+            "MIRROR FAILOVER: no healthy serving peer for %d cycles — PROMOTING "
+            "this mirror to serve app traffic", MIRROR_PROMOTE_TICKS,
+        )
+        await promote_mirror(session)
+    elif action == "demote":
+        log.warning(
+            "MIRROR: healthy serving peer back for %d cycles — DEMOTING this "
+            "mirror to standby", MIRROR_DEMOTE_TICKS,
+        )
+        await demote_mirror(session)
 
-    if not promoted:
-        if not healthy and _mirror_unhealthy_streak >= MIRROR_PROMOTE_TICKS:
-            log.error(
-                "MIRROR FAILOVER: no healthy serving peer for %d cycles — PROMOTING "
-                "this mirror to serve app traffic", _mirror_unhealthy_streak,
-            )
-            await apply_app_serving(session, True)
-            await _set_setting(session, MIRROR_PROMOTED_KEY, True)
-            await session.commit()
-            _mirror_unhealthy_streak = 0
-    else:
-        if healthy and _mirror_healthy_streak >= MIRROR_DEMOTE_TICKS:
-            log.warning(
-                "MIRROR: healthy serving peer back for %d cycles — DEMOTING this "
-                "mirror to standby", _mirror_healthy_streak,
-            )
-            await apply_app_serving(session, False)
-            await _set_setting(session, MIRROR_PROMOTED_KEY, False)
-            await session.commit()
-            _mirror_healthy_streak = 0
+
+# ───── mirror fast probe (sub-10s failover detection) ─────────────────────────
+
+MIRROR_PROBE_TIMEOUT = 2.0  # per-peer ping timeout in the fast loop (seconds)
+
+
+async def _fast_probe_healthy(
+    session: AsyncSession, state: dict[str, Any], timeout: float,
+) -> bool:
+    """Concurrent, short-timeout version of _healthy_serving_nonmirror_peer for
+    the fast probe loop: ping every non-mirror peer at once instead of walking
+    them serially with an 8s timeout (which would make a down-cluster probe
+    take N×8s and defeat the fast cadence)."""
+    self_id = await get_node_id(session)
+    secret = cluster_secret(state)
+    candidates: list[dict[str, Any]] = []
+    fallback = False
+    for n in state.get("roster") or []:
+        nid = n.get("node_id")
+        if not nid or nid == self_id or roster_role(n) != "peer":
+            continue
+        if n.get("peer_url"):
+            candidates.append(n)
+        elif _roster_fresh(n) and n.get("serving") is not False:
+            # No peer_url to ping: trust a fresh roster entry that shows serving.
+            fallback = True
+
+    async def ping(n: dict[str, Any]) -> bool:
+        try:
+            resp = await peer_request("GET", n["peer_url"], "/peer/ping",
+                                      secret=secret, self_node_id=self_id,
+                                      timeout=timeout)
+        except PeerError:
+            return False
+        return resp.get("serving") is not False
+
+    if candidates:
+        results = await asyncio.gather(*(ping(n) for n in candidates))
+        if any(results):
+            return True
+    return fallback
+
+
+async def mirror_probe_loop() -> None:
+    """Fast failover detector for mirror nodes. Probes serving peers every
+    settings.mirror_probe_interval seconds and promotes after
+    settings.mirror_probe_failures consecutive all-down probes — roughly
+    interval×failures + one timeout of detection latency (~8-10s at the
+    defaults) versus the slow tick's ~180s. Promotion only: demotion stays on
+    the slow tick so a flapping uplink can't bounce traffic."""
+    interval = float(settings.mirror_probe_interval)
+    failures = int(settings.mirror_probe_failures)
+    counter = FailoverCounter(promote_after=failures, demote_after=1 << 30)
+    log.info("mirror fast-probe loop started (interval=%.1fs, failures=%d)",
+             interval, failures)
+    while True:
+        try:
+            async with SessionLocal() as session:
+                state = await load_cluster(session)
+                if state and state.get("initial_sync_done"):
+                    promoted = bool(await _get_setting(session, MIRROR_PROMOTED_KEY))
+                    if promoted:
+                        counter.reset()
+                    else:
+                        healthy = await _fast_probe_healthy(
+                            session, state,
+                            timeout=max(MIRROR_PROBE_TIMEOUT, interval))
+                        if counter.record(healthy, promoted) == "promote":
+                            log.error(
+                                "MIRROR FAILOVER (fast probe): no healthy serving "
+                                "peer after %d consecutive probes — PROMOTING "
+                                "this mirror to serve app traffic", failures,
+                            )
+                            await promote_mirror(session)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the loop must survive anything
+            log.exception("mirror probe tick failed")
+        await asyncio.sleep(interval)
+
+
+def start_mirror_probe() -> asyncio.Task:
+    return asyncio.create_task(mirror_probe_loop(), name="homebox-mirror-probe")
 
 
 async def refresh_mirror_status(session: AsyncSession, state: dict[str, Any]) -> dict[str, Any] | None:

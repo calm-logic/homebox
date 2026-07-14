@@ -101,6 +101,11 @@ class Project(Base):
     detected_stack: Mapped[dict] = mapped_column(JSON, default=dict)  # last dissection snapshot
     dissected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # When a USER last edited this row's config (adopt, domain, URL mode, …).
+    # Cluster sync compares it for newer-wins conflict resolution, so it is
+    # stamped ONLY by user-facing edit routes — never by derived-data refreshes
+    # like dissection, which must not promote a stale config copy to "newest".
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     integration: Mapped["Integration | None"] = relationship(back_populates="projects")
     domain: Mapped["Domain | None"] = relationship()
@@ -141,6 +146,8 @@ class Environment(Base):
     slug_suffix: Mapped[str] = mapped_column(String(32), default="")
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # User-config edit timestamp — see Project.updated_at.
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (UniqueConstraint("project_id", "name", name="uq_env_project_name"),)
 
@@ -306,6 +313,8 @@ class Domain(Base):
     zone_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     name_servers: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    # User-config edit timestamp — see Project.updated_at.
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class WorkflowRunCache(Base):

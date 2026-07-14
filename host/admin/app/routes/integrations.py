@@ -5,6 +5,8 @@ Cloudflare connect/disconnect lives in routes/tunnel.py — both write Integrati
 rows that show up here.
 """
 
+from datetime import datetime
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -135,6 +137,7 @@ async def disconnect_integration(
         for env in await _project_envs(session, project.id):
             await engine.teardown_stack(project.name, env.name)
         project.managed = False
+        project.updated_at = datetime.utcnow()  # cluster sync: newer-wins config edit
         await session.flush()
         await sync_project_webhook(session, project)
 

@@ -541,15 +541,14 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
               </code>
             </div>
           ))}
-          <span className="hint">Point environments at different domains, e.g. production on its own domain.</span>
         </>
       )}
 
       <div className="field" style={{ marginTop: "0.85rem" }}>
         <label className="lbl">Domain type</label>
         <select value={domainMode} onChange={e => setDomainMode(e.target.value as "container" | "base")}>
-          <option value="container">Container — e.g. appname.{projectDomain === "…" ? "domain.com" : projectDomain}</option>
-          <option value="base">Base — e.g. {projectDomain === "…" ? "domain.com" : projectDomain}</option>
+          <option value="container">Container</option>
+          <option value="base">Base</option>
         </select>
         <span className="hint">
           {domainMode === "base"
