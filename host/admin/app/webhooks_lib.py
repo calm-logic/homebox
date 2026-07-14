@@ -53,7 +53,7 @@ async def sync_project_webhook(session: AsyncSession, project: Project) -> tuple
     if not url:
         return False, "Auto-deploy on push is disabled until the admin has a public URL (set one in onboarding)."
     if not project.integration_id:
-        return False, "Project has no source-control integration."
+        return False, "Public repo (no integration): push webhooks aren't available — deploy manually."
     integration = await session.get(Integration, project.integration_id)
     if not integration:
         return False, "Integration not found."

@@ -58,6 +58,8 @@ export interface IntegrationItem {
   name: string | null;
   status: string;
   source: string;               // oauth | pat | token
+  scope?: "account" | "org" | null;  // account = user repos + granted orgs
+  orgs?: string[];              // orgs visible to an account-scoped token
   project_count: number;
   created_at: string | null;
   last_verified_at: string | null;

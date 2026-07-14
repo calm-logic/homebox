@@ -7,18 +7,69 @@ import httpx
 API = "https://api.github.com"
 
 
-def _headers(token: str) -> dict[str, str]:
-    return {
+def _headers(token: str | None) -> dict[str, str]:
+    h = {
         "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "homebox-admin",
     }
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
 
 
 async def get_org(token: str, org: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.get(f"{API}/orgs/{org}", headers=_headers(token))
+        r.raise_for_status()
+        return r.json()
+
+
+async def get_user(token: str) -> dict[str, Any]:
+    """The token's own GitHub account (login, id, …)."""
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(f"{API}/user", headers=_headers(token))
+        r.raise_for_status()
+        return r.json()
+
+
+async def list_user_orgs(token: str) -> list[dict[str, Any]]:
+    """Orgs the token can see (OAuth-app-approved memberships)."""
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(f"{API}/user/orgs", headers=_headers(token), params={"per_page": 100})
+        r.raise_for_status()
+        return r.json() or []
+
+
+async def list_user_repos(token: str) -> list[dict[str, Any]]:
+    """Every repo the token can push code from: the account's own repos plus
+    repos in any org that granted the OAuth app access. One call covers the
+    whole identity — this is what account-scoped integrations sync."""
+    repos: list[dict] = []
+    page = 1
+    async with httpx.AsyncClient(timeout=20) as c:
+        while True:
+            r = await c.get(
+                f"{API}/user/repos",
+                headers=_headers(token),
+                params={"per_page": 100, "page": page,
+                        "affiliation": "owner,organization_member", "sort": "full_name"},
+            )
+            r.raise_for_status()
+            chunk = r.json()
+            if not chunk:
+                break
+            repos.extend(chunk)
+            if len(chunk) < 100:
+                break
+            page += 1
+    return repos
+
+
+async def get_repo(token: str | None, repo_full_name: str) -> dict[str, Any]:
+    """Repo metadata; works unauthenticated for public repos (token=None)."""
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(f"{API}/repos/{repo_full_name}", headers=_headers(token))
         r.raise_for_status()
         return r.json()
 

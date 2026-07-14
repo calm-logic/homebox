@@ -133,7 +133,8 @@ export function ProjectDetail() {
   const { data: runs } = useQuery<ProjectWorkflowRun[]>({
     queryKey: ["project-workflows", id],
     queryFn: () => api.get<ProjectWorkflowRun[]>(`/api/projects/${id}/workflows`),
-    enabled: !!project?.managed,
+    // Integration-less projects (public repos by URL) have no Actions access.
+    enabled: !!project?.managed && !!project?.integration,
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["project", id] });
@@ -227,7 +228,7 @@ export function ProjectDetail() {
                 ) : (
                   <>
                     <Deployments key={activeEnv.id} projectId={id} envId={activeEnv.id} />
-                    <WorkflowRuns runs={runs} refreshRuns={refreshRuns} />
+                    {project.integration && <WorkflowRuns runs={runs} refreshRuns={refreshRuns} />}
                   </>
                 ))}
                 {section === "services" && serviceId && (() => {
@@ -690,10 +691,12 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
         );
       })}
 
-      <label className="row" style={{ cursor: "pointer", gap: "0.4rem", marginTop: "0.85rem" }}>
-        <input type="checkbox" checked={requireChecks} onChange={e => setRequireChecks(e.target.checked)} disabled={deployMode === "manual"} />
-        Wait for GitHub checks to pass before deploying
-      </label>
+      {project.integration && (
+        <label className="row" style={{ cursor: "pointer", gap: "0.4rem", marginTop: "0.85rem" }}>
+          <input type="checkbox" checked={requireChecks} onChange={e => setRequireChecks(e.target.checked)} disabled={deployMode === "manual"} />
+          Wait for GitHub checks to pass before deploying
+        </label>
+      )}
 
       <div className="row" style={{ marginTop: "1.25rem", paddingTop: "1rem", borderTop: "1px solid var(--border)" }}>
         <span className="spacer" />

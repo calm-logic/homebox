@@ -35,6 +35,10 @@ def _serialize(i: Integration, project_count: int = 0) -> dict:
         "status": i.status,
         "source": "oauth" if (i.secret_encrypted or "").startswith("oauth:") else "pat"
         if i.provider != "cloudflare" else "token",
+        # Account-scoped github rows cover the identity's own repos + granted
+        # orgs; legacy rows are one org each ("org").
+        "scope": (i.config or {}).get("scope") or ("org" if i.provider == "github" else None),
+        "orgs": (i.config or {}).get("orgs") or [],
         "project_count": project_count,
         "created_at": i.created_at.isoformat() if i.created_at else None,
         "last_verified_at": i.last_verified_at.isoformat() if i.last_verified_at else None,

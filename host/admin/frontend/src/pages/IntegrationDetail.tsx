@@ -83,8 +83,22 @@ export function IntegrationDetail() {
           <dd style={{ margin: 0 }} className="row">{statusDot(i.status)} <span style={{ textTransform: "capitalize" }}>{i.status}</span></dd>
           {isGithub ? (
             <>
-              <dt className="dim">Organization</dt>
+              <dt className="dim">{i.scope === "account" ? "Account" : "Organization"}</dt>
               <dd style={{ margin: 0 }}><a href={`https://github.com/${i.account_login}`} target="_blank" rel="noopener">github.com/{i.account_login}</a></dd>
+              {i.scope === "account" && (
+                <>
+                  <dt className="dim">Organizations</dt>
+                  <dd style={{ margin: 0 }} className="row">
+                    {(i.orgs ?? []).length > 0
+                      ? (i.orgs ?? []).map(o => <span key={o} className="badge plain">{o}</span>)
+                      : <span className="dim">none granted</span>}
+                    <button className="btn small ghost" title="Re-run the GitHub consent screen to grant more organizations"
+                      onClick={() => { window.location.href = "/api/oauth/github/start"; }}>
+                      Grant orgs…
+                    </button>
+                  </dd>
+                </>
+              )}
               <dt className="dim">Auth</dt>
               <dd style={{ margin: 0 }}>{i.source === "oauth" ? "OAuth" : "Personal access token"}</dd>
               <dt className="dim">Projects</dt>
@@ -105,7 +119,9 @@ export function IntegrationDetail() {
 
       {isGithub && (
         <p className="dim" style={{ marginTop: "0.75rem" }}>
-          Repositories from this organization appear on <Link to="/projects">Projects</Link>. <strong>Sync</strong> refreshes the list.
+          {i.scope === "account"
+            ? <>Repositories from this account and its granted organizations appear on <Link to="/projects">Projects</Link>. <strong>Sync</strong> refreshes the list.</>
+            : <>Repositories from this organization appear on <Link to="/projects">Projects</Link>. <strong>Sync</strong> refreshes the list.</>}
         </p>
       )}
 

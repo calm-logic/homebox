@@ -146,6 +146,25 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
     onError: (e) => toast.show(String(e), "fail"),
   });
 
+  // Public repo by URL: register (integration-less, anonymous clone) + adopt.
+  const [url, setUrl] = useState("");
+  const addUrl = useMutation({
+    mutationFn: async () => {
+      const created = await api.post<{ id: number }>("/api/projects/add-url", { url: url.trim() });
+      const adopted = await api.post<{ note?: string }>(`/api/projects/${created.id}/adopt`, {});
+      return { id: created.id, note: adopted.note };
+    },
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      toast.show("Added public repo — dissecting services", "ok");
+      if (r.note) toast.show(r.note, "info");
+      setUrl("");
+      onClose();
+      nav(`/projects/${r.id}`);
+    },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
   return (
     <Modal open={open} onClose={onClose} title="Add project" footer={
       <>
@@ -184,6 +203,23 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
           })}
         </div>
       )}
+
+      <div className="section-divider">or add a public repo</div>
+      <div className="row" style={{ gap: "0.5rem" }}>
+        <input
+          value={url}
+          onChange={e => setUrl(e.target.value)}
+          placeholder="https://github.com/owner/repo"
+          style={{ flex: 1, minWidth: "220px" }}
+          onKeyDown={e => { if (e.key === "Enter" && url.trim() && !addUrl.isPending) addUrl.mutate(); }}
+        />
+        <button className="btn primary" disabled={!url.trim() || addUrl.isPending} onClick={() => addUrl.mutate()}>
+          {addUrl.isPending ? <span className="spinner" /> : <><Plus size={14} /> Add</>}
+        </button>
+      </div>
+      <span className="hint" style={{ display: "block", marginTop: "0.35rem" }}>
+        Any public GitHub repo. No push webhooks on repos you don't own — deploys are manual.
+      </span>
     </Modal>
   );
 }

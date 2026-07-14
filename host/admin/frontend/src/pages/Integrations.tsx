@@ -180,7 +180,11 @@ function GithubConnect({ onDone }: { onDone: () => void }) {
             onClick={() => { window.location.href = "/api/oauth/github/start"; }}>
             <Github size={14} /> Connect with GitHub
           </button>
-          <div className="login-divider"><span>or use a token</span></div>
+          <p className="dim" style={{ margin: "0.5rem 0 0", fontSize: "0.78rem" }}>
+            Connects your GitHub account — your own repositories plus any
+            organizations you grant on the consent screen.
+          </p>
+          <div className="login-divider"><span>or use an org token</span></div>
         </>
       )}
       <form id="add-github-form" onSubmit={submit}>

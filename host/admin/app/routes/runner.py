@@ -30,13 +30,18 @@ async def runner_summary(
     )).scalars().all()
     org_runners: dict[str, list] = {}
     for o in orgs:
-        if not o.account_login:
-            continue
-        try:
-            data = await list_org_runners(decrypted_token(o), o.account_login)
-            org_runners[o.account_login] = data.get("runners", [])
-        except httpx.HTTPStatusError:
-            org_runners[o.account_login] = []
+        # Account-scoped integrations cover N orgs (runners are org-level, so
+        # ask each granted org); legacy rows are one org each.
+        if (o.config or {}).get("scope") == "account":
+            logins = [l for l in ((o.config or {}).get("orgs") or []) if l]
+        else:
+            logins = [o.account_login] if o.account_login else []
+        for login in logins:
+            try:
+                data = await list_org_runners(decrypted_token(o), login)
+                org_runners[login] = data.get("runners", [])
+            except httpx.HTTPStatusError:
+                org_runners[login] = []
     return {
         "containers": containers,
         "org_runners": org_runners,
@@ -57,6 +62,15 @@ async def install_runner(
     org = (await session.execute(
         select(Integration).where(Integration.provider == "github", Integration.account_login == login)
     )).scalar_one_or_none()
+    if not org:
+        # An account-scoped integration whose token covers this org.
+        for cand in (await session.execute(
+            select(Integration).where(Integration.provider == "github")
+        )).scalars():
+            cfg = cand.config or {}
+            if cfg.get("scope") == "account" and login in (cfg.get("orgs") or []):
+                org = cand
+                break
     if not org:
         raise HTTPException(404, "Organization not connected")
 

@@ -23,15 +23,15 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import clusterlib
+from .. import cluster_sync, clusterlib, github
 from ..auth import issue_session, require_session_api, _read_session
 from ..config import settings
-from ..crypto import encrypt
+from ..crypto import decrypt, encrypt
 from ..db import get_session
-from ..models import Identity, Integration, Setting
+from ..models import Identity, Integration, Project, Setting
 from ..integrations_lib import sync_github_projects
 
 router = APIRouter(prefix="/api/oauth")
@@ -302,59 +302,72 @@ async def _finish_login(provider: str, access_token: str, response: Response, se
 
 
 async def _finish_connect(access_token: str, request: Request, session: AsyncSession) -> dict:
-    # Connecting orgs is privileged — require an existing admin session.
+    # Connecting GitHub is privileged — require an existing admin session.
     if not _read_session(request.cookies.get(settings.session_cookie)):
-        raise HTTPException(401, "Sign in before connecting a GitHub organization.")
+        raise HTTPException(401, "Sign in before connecting GitHub.")
 
-    # Fetch the user's organizations + add each as a github Integration row.
-    async with httpx.AsyncClient(timeout=15) as c:
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": "homebox-admin",
-        }
-        r = await c.get("https://api.github.com/user/orgs", headers=headers, params={"per_page": 100})
-        if r.status_code != 200:
-            raise HTTPException(400, f"GitHub /user/orgs returned {r.status_code}")
-        orgs = r.json() or []
-
-    if not orgs:
-        raise HTTPException(400, "No organizations are visible to this token. Make sure the OAuth app is installed and approved for at least one org.")
+    # ONE integration per GitHub identity: the account's own repos plus every
+    # org that granted the OAuth app access, all behind a single token. (Orgs
+    # are granted on GitHub's consent screen — re-connecting after granting
+    # more orgs just refreshes this same row.)
+    try:
+        gh_user = await github.get_user(access_token)
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(400, f"GitHub /user returned {e.response.status_code}")
+    login = gh_user.get("login") or ""
+    if not login:
+        raise HTTPException(400, "GitHub returned no account login for this token.")
+    try:
+        orgs = [o.get("login") for o in await github.list_user_orgs(access_token) if o.get("login")]
+    except httpx.HTTPStatusError:
+        orgs = []
 
     encrypted = encrypt(f"oauth:{access_token}")
-    added = []
-    integ_rows: list[Integration] = []
-    for o in orgs:
-        login = o.get("login")
-        if not login:
-            continue
-        existing = (await session.execute(
-            select(Integration).where(Integration.provider == "github", Integration.account_login == login)
-        )).scalar_one_or_none()
-        if existing:
-            existing.secret_encrypted = encrypted
-            existing.status = "connected"
-            existing.updated_at = datetime.utcnow()
-        else:
-            existing = Integration(
-                provider="github", account_login=login, account_id=str(o.get("id") or ""),
-                name=login, secret_encrypted=encrypted, status="connected",
-            )
-            session.add(existing)
-        integ_rows.append(existing)
-        added.append(login)
+    integ = (await session.execute(
+        select(Integration).where(Integration.provider == "github", Integration.account_login == login)
+    )).scalar_one_or_none()
+    if integ:
+        integ.secret_encrypted = encrypted
+        integ.status = "connected"
+        integ.updated_at = datetime.utcnow()
+        integ.config = {**(integ.config or {}), "scope": "account", "orgs": orgs}
+    else:
+        integ = Integration(
+            provider="github", account_login=login, account_id=str(gh_user.get("id") or ""),
+            name=login, secret_encrypted=encrypted, status="connected",
+            config={"scope": "account", "orgs": orgs},
+        )
+        session.add(integ)
+    await session.flush()
+
+    # Consolidate legacy per-org rows from the old connect flow: they held this
+    # same OAuth token (one copy per org), so their projects move to the
+    # account row losslessly. PAT rows keep their own credentials — untouched.
+    legacy = (await session.execute(
+        select(Integration).where(Integration.provider == "github", Integration.id != integ.id)
+    )).scalars().all()
+    tombs: list[tuple[str, list]] = []
+    for old in legacy:
+        if not (decrypt(old.secret_encrypted or "") or "").startswith("oauth:"):
+            continue  # PAT-connected org — its own credential, leave it alone
+        await session.execute(
+            update(Project).where(Project.integration_id == old.id)
+            .values(integration_id=integ.id)
+        )
+        tombs.append(("integration", [old.provider, old.account_login]))
+        await session.delete(old)
+    if tombs:
+        await cluster_sync.record_tombstones(session, tombs, commit=False)
     await session.commit()
 
-    # Auto-sync repos for each connected org so projects show up immediately.
-    # Best-effort per integration — a single failure shouldn't sink the connect.
-    for integ in integ_rows:
-        try:
-            await sync_github_projects(session, integ)
-            await session.commit()
-        except httpx.HTTPStatusError:
-            await session.rollback()
+    # Auto-sync repos so projects show up immediately (best-effort).
+    try:
+        await sync_github_projects(session, integ)
+        await session.commit()
+    except httpx.HTTPStatusError:
+        await session.rollback()
 
-    return {"ok": True, "purpose": "connect", "redirect": "/projects", "orgs": added}
+    return {"ok": True, "purpose": "connect", "redirect": "/projects", "orgs": [login, *orgs]}
 
 
 # ───── Provider email resolution ──────────────────────────────────────────────

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .crypto import decrypt
-from .github import list_org_repos
+from .github import list_org_repos, list_user_orgs, list_user_repos
 from .models import Integration, Project
 
 SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -33,12 +33,31 @@ async def get_integration(session: AsyncSession, provider: str, account_login: s
     return (await session.execute(q)).scalars().first()
 
 
+def is_account_scoped(integration: Integration) -> bool:
+    """Account-scoped github integrations cover the connected GitHub identity:
+    its own repos plus every org that granted the OAuth app access. Legacy
+    rows (one per org, from the old connect flow or a PAT) stay org-scoped."""
+    return (integration.config or {}).get("scope") == "account"
+
+
 async def sync_github_projects(session: AsyncSession, integration: Integration) -> int:
-    """Fetch the integration account's repos from GitHub and upsert Project rows
+    """Fetch the integration's visible repos from GitHub and upsert Project rows
     (managed=False until the user adopts them). Returns the number of repos seen.
     Caller commits."""
-    org = integration.account_login or ""
-    repos = await list_org_repos(decrypted_token(integration), org)
+    token = decrypted_token(integration)
+    if is_account_scoped(integration):
+        repos = await list_user_repos(token)
+        # Refresh the org list shown on the integration page (best-effort).
+        try:
+            orgs = [o.get("login") for o in await list_user_orgs(token) if o.get("login")]
+            cfg = dict(integration.config or {})
+            if cfg.get("orgs") != orgs:
+                cfg["orgs"] = orgs
+                integration.config = cfg
+        except Exception:  # noqa: BLE001 — org list is cosmetic
+            pass
+    else:
+        repos = await list_org_repos(token, integration.account_login or "")
     existing = {
         p.repo_full_name: p
         for p in (await session.execute(

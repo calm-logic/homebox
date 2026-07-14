@@ -6,15 +6,17 @@ repo into Services with auto-wired connection env vars. Deploys target a
 (project, environment) and are tracked as Deployment + ServiceInstance rows.
 """
 
+import re
 from datetime import datetime
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import deploy as engine
-from .. import dissect, urls
+from .. import dissect, github, urls
 from ..auth import require_session_api
 from ..db import get_session
 from ..integrations_lib import SLUG_RE, decrypted_token, slugify
@@ -74,14 +76,13 @@ async def ensure_environments(session: AsyncSession, project: Project) -> None:
 async def dissect_project(session: AsyncSession, project: Project) -> list[dissect.DetectedService]:
     """Clone the production branch, dissect it, and upsert Service + auto
     ServiceEnvVar rows. Caller has committed env creation first."""
+    # No integration = a public repo added by URL — clone anonymously.
     integration = await session.get(Integration, project.integration_id) if project.integration_id else None
-    if not integration:
-        raise HTTPException(400, "Project has no source-control integration.")
     prod = next((e for e in await _project_envs(session, project.id) if e.name == "production"), None)
     if not prod:
         raise HTTPException(400, "Project has no production environment.")
 
-    token = decrypted_token(integration)
+    token = decrypted_token(integration) if integration else None
     await engine.sync_source(project, prod, token)
     rd = engine.repo_dir(project.name, prod.name)
     detected = dissect.dissect(rd)
@@ -261,6 +262,68 @@ async def get_project(
     result = _serialize_project(p, integration, domain, envs)
     result["services"] = [_serialize_service(s, all_vars) for s in services]
     return result
+
+
+# ───── add a public repo by URL (no integration) ─────────────────────────────
+
+_GITHUB_URL_RE = re.compile(
+    r"^(?:https?://(?:www\.)?github\.com/)?([\w.-]+)/([\w.-]+?)(?:\.git)?/?$"
+)
+
+
+class AddUrlBody(BaseModel):
+    url: str
+
+
+@router.post("/add-url")
+async def add_project_from_url(
+    body: AddUrlBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Register a PUBLIC GitHub repo by URL as an integration-less project.
+    Cloning is anonymous, and no webhook can be created on someone else's
+    repo, so these projects start with auto-deploy off (Manual-only pipeline).
+    Returns the (unmanaged) project id — the caller adopts it like any other."""
+    raw = body.url.strip()
+    m = _GITHUB_URL_RE.match(raw)
+    if not m:
+        raise HTTPException(400, "Enter a GitHub repo URL like https://github.com/owner/repo.")
+    full = f"{m.group(1)}/{m.group(2)}"
+    try:
+        repo = await github.get_repo(None, full)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(404, "Repo not found — or it's private. Private repos need their GitHub account connected.")
+        raise HTTPException(400, f"GitHub error: {e.response.status_code}")
+    if repo.get("private"):
+        raise HTTPException(400, "That repo is private — connect its GitHub account under Integrations instead.")
+    full = repo.get("full_name") or full  # canonical casing
+
+    existing = (await session.execute(
+        select(Project).where(Project.repo_full_name == full)
+    )).scalar_one_or_none()
+    if existing:
+        return {"ok": True, "id": existing.id, "existing": True}
+
+    used = {n for (n,) in (await session.execute(select(Project.name))).all()}
+    base = slugify(repo.get("name") or full.split("/")[-1])
+    name = base
+    i = 2
+    while name in used:
+        name = f"{base}-{i}"
+        i += 1
+    p = Project(
+        integration_id=None,
+        repo_full_name=full,
+        name=name,
+        default_branch=repo.get("default_branch") or "main",
+        managed=False,
+        auto_deploy=False,
+    )
+    session.add(p)
+    await session.commit()
+    return {"ok": True, "id": p.id}
 
 
 # ───── adopt / release / patch / sync ─────────────────────────────────────────

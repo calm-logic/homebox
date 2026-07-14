@@ -120,10 +120,12 @@ def _git_env() -> dict[str, str]:
     return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
 
-async def sync_source(project: Project, env: Environment, token: str) -> str:
-    """Clone (or fetch+reset) the env's branch into repo_dir. Returns HEAD sha."""
+async def sync_source(project: Project, env: Environment, token: str | None) -> str:
+    """Clone (or fetch+reset) the env's branch into repo_dir. Returns HEAD sha.
+    token=None → anonymous https clone (public repos added by URL)."""
     rd = repo_dir(project.name, env.name)
-    url = f"https://x-access-token:{token}@github.com/{project.repo_full_name}.git"
+    url = (f"https://x-access-token:{token}@github.com/{project.repo_full_name}.git"
+           if token else f"https://github.com/{project.repo_full_name}.git")
     branch = env.branch or project.default_branch or "main"
 
     if (rd / ".git").is_dir():
@@ -563,16 +565,15 @@ async def _do_deploy(session: AsyncSession, dep: Deployment, project: Project, e
     base = project.domain_mode == "base"
     if not domain_name:
         raise DeployError("No domain configured. Set a primary domain (Routes) or assign one to this project.")
-    if not project.integration_id:
-        raise DeployError("Project has no source-control integration.")
-    integration = await _load_integration(session, project)
-    if not integration:
+    # Integration-less projects are public repos added by URL — anonymous clone.
+    integration = await _load_integration(session, project) if project.integration_id else None
+    if project.integration_id and not integration:
         raise DeployError("Source-control integration not found.")
 
     _touch(dep, status="cloning", error=None)
     await session.commit()
 
-    token = decrypted_token(integration)
+    token = decrypted_token(integration) if integration else None
     sha = await sync_source(project, env, token)
     rd = repo_dir(project.name, env.name)
 
