@@ -583,13 +583,13 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
         </div>
       </div>
       <div className="field">
-        <label className="lbl">Project name (URL slug)</label>
+        <label className="lbl">Project name</label>
         <input value={name} onChange={e => setName(e.target.value)} placeholder={project.name} />
-        <span className="hint">
-          {domainMode === "base"
-            ? <>Base domain — the app lives at <code>{projectDomain}</code> (name is used for stacks and wildcard fallbacks).</>
-            : <>Used as the hostname base, e.g. <code>{predictedHost(name || project.name, "", "", projectDomain, domainMode)}</code>.</>}
-        </span>
+        {domainMode !== "base" && (
+          <span className="hint">
+            Used as the hostname base, e.g. <code>{predictedHost(name || project.name, "", "", projectDomain, domainMode)}</code>.
+          </span>
+        )}
       </div>
       <div className="field">
         <label className="lbl">Domain</label>
@@ -635,9 +635,18 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
           <option value="base">Base</option>
         </select>
         <span className="hint">
-          {domainMode === "base"
-            ? <>This project owns the domain outright. Production lives at the root, other public services path-proxied (e.g. <code>/api</code>), dev at <code>dev.&lt;domain&gt;</code>.</>
-            : <>Every environment gets a name-prefixed subdomain, so multiple projects can share one domain.</>}
+          {/* Show where the app will actually land per environment for the
+              selected mode, e.g. "production: listless.app, dev: dev.listless.app". */}
+          {project.environments.map((env, i) => (
+            <span key={env.id}>
+              {i > 0 && ", "}
+              {env.name}:{" "}
+              <code>
+                {predictedHost(name || project.name, "", env.slug_suffix,
+                  effectiveEnvDomainObj(env.id)?.name ?? projectDomain, domainMode)}
+              </code>
+            </span>
+          ))}
         </span>
       </div>
 
