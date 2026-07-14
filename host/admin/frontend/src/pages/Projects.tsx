@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronRight, Plus, RefreshCw } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
@@ -146,11 +146,32 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
     onError: (e) => toast.show(String(e), "fail"),
   });
 
-  // Public repo by URL: register (integration-less, anonymous clone) + adopt.
-  const [url, setUrl] = useState("");
-  const addUrl = useMutation({
-    mutationFn: async () => {
-      const created = await api.post<{ id: number }>("/api/projects/add-url", { url: url.trim() });
+  // Unified search: filters your synced repos in realtime, and (debounced,
+  // or immediately on Enter) searches public GitHub. Yours rank above public.
+  const [term, setTerm] = useState("");
+  const [debounced, setDebounced] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(term.trim()), 400);
+    return () => clearTimeout(t);
+  }, [term]);
+
+  const { data: pub, isFetching: pubLoading } = useQuery<PublicSearch>({
+    queryKey: ["gh-public-search", debounced],
+    queryFn: () => api.get<PublicSearch>(`/api/projects/search-public?q=${encodeURIComponent(debounced)}`),
+    enabled: open && debounced.length >= 2,
+    staleTime: 60_000,
+  });
+
+  const q = term.trim().toLowerCase();
+  const mine = available.filter(p => !q || p.repo_full_name.toLowerCase().includes(q));
+  // Anything already synced locally shows under "yours" — drop duplicates.
+  const localFulls = new Set((projects ?? []).map(p => p.repo_full_name.toLowerCase()));
+  const publicRepos = (debounced.length >= 2 ? pub?.repos ?? [] : [])
+    .filter(r => !localFulls.has(r.full_name.toLowerCase()));
+
+  const addPublic = useMutation({
+    mutationFn: async (fullName: string) => {
+      const created = await api.post<{ id: number }>("/api/projects/add-url", { url: fullName });
       const adopted = await api.post<{ note?: string }>(`/api/projects/${created.id}/adopt`, {});
       return { id: created.id, note: adopted.note };
     },
@@ -158,7 +179,7 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
       qc.invalidateQueries({ queryKey: ["projects"] });
       toast.show("Added public repo — dissecting services", "ok");
       if (r.note) toast.show(r.note, "info");
-      setUrl("");
+      setTerm("");
       onClose();
       nav(`/projects/${r.id}`);
     },
@@ -175,20 +196,37 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
         <button className="btn ghost" type="button" onClick={onClose}>Cancel</button>
       </>
     }>
-      {available.length === 0 ? (
+      <div className="row" style={{ gap: "0.5rem", marginBottom: "0.75rem" }}>
+        <input
+          autoFocus
+          value={term}
+          onChange={e => setTerm(e.target.value)}
+          placeholder="Search your repositories and public GitHub…"
+          style={{ flex: 1, minWidth: "220px" }}
+          onKeyDown={e => { if (e.key === "Enter") setDebounced(term.trim()); }}
+        />
+        {pubLoading && <span className="spinner" />}
+      </div>
+
+      {mine.length === 0 && publicRepos.length === 0 ? (
         <p className="dim" style={{ margin: 0 }}>
-          No repositories available to add — every synced repository is already a project,
-          or none have been fetched yet. Click <strong>Sync repositories</strong> to pull the latest from GitHub.
+          {q
+            ? (pubLoading ? "Searching…" : pub?.rate_limited
+                ? "GitHub search is rate-limited right now — try again in a minute."
+                : "No matches in your repositories or public GitHub.")
+            : <>No repositories available to add — every synced repository is already a project,
+               or none have been fetched yet. Click <strong>Sync repositories</strong> to pull
+               the latest from GitHub, or search for a public repo above.</>}
         </p>
       ) : (
         <div className="provider-list">
-          {available.map(p => {
+          {mine.map(p => {
             const busy = adopt.isPending && adopt.variables?.id === p.id;
             return (
               <button
                 key={p.id}
                 className="provider-card"
-                disabled={adopt.isPending}
+                disabled={adopt.isPending || addPublic.isPending}
                 onClick={() => adopt.mutate(p)}
                 style={{ width: "100%", textAlign: "left", cursor: "pointer", font: "inherit" }}
               >
@@ -197,29 +235,41 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
                   <div className="provider-sub">default branch {p.default_branch}</div>
                 </span>
                 <span className="spacer" />
+                <span className="badge plain">yours</span>
+                {busy ? <span className="spinner" /> : <Plus size={16} className="chev" aria-hidden />}
+              </button>
+            );
+          })}
+          {publicRepos.map(r => {
+            const busy = addPublic.isPending && addPublic.variables === r.full_name;
+            return (
+              <button
+                key={r.full_name}
+                className="provider-card"
+                disabled={adopt.isPending || addPublic.isPending}
+                onClick={() => addPublic.mutate(r.full_name)}
+                style={{ width: "100%", textAlign: "left", cursor: "pointer", font: "inherit" }}
+                title="Public repo — no push webhooks on repos you don't own; deploys are manual."
+              >
+                <span style={{ minWidth: 0 }}>
+                  <div className="provider-title">{r.full_name}</div>
+                  <div className="provider-sub" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {r.description || `★ ${r.stars}`}
+                  </div>
+                </span>
+                <span className="spacer" />
+                <span className="badge info plain">public</span>
                 {busy ? <span className="spinner" /> : <Plus size={16} className="chev" aria-hidden />}
               </button>
             );
           })}
         </div>
       )}
-
-      <div className="section-divider">or add a public repo</div>
-      <div className="row" style={{ gap: "0.5rem" }}>
-        <input
-          value={url}
-          onChange={e => setUrl(e.target.value)}
-          placeholder="https://github.com/owner/repo"
-          style={{ flex: 1, minWidth: "220px" }}
-          onKeyDown={e => { if (e.key === "Enter" && url.trim() && !addUrl.isPending) addUrl.mutate(); }}
-        />
-        <button className="btn primary" disabled={!url.trim() || addUrl.isPending} onClick={() => addUrl.mutate()}>
-          {addUrl.isPending ? <span className="spinner" /> : <><Plus size={14} /> Add</>}
-        </button>
-      </div>
-      <span className="hint" style={{ display: "block", marginTop: "0.35rem" }}>
-        Any public GitHub repo. No push webhooks on repos you don't own — deploys are manual.
-      </span>
     </Modal>
   );
+}
+
+interface PublicSearch {
+  repos: { full_name: string; description: string | null; stars: number; default_branch: string }[];
+  rate_limited?: boolean;
 }

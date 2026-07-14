@@ -19,7 +19,7 @@ from .. import deploy as engine
 from .. import dissect, github, urls
 from ..auth import require_session_api
 from ..db import get_session
-from ..integrations_lib import SLUG_RE, decrypted_token, slugify
+from ..integrations_lib import SLUG_RE, decrypted_token, get_integration, slugify
 from ..models import (
     Deployment, Domain, Environment, Integration, Project, Service, ServiceEnvVar,
     ServiceInstance, WorkflowRunCache, SECRET_MASK,
@@ -324,6 +324,35 @@ async def add_project_from_url(
     session.add(p)
     await session.commit()
     return {"ok": True, "id": p.id}
+
+
+@router.get("/search-public")
+async def search_public(
+    q: str,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Public GitHub repos matching q, for the Add-project search. Uses any
+    connected github token purely for its higher search rate limit."""
+    q = q.strip()
+    if len(q) < 2:
+        return {"repos": []}
+    integ = await get_integration(session, "github")
+    token = decrypted_token(integ) if integ else None
+    try:
+        items = await github.search_public_repos(token, q)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (403, 429):  # search rate limit
+            return {"repos": [], "rate_limited": True}
+        raise HTTPException(400, f"GitHub search error: {e.response.status_code}")
+    existing = {full for (full,) in (await session.execute(select(Project.repo_full_name))).all()}
+    return {"repos": [
+        {"full_name": r["full_name"], "description": r.get("description"),
+         "stars": r.get("stargazers_count") or 0,
+         "default_branch": r.get("default_branch") or "main"}
+        for r in items
+        if not r.get("private") and r.get("full_name") and r["full_name"] not in existing
+    ]}
 
 
 # ───── adopt / release / patch / sync ─────────────────────────────────────────

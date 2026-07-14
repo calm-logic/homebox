@@ -74,6 +74,19 @@ async def get_repo(token: str | None, repo_full_name: str) -> dict[str, Any]:
         return r.json()
 
 
+async def search_public_repos(token: str | None, query: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Top public repos matching a query. A token just raises the rate limit
+    (30/min vs 10/min); results are pinned public with is:public."""
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(
+            f"{API}/search/repositories",
+            headers=_headers(token),
+            params={"q": f"{query} is:public", "per_page": limit},
+        )
+        r.raise_for_status()
+        return (r.json() or {}).get("items", [])
+
+
 async def list_org_repos(token: str, org: str) -> list[dict[str, Any]]:
     repos: list[dict] = []
     page = 1
