@@ -8,7 +8,7 @@ Projects opt in through homebox.yaml:
 At deploy time (deploy._assemble_stack), every compose-origin Postgres service
 in an opted-in project is transformed:
 
-  - image swapped to the pgEdge Postgres build (Spock + snowflake
+  - image swapped to the pgEdge Postgres build (Spock + snowflake + lolor
     preinstalled; multi-arch, so amd64 Linux and arm64 Macs interoperate)
   - init scripts delivered as compose `configs` with inline content (never
     host bind mounts — the admin's in-container paths don't exist on the
@@ -31,6 +31,15 @@ stalling subscriptions. Conflicts resolve last-update-wins. Tables without a
 primary key go to the insert-only replication set. Plain serial PKs WILL
 collide across nodes — apps should use UUIDs or snowflake sequences (the
 extension is installed).
+
+Large objects: native pg_largeobject is a system catalog and never travels
+over logical replication, so the lolor extension is installed everywhere —
+it transparently reroutes the lo_* API into replicable lolor.* tables (added
+to the default repset by ensure_replication), with new LO oids node-encoded
+via `lolor.node = <spock ordinal>` so concurrent creates can't collide.
+Caveats inherited from lolor: ALTER/GRANT/COMMENT ON LARGE OBJECT are
+unsupported, and LOs created BEFORE the extension landed stay in the native
+catalog (node-local) until migrated.
 """
 
 import asyncio
@@ -595,6 +604,23 @@ async def ensure_replication(
                 result["tables_added"].append(f"{table}→{repset}")
             else:
                 result["errors"].append(f"repset add {table}: {aout[:200]}")
+
+    # 2b. lolor's storage tables live in schema `lolor`, so the public-schema
+    # walk above never sees them — add them explicitly. Both carry PKs
+    # (verified against lolor 1.2.2) → multi-writer 'default' repset.
+    code, out = await _psql(container, admin, pw, db,
+                            "SELECT relname FROM spock.tables "
+                            "WHERE nspname='lolor' AND set_name IS NULL;")
+    if code == 0 and out:
+        for table in (x.strip() for x in out.splitlines() if x.strip()):
+            code, aout = await _psql(
+                container, admin, pw, db,
+                f"SELECT spock.repset_add_table('default', 'lolor.{table}', false);",
+            )
+            if code == 0:
+                result["tables_added"].append(f"lolor.{table}→default")
+            else:
+                result["errors"].append(f"repset add lolor.{table}: {aout[:200]}")
 
     # 3. subscriptions to every CURRENT peer …
     code, out = await _psql(container, admin, pw, db, "SELECT sub_name FROM spock.subscription;")

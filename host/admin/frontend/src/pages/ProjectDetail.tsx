@@ -1,9 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, UseMutationResult, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowLeft, ChevronRight, ExternalLink, RefreshCw, Rocket, Square, Settings,
-  LayoutDashboard, Boxes, Trash2,
+  ArrowLeft, ChevronRight, ExternalLink, MoreVertical, RefreshCw, Rocket, Square,
+  Settings, LayoutDashboard, Boxes, Trash2,
 } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
@@ -39,7 +39,10 @@ export function depBadge(status: string | undefined, unreachable = false) {
   if (status === "running") {
     return unreachable
       ? <span className="badge fail">Down</span>
-      : <span className="badge info">Running</span>;
+      : <span className="badge success">Live</span>;
+  }
+  if (status && BUSY.includes(status as DeploymentStatus)) {
+    return <span className="badge info">Deploying…</span>;
   }
   if (status === "failed") return <span className="badge fail">Failed</span>;
   if (status === "blocked") return <span className="badge warn">Blocked</span>;
@@ -202,7 +205,7 @@ export function ProjectDetail() {
                   ))}
                 </div>
                 {section === "overview" && (
-                  <EnvironmentCard key={activeEnv.id} projectId={id} env={activeEnv} onChange={invalidate} />
+                  <EnvironmentCard key={activeEnv.id} projectId={id} repoFullName={project.repo_full_name} env={activeEnv} onChange={invalidate} />
                 )}
                 {section === "deployments" && (
                   <>
@@ -254,7 +257,9 @@ export function ProjectDetail() {
   );
 }
 
-function EnvironmentCard({ projectId, env, onChange }: { projectId: number; env: EnvironmentInfo; onChange: () => void }) {
+function EnvironmentCard({ projectId, repoFullName, env, onChange }: {
+  projectId: number; repoFullName: string; env: EnvironmentInfo; onChange: () => void;
+}) {
   const toast = useToast();
   const dep = env.deployment;
   const busy = !!dep && BUSY.includes(dep.status);
@@ -273,9 +278,16 @@ function EnvironmentCard({ projectId, env, onChange }: { projectId: number; env:
   return (
     <div className="card">
       <div className="row">
-        {depBadge(dep?.status, envUnreachable(env))}
         <strong style={{ textTransform: "capitalize" }}>{env.name}</strong>
-        <span className="dim">{env.branch ? `branch ${env.branch}` : "default branch"}</span>
+        <span className="spacer" />
+        {depBadge(dep?.status, envUnreachable(env))}
+        <EnvActionsMenu
+          canStop={!!dep && dep.status !== "stopped"}
+          deployDisabled={deploy.isPending || busy}
+          stopDisabled={stop.isPending}
+          onDeploy={() => deploy.mutate()}
+          onStop={() => stop.mutate()}
+        />
       </div>
       <div style={{ marginTop: "0.6rem", display: "flex", flexDirection: "column", gap: "0.3rem" }}>
         {env.instances.filter(i => i.url).length > 0
@@ -299,17 +311,63 @@ function EnvironmentCard({ projectId, env, onChange }: { projectId: number; env:
       {dep?.status === "failed" && dep.error && (
         <pre className="dim" style={{ marginTop: "0.5rem", whiteSpace: "pre-wrap", fontSize: "0.72rem", maxHeight: 120, overflow: "auto" }}>{dep.error}</pre>
       )}
-      {dep?.commit_sha && <div className="dim" style={{ marginTop: "0.4rem" }}>commit <code>{dep.commit_sha.slice(0, 7)}</code>{dep.trigger && <> · {dep.trigger}</>}</div>}
-      <div className="btn-row" style={{ marginTop: "0.7rem" }}>
-        <button className="btn small primary" disabled={deploy.isPending || busy} onClick={() => deploy.mutate()}>
-          <Rocket size={12} /> Deploy
-        </button>
-        {dep && dep.status !== "stopped" && (
-          <button className="btn small ghost" disabled={stop.isPending} onClick={() => stop.mutate()}>
-            <Square size={12} /> Stop
+      {dep?.commit_sha && (
+        <div className="dim" style={{ marginTop: "0.4rem" }}>
+          commit{" "}
+          <a href={`https://github.com/${repoFullName}/commit/${dep.commit_sha}`} target="_blank" rel="noopener">
+            <code>{dep.commit_sha.slice(0, 7)}</code>
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Deploy/Stop actions collapsed behind a kebab menu in the card header. */
+function EnvActionsMenu({ canStop, deployDisabled, stopDisabled, onDeploy, onStop }: {
+  canStop: boolean;
+  deployDisabled: boolean;
+  stopDisabled: boolean;
+  onDeploy: () => void;
+  onStop: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+
+  return (
+    <div className="menu-wrap" ref={wrapRef}>
+      <button className="icon-btn" aria-label="Environment actions" aria-expanded={open}
+        onClick={() => setOpen(o => !o)}>
+        <MoreVertical size={15} />
+      </button>
+      {open && (
+        <div className="menu" role="menu">
+          <button className="menu-item" role="menuitem" disabled={deployDisabled}
+            onClick={() => { setOpen(false); onDeploy(); }}>
+            <Rocket size={13} /> Deploy
           </button>
-        )}
-      </div>
+          {canStop && (
+            <button className="menu-item" role="menuitem" disabled={stopDisabled}
+              onClick={() => { setOpen(false); onStop(); }}>
+              <Square size={13} /> Stop
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -501,7 +559,6 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
             {sync.isPending ? <span className="spinner" /> : <RefreshCw size={12} />} Sync
           </button>
         </div>
-        <span className="hint">Changing the bound repository isn't supported yet.</span>
       </div>
       <div className="field">
         <label className="lbl">Project name (URL slug)</label>

@@ -17,6 +17,7 @@ A working 2-node-LAN slice of Phases 1–3, cut for speed (deviations noted):
 | Deploy fan-out + catch-up | `deploy.py` + `clusterlib.reconcile_deployments` | Receiving node coordinates (no lease service yet); peers pull config with the deploy |
 | Ingress Mode 1 (shared tunnel) | free via config sync | connector token syncs in the Integration row; each node's monitor launches cloudflared |
 | App-DB active-active (pgEdge Spock) | `admin/app/cluster_db.py` | DDL replication OFF by design — every node deploys+migrates the same app, only DML replicates. PK-less tables → insert-only repset. Serial PKs unsupported (use UUIDs/snowflake) |
+| Large-object replication (pgEdge lolor) | `admin/app/cluster_db.py` | Native `pg_largeobject` is a catalog → logical replication skips it. `lolor` reroutes the `lo_*` API into replicable `lolor.*` tables (default repset); `lolor.node = <spock ordinal>` node-encodes new LO oids (collision-free multi-master). Set in postgresql.conf, NOT ALTER SYSTEM (prefix unknown until module load). Caveats: no ALTER/GRANT/COMMENT ON LARGE OBJECT; pre-extension LOs stay node-local until migrated |
 | Cluster UI | `admin/frontend/src/pages/Cluster.tsx` | create/join/mint-token/roster/leave; reachable pre-onboarding for fresh joiners |
 
 Replication is ON BY DEFAULT for clustered nodes (2026-07-04 evening) —

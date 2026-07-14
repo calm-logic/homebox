@@ -868,3 +868,21 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .section-divider::before, .section-divider::after {
   content: ""; flex: 1; height: 1px; background: var(--border);
 }
+
+/* ── Card action menu (kebab dropdown) ─────────────────────────────────── */
+.menu-wrap { position: relative; display: inline-flex; }
+.menu {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 30;
+  min-width: 9rem; padding: 0.3rem;
+  background: var(--panel); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.menu-item {
+  display: flex; align-items: center; gap: 0.45rem;
+  padding: 0.4rem 0.6rem; border: 0; border-radius: 6px;
+  background: transparent; color: var(--text);
+  font: inherit; font-size: 0.82rem; text-align: left; cursor: pointer;
+}
+.menu-item:hover:not(:disabled) { background: var(--btn-bg-hover); }
+.menu-item:disabled { color: var(--muted); cursor: default; }
