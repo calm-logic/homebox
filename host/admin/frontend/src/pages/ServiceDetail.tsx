@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Link, Navigate, useParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -8,8 +8,7 @@ import { ArrowLeft, RefreshCw } from "lucide-react";
 import { api } from "../lib/api";
 import { useToast } from "../lib/toast";
 import { Modal } from "../components/Modal";
-import { useTabIndicator } from "../lib/useTabIndicator";
-import type { EnvironmentInfo, MetricsResponse, ProjectDetailData, ServiceItem } from "../lib/types";
+import type { EnvironmentInfo, MetricsResponse, ServiceItem } from "../lib/types";
 
 const WINDOWS = ["1h", "6h", "24h", "7d"] as const;
 // Matches app/models.py SECRET_MASK — the API returns this instead of a
@@ -28,7 +27,8 @@ function fmtBytes(n: number): string {
 /**
  * Service detail: env-var management plus per-environment data browsing
  * (postgres tables / redis keys) or request-level monitoring for stateless
- * public services.
+ * public services. Rendered as a panel inside the ProjectDetail chrome —
+ * the chrome's env tabs pick the environment, so there's no picker here.
  */
 
 interface DataOverview {
@@ -49,54 +49,29 @@ interface RequestEntry {
   status: number; duration_ms: number; client: string;
 }
 
-export function ServiceDetail() {
-  const { projectId, serviceId } = useParams();
-  const pid = Number(projectId);
-  const sid = Number(serviceId);
-
-  const { data: project, isError } = useQuery<ProjectDetailData>({
-    queryKey: ["project", pid],
-    queryFn: () => api.get<ProjectDetailData>(`/api/projects/${pid}`),
-  });
-
-  const [envId, setEnvId] = useState<number | null>(null);
-  const tabsRef = useRef<HTMLDivElement>(null);
-  useTabIndicator(tabsRef, ".tab.active", [envId, project?.environments?.length]);
-
-  if (isError) return <Navigate to="/projects" replace />;
-  if (!project) return <span className="spinner" />;
-  const svc = project.services.find(s => s.id === sid);
-  if (!svc) return <Navigate to={`/projects/${pid}`} replace />;
-
-  const env = project.environments.find(e => e.id === envId) ?? project.environments[0];
+export function ServicePanel({ projectId, svc, env }: {
+  projectId: number;
+  svc: ServiceItem;
+  env: EnvironmentInfo | undefined;
+}) {
+  const pid = projectId;
   const isData = svc.kind === "database" || svc.kind === "cache";
 
   return (
     <>
-      <Link to={`/projects/${pid}`} className="dim" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
-        <ArrowLeft size={14} /> {project.name}
+      <Link to={`/projects/${pid}/services`} className="dim" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
+        <ArrowLeft size={14} /> Services
       </Link>
 
       <div className="row" style={{ marginTop: "0.5rem" }}>
-        <h1 style={{ margin: 0 }}>{svc.name}</h1>
+        <h2 style={{ margin: 0 }}>{svc.name}</h2>
         <span className="badge plain">{svc.kind}</span>
         {svc.is_public
           ? <span className="badge ok">Public</span>
           : <span className="badge muted plain">Internal</span>}
         {svc.internal_port && <span className="dim">port {svc.internal_port}</span>}
       </div>
-
-      {/* Environment picker applies to the data/requests sections. */}
-      <div className="tabs" role="tablist" style={{ marginTop: "1rem" }} ref={tabsRef}>
-        <span className="tab-indicator" aria-hidden />
-        {project.environments.map(e => (
-          <button key={e.id} role="tab" aria-selected={e.id === env?.id}
-            className={`tab ${e.id === env?.id ? "active" : ""}`}
-            onClick={() => setEnvId(e.id)}>
-            <span style={{ textTransform: "capitalize" }}>{e.name}</span>
-          </button>
-        ))}
-      </div>
+      <div style={{ marginTop: "1rem" }} />
 
       {env && isData && <DataBrowser svc={svc} env={env} />}
       {env && !isData && svc.is_public && <RequestMonitor pid={pid} svc={svc} env={env} />}

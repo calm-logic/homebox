@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { DeploymentPanel } from "./DeploymentDetail";
+import { ServicePanel } from "./ServiceDetail";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
 import { useTabIndicator } from "../lib/useTabIndicator";
@@ -103,14 +104,15 @@ export function predictedHost(
 }
 
 export function ProjectDetail() {
-  const { projectId, section: sectionParam, deploymentId } = useParams();
+  const { projectId, section: sectionParam, deploymentId, serviceId } = useParams();
   const id = Number(projectId);
   const qc = useQueryClient();
   const nav = useNavigate();
   const toast = useToast();
-  // A deployment-detail URL renders inside the same chrome with the
-  // Deployments section active; the panel swaps the list for the detail.
+  // Deployment- and service-detail URLs render inside the same chrome with
+  // their section active; the panel swaps the list for the detail.
   const section: Section = deploymentId ? "deployments"
+    : serviceId ? "services"
     : SECTIONS.some(s => s.key === sectionParam) ? (sectionParam as Section) : "overview";
   const [searchParams] = useSearchParams();
   const [envTab, setEnvTab] = useState<number | null>(() => {
@@ -228,7 +230,12 @@ export function ProjectDetail() {
                     <WorkflowRuns runs={runs} refreshRuns={refreshRuns} />
                   </>
                 ))}
-                {section === "services" && (
+                {section === "services" && serviceId && (() => {
+                  const svc = project.services.find(s => s.id === Number(serviceId));
+                  if (!svc) return <Navigate to={`/projects/${id}/services`} replace />;
+                  return <ServicePanel projectId={id} svc={svc} env={activeEnv} />;
+                })()}
+                {section === "services" && !serviceId && (
                   project.services.length === 0 ? (
                     <div className="card">
                       <span className="dim">No services detected yet. Click <strong>Sync</strong> to dissect the repo.</span>
