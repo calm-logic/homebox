@@ -12,7 +12,6 @@ import { DomainsPage } from "./pages/DomainsPage";
 import { System } from "./pages/System";
 import { Projects } from "./pages/Projects";
 import { ProjectDetail } from "./pages/ProjectDetail";
-import { DeploymentDetail } from "./pages/DeploymentDetail";
 import { ServiceDetail } from "./pages/ServiceDetail";
 import { Integrations } from "./pages/Integrations";
 import { IntegrationDetail } from "./pages/IntegrationDetail";
@@ -69,7 +68,7 @@ export function App() {
               <Route path="/integrations/:integrationId" element={<IntegrationDetail />} />
               <Route path="/projects" element={<Projects />} />
               <Route path="/projects/:projectId" element={<ProjectDetail />} />
-              <Route path="/projects/:projectId/deployments/:deploymentId" element={<DeploymentDetail />} />
+              <Route path="/projects/:projectId/deployments/:deploymentId" element={<ProjectDetail />} />
               <Route path="/projects/:projectId/services/:serviceId" element={<ServiceDetail />} />
               <Route path="/projects/:projectId/:section" element={<ProjectDetail />} />
               <Route path="/identities" element={<Identities />} />

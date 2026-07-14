@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Link, Navigate, useParams } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { api } from "../lib/api";
@@ -7,8 +7,10 @@ import { BUSY, historyBadge, utcDate } from "./ProjectDetail";
 import type { DeploymentDetailData } from "../lib/types";
 
 /**
- * One deployment: metadata + the full log. Polls every 2s while the deploy is
- * still active so the log tails in near-realtime; stops once it's terminal.
+ * One deployment: metadata + the full log, rendered as a panel inside the
+ * ProjectDetail chrome (section tabs + env tabs stay visible; this swaps in
+ * where the deployments list was). Polls every 2s while the deploy is still
+ * active so the log tails in near-realtime; stops once it's terminal.
  */
 
 // docker/compose runs without a TTY, so there's no ANSI color in the log —
@@ -40,10 +42,13 @@ function LogView({ text, innerRef }: { text: string; innerRef: React.RefObject<H
     </pre>
   );
 }
-export function DeploymentDetail() {
-  const { projectId, deploymentId } = useParams();
-  const pid = Number(projectId);
-  const did = Number(deploymentId);
+export function DeploymentPanel({ projectId, deploymentId, onEnv }: {
+  projectId: number;
+  deploymentId: number;
+  onEnv: (envId: number) => void;
+}) {
+  const pid = projectId;
+  const did = deploymentId;
   const logRef = useRef<HTMLPreElement>(null);
 
   const { data: dep, isError } = useQuery<DeploymentDetailData>({
@@ -65,17 +70,26 @@ export function DeploymentDetail() {
     if (busy && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [dep?.log_tail, busy]);
 
-  if (isError) return <Navigate to={`/projects/${pid}`} replace />;
+  // Sync the chrome's env tab to the env this deployment belongs to.
+  const envId = dep?.environment.id;
+  useEffect(() => {
+    if (envId != null) onEnv(envId);
+  }, [envId, onEnv]);
+
+  if (isError) return <Navigate to={`/projects/${pid}/deployments`} replace />;
   if (!dep) return <span className="spinner" />;
 
   return (
     <>
-      <Link to={`/projects/${pid}`} className="dim" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
-        <ArrowLeft size={14} /> Project
+      <Link
+        to={`/projects/${pid}/deployments?env=${dep.environment.id}`}
+        className="dim" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}
+      >
+        <ArrowLeft size={14} /> Deployments
       </Link>
 
       <div className="row" style={{ marginTop: "0.5rem" }}>
-        <h1 style={{ margin: 0 }}>Deploy #{dep.id}</h1>
+        <h2 style={{ margin: 0 }}>Deploy #{dep.id}</h2>
         {historyBadge(dep.status)}
         {busy && <span className="spinner" />}
       </div>

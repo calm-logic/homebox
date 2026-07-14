@@ -6,6 +6,7 @@ import {
   Settings, LayoutDashboard, Boxes, Trash2,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { DeploymentPanel } from "./DeploymentDetail";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
 import { useTabIndicator } from "../lib/useTabIndicator";
@@ -22,8 +23,8 @@ export const utcDate = (iso: string) => new Date(/Z$|[+-]\d\d:\d\d$/.test(iso) ?
 type Section = "overview" | "deployments" | "services" | "settings";
 const SECTIONS: { key: Section; label: string; icon: typeof Settings }[] = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
-  { key: "deployments", label: "Deployments", icon: Rocket },
   { key: "services", label: "Services", icon: Boxes },
+  { key: "deployments", label: "Deployments", icon: Rocket },
   { key: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -102,12 +103,15 @@ export function predictedHost(
 }
 
 export function ProjectDetail() {
-  const { projectId, section: sectionParam } = useParams();
+  const { projectId, section: sectionParam, deploymentId } = useParams();
   const id = Number(projectId);
   const qc = useQueryClient();
   const nav = useNavigate();
   const toast = useToast();
-  const section: Section = SECTIONS.some(s => s.key === sectionParam) ? (sectionParam as Section) : "overview";
+  // A deployment-detail URL renders inside the same chrome with the
+  // Deployments section active; the panel swaps the list for the detail.
+  const section: Section = deploymentId ? "deployments"
+    : SECTIONS.some(s => s.key === sectionParam) ? (sectionParam as Section) : "overview";
   const [searchParams] = useSearchParams();
   const [envTab, setEnvTab] = useState<number | null>(() => {
     const raw = searchParams.get("env");
@@ -197,7 +201,12 @@ export function ProjectDetail() {
                       role="tab"
                       aria-selected={env.id === activeEnv.id}
                       className={`tab ${env.id === activeEnv.id ? "active" : ""}`}
-                      onClick={() => setEnvTab(env.id)}
+                      onClick={() => {
+                        setEnvTab(env.id);
+                        // From a deployment detail, an env tab returns to that
+                        // env's deployments list.
+                        if (deploymentId) nav(`/projects/${id}/deployments?env=${env.id}`);
+                      }}
                     >
                       <span className="tab-dot" style={{ background: envUnreachable(env) ? "var(--danger)" : envDotColor(env.deployment?.status) }} />
                       <span style={{ textTransform: "capitalize" }}>{env.name}</span>
@@ -207,12 +216,18 @@ export function ProjectDetail() {
                 {section === "overview" && (
                   <EnvironmentCard key={activeEnv.id} projectId={id} repoFullName={project.repo_full_name} env={activeEnv} onChange={invalidate} />
                 )}
-                {section === "deployments" && (
+                {section === "deployments" && (deploymentId ? (
+                  <DeploymentPanel
+                    projectId={id}
+                    deploymentId={Number(deploymentId)}
+                    onEnv={eid => setEnvTab(prev => (prev === eid ? prev : eid))}
+                  />
+                ) : (
                   <>
                     <Deployments key={activeEnv.id} projectId={id} envId={activeEnv.id} />
                     <WorkflowRuns runs={runs} refreshRuns={refreshRuns} />
                   </>
-                )}
+                ))}
                 {section === "services" && (
                   project.services.length === 0 ? (
                     <div className="card">
