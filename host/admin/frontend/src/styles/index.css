@@ -505,18 +505,34 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .project-panel { flex: 1; min-width: 0; }
 
 @media (max-width: 720px) {
-  .project-layout { flex-direction: column; gap: 0.75rem; }
+  /* Section nav becomes a fixed bottom bar (app-style): equal-width tabs,
+     icon over a small label, no horizontal overflow. Padding on the layout
+     keeps the last content clear of the bar. */
+  .project-layout {
+    flex-direction: column; gap: 0.75rem;
+    padding-bottom: 4.75rem;
+  }
   .vtabs {
-    flex-direction: row; flex-wrap: wrap; position: relative;
+    position: fixed; left: 0; right: 0; bottom: 0; top: auto; z-index: 60;
+    flex-direction: row; flex-wrap: nowrap;
     flex: 0 0 auto; width: 100%;
-    border-bottom: 1px solid var(--border); padding-bottom: 0.5rem;
+    background: var(--bg-elev);
+    border-top: 1px solid var(--border);
+    padding: 0.3rem 0.35rem calc(0.3rem + env(safe-area-inset-bottom, 0px));
+    gap: 0.15rem;
   }
-  /* .vtabs is a horizontal row here, so its indicator behaves like .tabs'. */
-  .vtabs .tab-indicator {
-    left: 0; top: auto; bottom: -0.5rem; width: var(--ind-w, 0px); height: 2px;
-    border-radius: 1px;
-    transform: translateX(var(--ind-x, 0px));
+  .vtabs .vtab {
+    flex: 1 1 0; min-width: 0;
+    flex-direction: column; align-items: center; justify-content: center;
+    gap: 0.2rem;
+    padding: 0.35rem 0.1rem;
+    font-size: 0.6rem; font-weight: 500;
+    text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  /* The sliding indicator's math assumes an in-flow vertical list — hide it
+     here; the accent color already marks the active tab. */
+  .vtabs .tab-indicator { display: none; }
 }
 
 /* Standalone chips — small non-interactive markers ("this node", "this

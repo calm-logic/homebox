@@ -26,7 +26,7 @@ type Section = "overview" | "deployments" | "services" | "settings";
 const SECTIONS: { key: Section; label: string; icon: typeof Settings }[] = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
   { key: "services", label: "Services", icon: Boxes },
-  { key: "deployments", label: "Deployments", icon: Rocket },
+  { key: "deployments", label: "Deploys", icon: Rocket },
   { key: "settings", label: "Settings", icon: Settings },
 ];
 
