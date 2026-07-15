@@ -53,11 +53,10 @@ export function IntegrationDetail() {
 
   return (
     <>
-      <Link to="/integrations" className="dim" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
-        <ArrowLeft size={14} /> Integrations
-      </Link>
-
-      <div className="row" style={{ marginTop: "0.5rem" }}>
+      <div className="row">
+        <Link to="/integrations" className="back-btn" aria-label="Back to integrations" title="Back to integrations">
+          <ArrowLeft size={18} />
+        </Link>
         <span className="provider-logo">{providerLogo(i.provider)}</span>
         <h1 style={{ margin: 0 }}>{title}</h1>
         {statusDot(i.status)}

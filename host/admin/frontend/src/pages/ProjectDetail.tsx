@@ -163,11 +163,12 @@ export function ProjectDetail() {
 
   return (
     <>
-      <Link to="/projects" className="dim" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
-        <ArrowLeft size={14} /> Projects
-      </Link>
-
-      <h1 style={{ margin: "0.5rem 0 0" }}>{project.name}</h1>
+      <div className="row">
+        <Link to="/projects" className="back-btn" aria-label="Back to projects" title="Back to projects">
+          <ArrowLeft size={18} />
+        </Link>
+        <h1 style={{ margin: 0 }}>{project.name}</h1>
+      </div>
       <p className="dim" style={{ marginTop: "0.25rem" }}>
         {project.services.length} service{project.services.length === 1 ? "" : "s"} · {project.environments.length} environment{project.environments.length === 1 ? "" : "s"}
       </p>

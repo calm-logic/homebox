@@ -40,14 +40,13 @@ export function RuntimeLogsPanel({ projectId, env }: { projectId: number; env: E
 
   return (
     <>
-      <Link
-        to={`/projects/${projectId}?env=${env.id}`}
-        className="dim" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}
-      >
-        <ArrowLeft size={14} /> Overview
-      </Link>
-
-      <div className="row" style={{ marginTop: "0.5rem" }}>
+      <div className="row">
+        <Link
+          to={`/projects/${projectId}?env=${env.id}`}
+          className="back-btn" aria-label="Back to overview" title="Back to overview"
+        >
+          <ArrowLeft size={18} />
+        </Link>
         <h2 style={{ margin: 0 }}>Runtime logs</h2>
         <span className="dim" style={{ textTransform: "capitalize" }}>{env.name}</span>
         {data && <span className="dim">· {data.stack}</span>}

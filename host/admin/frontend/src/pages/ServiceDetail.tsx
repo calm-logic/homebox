@@ -59,11 +59,10 @@ export function ServicePanel({ projectId, svc, env }: {
 
   return (
     <>
-      <Link to={`/projects/${pid}/services`} className="dim" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
-        <ArrowLeft size={14} /> Services
-      </Link>
-
-      <div className="row" style={{ marginTop: "0.5rem" }}>
+      <div className="row">
+        <Link to={`/projects/${pid}/services`} className="back-btn" aria-label="Back to services" title="Back to services">
+          <ArrowLeft size={18} />
+        </Link>
         <h2 style={{ margin: 0 }}>{svc.name}</h2>
         <span className="badge plain">{svc.kind}</span>
         {svc.is_public
@@ -83,7 +82,120 @@ export function ServicePanel({ projectId, svc, env }: {
 
       {env && <Monitoring svc={svc} env={env} />}
 
+      {env && <TargetSelector svc={svc} env={env} />}
+
       <EnvVarsEditor svc={svc} projectId={pid} />
+    </>
+  );
+}
+
+// ─── Deployment target (per environment) ─────────────────────────────────────
+
+const TARGET_LABELS: Record<string, string> = {
+  homebox: "Homebox (this cluster)",
+  cloudflare: "Cloudflare Pages",
+  aws: "AWS",
+  gcp: "Google Cloud",
+};
+const TARGET_HINTS: Record<string, string> = {
+  homebox: "Runs on your own hardware. No extra cost.",
+  cloudflare: "Static assets on Cloudflare's CDN. Free tier is generous.",
+  aws: "Static → S3; web/api → App Runner (~$5+/mo); database → EC2 VM (~$15+/mo).",
+  gcp: "Static → GCS; web/api → Cloud Run (scale-to-zero); database → GCE VM (~$15+/mo).",
+};
+const TARGET_PROVIDER: Record<string, string> = {
+  aws: "aws", gcp: "gcp", cloudflare: "cloudflare",
+};
+
+interface TargetsResponse {
+  options: string[];
+  targets: {
+    id: number; environment_id: number | null; target: string;
+    integration_id: number | null; config: Record<string, unknown>;
+    status: string | null; endpoint: string | null; error: string | null;
+    updated_at: string | null;
+  }[];
+}
+
+function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const { data } = useQuery<TargetsResponse>({
+    queryKey: ["service-targets", svc.id],
+    queryFn: () => api.get<TargetsResponse>(`/api/services/${svc.id}/targets`),
+    refetchInterval: 10000,
+  });
+  const { data: integrations } = useQuery<{ id: number; provider: string; name: string | null; account_login: string | null }[]>({
+    queryKey: ["integrations"],
+    queryFn: () => api.get("/api/integrations"),
+  });
+
+  const envRow = data?.targets.find(t => t.environment_id === env.id);
+  const defaultRow = data?.targets.find(t => t.environment_id === null);
+  const effective = envRow ?? defaultRow;
+  const current = effective?.target ?? "homebox";
+  const options = data?.options ?? ["homebox"];
+
+  const save = useMutation({
+    mutationFn: (target: string) => {
+      const provider = TARGET_PROVIDER[target];
+      const integ = provider
+        ? integrations?.find(i => i.provider === provider)
+        : undefined;
+      if (provider && provider !== "cloudflare" && !integ) {
+        throw new Error(`Connect ${TARGET_LABELS[target]} in Integrations first.`);
+      }
+      return api.put(`/api/services/${svc.id}/target`, {
+        environment_id: env.id,
+        target,
+        integration_id: integ?.id ?? null,
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["service-targets", svc.id] });
+      toast.show("Target updated — redeploying affected environments", "ok");
+    },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
+  return (
+    <>
+      <div className="row" style={{ marginTop: "1.75rem" }}>
+        <h2 style={{ margin: 0 }}>Deployment target</h2>
+        <div className="spacer" />
+        {effective?.status === "live" && effective.endpoint && (
+          <span className="badge ok">live · {effective.endpoint}</span>
+        )}
+        {effective?.status === "provisioning" && <span className="badge plain">provisioning…</span>}
+        {effective?.status === "error" && <span className="badge bad">error</span>}
+      </div>
+      <div className="card" style={{ marginTop: "0.5rem" }}>
+        <div className="field">
+          <span className="lbl">Where <b>{svc.name}</b> deploys for <b>{env.name}</b></span>
+          <select
+            value={current}
+            disabled={save.isPending}
+            onChange={(e) => save.mutate(e.target.value)}
+          >
+            {options.map(t => (
+              <option key={t} value={t}>{TARGET_LABELS[t] ?? t}</option>
+            ))}
+          </select>
+          <span className="hint">{TARGET_HINTS[current]}</span>
+          {!envRow && defaultRow && (
+            <span className="hint">Inherited from the service-wide default.</span>
+          )}
+          {current !== "homebox" && (
+            <span className="hint">
+              Changing the target redeploys this environment; the previous
+              target's resources are destroyed once the new one is live.
+            </span>
+          )}
+          {effective?.status === "error" && effective.error && (
+            <span className="hint" style={{ color: "var(--bad, #c00)" }}>{effective.error}</span>
+          )}
+        </div>
+      </div>
     </>
   );
 }

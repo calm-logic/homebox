@@ -83,14 +83,13 @@ export function DeploymentPanel({ projectId, deploymentId, onEnv }: {
 
   return (
     <>
-      <Link
-        to={`/projects/${pid}/deployments?env=${dep.environment.id}`}
-        className="dim" style={{ display: "inline-flex", alignItems: "center", gap: "0.3rem" }}
-      >
-        <ArrowLeft size={14} /> Deployments
-      </Link>
-
-      <div className="row" style={{ marginTop: "0.5rem" }}>
+      <div className="row">
+        <Link
+          to={`/projects/${pid}/deployments?env=${dep.environment.id}`}
+          className="back-btn" aria-label="Back to deploys" title="Back to deploys"
+        >
+          <ArrowLeft size={18} />
+        </Link>
         <h2 style={{ margin: 0 }}>Deploy #{dep.id}</h2>
         {historyBadge(dep.status)}
         {busy && <span className="spinner" />}

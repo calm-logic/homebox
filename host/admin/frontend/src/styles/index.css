@@ -890,6 +890,15 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
   content: ""; flex: 1; height: 1px; background: var(--border);
 }
 
+/* Arrow-only back link sitting flush left of a page/panel title. */
+.back-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 2rem; height: 2rem; flex: 0 0 auto;
+  color: var(--text-dim); border-radius: var(--radius-sm);
+  margin-left: -0.4rem;
+}
+.back-btn:hover { color: var(--text); background: var(--btn-bg); }
+
 /* ── Card action menu (kebab dropdown) ─────────────────────────────────── */
 .menu-wrap { position: relative; display: inline-flex; }
 .menu {
