@@ -1,7 +1,7 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { ChevronRight, Plus, RefreshCw } from "lucide-react";
+import { ChevronRight, Plus } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
@@ -129,11 +129,15 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
   const githubIntegrations = (integrations ?? []).filter(i => i.provider === "github");
   const available = (projects ?? []).filter(p => !p.managed);
 
-  const sync = useMutation({
-    mutationFn: () => Promise.all(githubIntegrations.map(i => api.post(`/api/integrations/${i.id}/sync`))),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["projects"] }); toast.show("Synced repositories", "ok"); },
-    onError: (e) => toast.show(String(e), "fail"),
-  });
+  // Keep the synced repo list fresh without a button: re-sync integrations in
+  // the background each time the modal opens (best-effort, quiet).
+  useEffect(() => {
+    if (!open || githubIntegrations.length === 0) return;
+    Promise.allSettled(githubIntegrations.map(i => api.post(`/api/integrations/${i.id}/sync`)))
+      .then(() => qc.invalidateQueries({ queryKey: ["projects"] }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, githubIntegrations.length]);
+
   const adopt = useMutation({
     mutationFn: (p: ProjectItem) => api.post<{ note?: string; webhook_note?: string }>(`/api/projects/${p.id}/adopt`, {}),
     onSuccess: (r, p) => {
@@ -187,15 +191,7 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
   });
 
   return (
-    <Modal open={open} onClose={onClose} title="Add project" footer={
-      <>
-        <button className="btn ghost" type="button" disabled={sync.isPending} onClick={() => sync.mutate()}>
-          {sync.isPending ? <span className="spinner" /> : <RefreshCw size={14} />} Sync repositories
-        </button>
-        <span className="spacer" />
-        <button className="btn ghost" type="button" onClick={onClose}>Cancel</button>
-      </>
-    }>
+    <Modal open={open} onClose={onClose} title="Add project">
       <div className="row" style={{ gap: "0.5rem", marginBottom: "0.75rem" }}>
         <input
           autoFocus
@@ -215,8 +211,8 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
                 ? "GitHub search is rate-limited right now — try again in a minute."
                 : "No matches in your repositories or public GitHub.")
             : <>No repositories available to add — every synced repository is already a project,
-               or none have been fetched yet. Click <strong>Sync repositories</strong> to pull
-               the latest from GitHub, or search for a public repo above.</>}
+               or none have been fetched yet. Repositories re-sync automatically when this
+               dialog opens; you can also search public GitHub above.</>}
         </p>
       ) : (
         <div className="provider-list">

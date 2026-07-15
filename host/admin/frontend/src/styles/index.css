@@ -367,13 +367,18 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
   border-radius: var(--radius);
   width: 92%; max-width: 480px;
   box-shadow: var(--shadow);
+  /* Long content (e.g. the Add-project repo list) scrolls in the body while
+     the head/foot stay pinned. */
+  max-height: 85vh;
+  display: flex; flex-direction: column;
 }
 .modal .head, .modal .foot {
   display: flex; align-items: center; justify-content: space-between;
   padding: 0.85rem 1.25rem;
+  flex: 0 0 auto;
 }
 .modal .head { border-bottom: 1px solid var(--border); font-weight: 600; }
-.modal .body { padding: 1.25rem; }
+.modal .body { padding: 1.25rem; overflow-y: auto; }
 .modal .foot { border-top: 1px solid var(--border); gap: 0.5rem; }
 .modal .close-btn {
   background: transparent; border: none; color: var(--muted);
