@@ -355,6 +355,51 @@ async def search_public(
     ]}
 
 
+@router.get("/{project_id}/environments/{env_id}/runtime-logs")
+async def environment_runtime_logs(
+    project_id: int,
+    env_id: int,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Live container state + recent logs for an environment's stack — the
+    'why is it Down?' view. A deploy only tracks up to container START; a
+    service that crash-loops right after shows here (docker status
+    'Restarting'), with the log tail that explains it."""
+    p = await _get_project(session, project_id)
+    env = await _get_env(session, project_id, env_id)
+    stack = urls.stack_name(p, env)
+
+    code, out = await engine._run([
+        "docker", "ps", "-a",
+        "--filter", f"label=com.docker.compose.project={stack}",
+        "--format", "{{.Names}}\t{{.Status}}\t{{.Label \"com.docker.compose.service\"}}",
+    ], timeout=20)
+    if code:
+        raise HTTPException(502, f"docker ps failed: {out[:200]}")
+
+    containers = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2 or not parts[0]:
+            continue
+        name, status = parts[0], parts[1]
+        service = parts[2] if len(parts) > 2 and parts[2] else name
+        _lc, logs = await engine._run(["docker", "logs", "--tail", "150", name], timeout=20)
+        containers.append({
+            "name": name,
+            "service": service,
+            "status": status,
+            # 'Restarting (…)' = crash loop; 'Exited (N)' = dead; 'Up …' = fine.
+            "state": ("restarting" if status.startswith("Restarting")
+                      else "running" if status.startswith("Up")
+                      else "exited"),
+            "logs": logs[-16000:],
+        })
+    containers.sort(key=lambda c: (c["state"] == "running", c["service"]))
+    return {"stack": stack, "containers": containers}
+
+
 # ───── adopt / release / patch / sync ─────────────────────────────────────────
 
 class AdoptBody(BaseModel):

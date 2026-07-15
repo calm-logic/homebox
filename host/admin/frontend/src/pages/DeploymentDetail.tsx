@@ -30,10 +30,12 @@ function logLineClass(line: string): string {
   return "";
 }
 
-function LogView({ text, innerRef }: { text: string; innerRef: React.RefObject<HTMLPreElement> }) {
+export function LogView({ text, innerRef, maxHeight = "60vh" }: {
+  text: string; innerRef?: React.RefObject<HTMLPreElement>; maxHeight?: string;
+}) {
   const lines = text.replace(ANSI_RE, "").split("\n");
   return (
-    <pre ref={innerRef} className="log-view" style={{ maxHeight: "60vh", overflow: "auto", marginTop: "0.25rem" }}>
+    <pre ref={innerRef} className="log-view" style={{ maxHeight, overflow: "auto", marginTop: "0.25rem" }}>
       {lines.map((l, i) => {
         const cls = logLineClass(l);
         const content = l + (i < lines.length - 1 ? "\n" : "");

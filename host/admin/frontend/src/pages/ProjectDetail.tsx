@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { DeploymentPanel } from "./DeploymentDetail";
+import { RuntimeLogsPanel } from "./RuntimeLogs";
 import { ServicePanel } from "./ServiceDetail";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
@@ -110,9 +111,13 @@ export function ProjectDetail() {
   const nav = useNavigate();
   const toast = useToast();
   // Deployment- and service-detail URLs render inside the same chrome with
-  // their section active; the panel swaps the list for the detail.
+  // their section active; the panel swaps the list for the detail. /logs is a
+  // pseudo-section under Overview: runtime container logs for the active env,
+  // reached by clicking an environment's status badge.
+  const logsView = sectionParam === "logs";
   const section: Section = deploymentId ? "deployments"
     : serviceId ? "services"
+    : logsView ? "overview"
     : SECTIONS.some(s => s.key === sectionParam) ? (sectionParam as Section) : "overview";
   const [searchParams] = useSearchParams();
   const [envTab, setEnvTab] = useState<number | null>(() => {
@@ -150,7 +155,7 @@ export function ProjectDetail() {
   useTabIndicator(envTabsRef, ".tab.active", [section, envTab, project?.environments?.length]);
 
   if (isError) return <Navigate to="/projects" replace />;
-  if (sectionParam && !SECTIONS.some(s => s.key === sectionParam)) {
+  if (sectionParam && !logsView && !SECTIONS.some(s => s.key === sectionParam)) {
     return <Navigate to={{ pathname: `/projects/${id}`, search: searchParams.toString() }} replace />;
   }
   if (!project) return <span className="spinner" />;
@@ -216,9 +221,11 @@ export function ProjectDetail() {
                     </button>
                   ))}
                 </div>
-                {section === "overview" && (
+                {section === "overview" && (logsView ? (
+                  <RuntimeLogsPanel key={activeEnv.id} projectId={id} env={activeEnv} />
+                ) : (
                   <EnvironmentCard key={activeEnv.id} projectId={id} repoFullName={project.repo_full_name} env={activeEnv} onChange={invalidate} />
-                )}
+                ))}
                 {section === "deployments" && (deploymentId ? (
                   <DeploymentPanel
                     projectId={id}
@@ -303,7 +310,13 @@ function EnvironmentCard({ projectId, repoFullName, env, onChange }: {
       <div className="row">
         <strong style={{ textTransform: "capitalize" }}>{env.name}</strong>
         <span className="spacer" />
-        {depBadge(dep?.status, envUnreachable(env))}
+        <Link
+          to={`/projects/${projectId}/logs?env=${env.id}`}
+          style={{ textDecoration: "none", display: "inline-flex" }}
+          title="See what's actually running — live container state and logs"
+        >
+          {depBadge(dep?.status, envUnreachable(env))}
+        </Link>
         <EnvActionsMenu
           canStop={!!dep && dep.status !== "stopped"}
           deployDisabled={deploy.isPending || busy}
@@ -586,11 +599,6 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
       <div className="field">
         <label className="lbl">Project name</label>
         <input value={name} onChange={e => setName(e.target.value)} placeholder={project.name} />
-        {domainMode !== "base" && (
-          <span className="hint">
-            Used as the hostname base, e.g. <code>{predictedHost(name || project.name, "", "", projectDomain, domainMode)}</code>.
-          </span>
-        )}
       </div>
       <div className="field">
         <label className="lbl">Domain</label>
