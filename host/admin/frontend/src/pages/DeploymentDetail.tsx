@@ -1,10 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft } from "lucide-react";
 import { api } from "../lib/api";
 import { BUSY, historyBadge, utcDate } from "./ProjectDetail";
 import type { DeploymentDetailData } from "../lib/types";
+import { timeAgo } from "../lib/time";
 
 /**
  * One deployment: metadata + the full log, rendered as a panel inside the
@@ -52,6 +53,7 @@ export function DeploymentPanel({ projectId, deploymentId, onEnv }: {
   const pid = projectId;
   const did = deploymentId;
   const logRef = useRef<HTMLPreElement>(null);
+  const [showFullStarted, setShowFullStarted] = useState(false);
 
   const { data: dep, isError } = useQuery<DeploymentDetailData>({
     queryKey: ["deployment", did],
@@ -91,14 +93,19 @@ export function DeploymentPanel({ projectId, deploymentId, onEnv }: {
           <ArrowLeft size={18} />
         </Link>
         <h2 style={{ margin: 0 }}>Deploy #{dep.id}</h2>
-        {historyBadge(dep.status)}
         {busy && <span className="spinner" />}
+        <span className="spacer" />
+        {historyBadge(dep.status)}
       </div>
       <p className="dim" style={{ marginTop: "0.35rem" }}>
-        <span style={{ textTransform: "capitalize" }}>{dep.environment.name}</span>
-        {dep.commit_sha && <> · commit <code>{dep.commit_sha.slice(0, 7)}</code></>}
-        {" "}· <span style={{ textTransform: "capitalize" }}>{dep.trigger}</span>
-        {dep.created_at && <> · started {utcDate(dep.created_at).toLocaleString()}</>}
+        {dep.commit_sha && <>Commit <a href={`https://github.com/${dep.repo_full_name}/commit/${dep.commit_sha}`} target="_blank" rel="noopener"><code>{dep.commit_sha.slice(0, 7)}</code></a> · </>}
+        <span style={{ textTransform: "capitalize" }}>{dep.trigger}</span>
+        {dep.created_at && <> · started{" "}
+          <button className="timestamp-button" onClick={() => setShowFullStarted(v => !v)}
+            title="Show full timestamp">
+            {showFullStarted ? utcDate(dep.created_at).toLocaleString() : timeAgo(dep.created_at)}
+          </button>
+        </>}
         {dep.updated_at && !busy && <> · last update {utcDate(dep.updated_at).toLocaleString()}</>}
       </p>
 

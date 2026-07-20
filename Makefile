@@ -11,7 +11,7 @@ else
 SUDO :=
 endif
 
-.PHONY: help host configure reset-password admin admin-logs admin-down admin-reset infra reonboard boot enable-boot cli init
+.PHONY: help host configure reset-password admin admin-logs admin-down admin-reset infra reonboard boot enable-boot cli init push-public-github deploy-site
 
 DB_CONTAINER := homebox-admin-db
 
@@ -30,6 +30,8 @@ help:
 	@echo "  make enable-boot Install + enable the systemd unit so Homebox auto-starts on boot"
 	@echo "  make cli         Install the developer CLI from ./host/cli"
 	@echo "  make init        Initialize the developer CLI (~/.homebox.json)"
+	@echo "  make push-public-github  Dry-run the public-mirror publish; PUSH=1 pushes for real (private repo only)"
+	@echo "  make deploy-site Build & deploy the homebox.sh site (private repo only)"
 
 host:
 	$(SUDO) bash $(SETUP_HOST)
@@ -94,3 +96,26 @@ cli:
 
 init:
 	homebox init
+
+# --- private-repo-only targets ------------------------------------------------
+# This Makefile is itself published to the public mirror (calm-logic/homebox),
+# where scripts/ and cloud/ do not exist — so these targets guard on the files
+# they need and no-op with a message in the public checkout.
+
+push-public-github:
+	@if [ ! -f scripts/publish_public.sh ]; then \
+	  echo "push-public-github is a private-repo-only target (scripts/publish_public.sh not present)"; \
+	else \
+	  if [ "$(PUSH)" = "1" ]; then \
+	    bash scripts/publish_public.sh --push; \
+	  else \
+	    bash scripts/publish_public.sh; \
+	  fi; \
+	fi
+
+deploy-site:
+	@if [ ! -f cloud/scripts/setup_site.sh ]; then \
+	  echo "deploy-site is a private-repo-only target (cloud/scripts/setup_site.sh not present)"; \
+	else \
+	  bash cloud/scripts/setup_site.sh; \
+	fi

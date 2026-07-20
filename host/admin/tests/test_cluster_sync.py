@@ -245,3 +245,106 @@ def test_export_ships_updated_at_and_round_trips():
         await session_b.refresh(got)
         assert got.domain_mode == "base"
     run(body())
+
+
+# ── service_targets: per-column-group newer-wins ─────────────────────────────
+
+def target_item(**over):
+    item = {
+        "project_name": "listless", "service_name": "web",
+        "environment_name": None, "target": "gcp", "integration": None,
+        "config": {"region": "us-central1"}, "state": {},
+        "updated_at": None, "state_updated_at": None,
+    }
+    item.update(over)
+    return item
+
+
+async def seed_target(session):
+    from app.models import Service, ServiceTarget
+    p, d = await seed_listless(session)
+    svc = Service(project_id=p.id, name="web", kind="web", is_public=True)
+    session.add(svc)
+    await session.flush()
+    st = ServiceTarget(service_id=svc.id, environment_id=None, target="gcp",
+                       config={"region": "us-central1"},
+                       state={"endpoint": "x.a.run.app",
+                              "resource_ids": {"service": "srv-1"}},
+                       updated_at=T1, state_updated_at=T1)
+    session.add(st)
+    await session.commit()
+    return p, svc, st
+
+
+def test_target_round_trip():
+    async def body():
+        _, session_a = await make_session()
+        await seed_target(session_a)
+        data = await cluster_sync.export_state(session_a, node_id="node-a")
+        exported = data["service_targets"]
+        assert len(exported) == 1
+        assert exported[0]["target"] == "gcp"
+        assert exported[0]["updated_at"] == T1.isoformat()
+        assert exported[0]["state_updated_at"] == T1.isoformat()
+
+        _, session_b = await make_session()
+        await cluster_sync.import_state(session_b, data, mode="full")
+        from sqlalchemy import select
+        from app.models import ServiceTarget
+        got = (await session_b.execute(select(ServiceTarget))).scalar_one()
+        assert got.target == "gcp"
+        assert got.state["endpoint"] == "x.a.run.app"
+        assert got.updated_at == T1 and got.state_updated_at == T1
+    run(body())
+
+
+def test_stale_config_cannot_clobber_but_newer_state_applies():
+    """The per-column-group rule: one incoming item carries a STALE config
+    group and a NEWER state group — state must apply, config must not."""
+    async def body():
+        _, session = await make_session()
+        p, svc, st = await seed_target(session)
+        incoming = {"projects": [], "service_targets": [target_item(
+            target="aws",                                  # stale user intent
+            updated_at=T0.isoformat(),
+            state={"endpoint": "y.a.run.app",              # newer machine state
+                   "resource_ids": {"service": "srv-2"}},
+            state_updated_at=T2.isoformat(),
+        )]}
+        await cluster_sync.import_state(session, incoming, mode="deploy")
+        await session.refresh(st)
+        assert st.target == "gcp"                          # config survived
+        assert st.updated_at == T1
+        assert st.state["endpoint"] == "y.a.run.app"       # state advanced
+        assert st.state_updated_at == T2
+    run(body())
+
+
+def test_newer_config_applies_without_touching_newer_local_state():
+    async def body():
+        _, session = await make_session()
+        p, svc, st = await seed_target(session)
+        incoming = {"service_targets": [target_item(
+            target="cloudflare", updated_at=T2.isoformat(),
+            state={}, state_updated_at=T0.isoformat(),     # stale state group
+        )]}
+        await cluster_sync.import_state(session, incoming, mode="update")
+        await session.refresh(st)
+        assert st.target == "cloudflare"                   # config advanced
+        assert st.state["endpoint"] == "x.a.run.app"       # state survived
+    run(body())
+
+
+def test_service_target_tombstone_resets_row():
+    async def body():
+        _, session = await make_session()
+        p, svc, st = await seed_target(session)
+        incoming = {"tombstones": [{
+            "kind": "service_target", "key": ["listless", "web", ""],
+            "deleted_at": T2.isoformat(),
+        }]}
+        await cluster_sync.import_state(session, incoming, mode="update")
+        from sqlalchemy import select
+        from app.models import ServiceTarget
+        assert (await session.execute(select(ServiceTarget))).scalar_one_or_none() is None
+    run(body())

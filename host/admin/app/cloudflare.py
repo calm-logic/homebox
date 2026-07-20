@@ -11,6 +11,9 @@ Token scopes the UI suggests:
   Account · Account Settings · Read   (lists accounts)
   Zone    · DNS · Edit
   Zone    · Zone · Read
+  Account · Cloudflare Pages · Edit   (only for the Pages deployment target;
+                                       older tokens keep working — Pages
+                                       deploys fail with a re-scope hint)
 """
 
 import base64
@@ -333,8 +336,114 @@ async def upsert_cname(
     return _unwrap(r) or {}
 
 
+async def upsert_txt(
+    token: str,
+    zone_id: str,
+    name: str,
+    content: str,
+) -> dict[str, Any]:
+    """Create-or-update a TXT record (cloud-target verification records, e.g.
+    Google site verification for Cloud Run domain mappings). Matched by
+    (name, exact content): verification flows may legitimately coexist with
+    other TXT records at the same name, so an existing different-content
+    record is left alone and a new one is added."""
+    existing = await list_dns_records(token, zone_id, name=name)
+    payload = {
+        "type": "TXT",
+        "name": name,
+        "content": content,
+        "ttl": 1,
+        "comment": "Managed by Homebox",
+    }
+    # Cloudflare returns TXT content quoted; compare unquoted.
+    match = next((r for r in existing if r.get("type") == "TXT"
+                  and (r.get("content") or "").strip('"') == content.strip('"')), None)
+    if match:
+        return match
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.post(
+            f"{API}/zones/{zone_id}/dns_records",
+            headers=_headers(token),
+            json=payload,
+        )
+    return _unwrap(r) or {}
+
+
 def tunnel_target(tunnel_id: str) -> str:
     return f"{tunnel_id}.cfargotunnel.com"
+
+
+# ── cross-cluster domain ownership (per-host DNS overrides, G12) ──────────────
+#
+# Domains + this integration sync account-wide, but a domain's apex/wildcard
+# CNAME points at the tunnel of whichever cluster CONNECTED it (routes/
+# domains.py). These helpers answer "does THIS install's tunnel own that
+# wildcard routing?" so a deploy on another cluster knows it must write a
+# specific-host record instead of relying on the (foreign) wildcard.
+
+
+async def wildcard_tunnel_cname(token: str, zone_id: str, zone_name: str) -> str | None:
+    """The tunnel target (<id>.cfargotunnel.com, lowercased) of the zone's
+    `*.<zone>` CNAME — apex fallback when no wildcard record exists. None when
+    neither record exists or the examined record isn't a tunnel CNAME (an A
+    record or external CNAME is not a Homebox wildcard and is never treated
+    as foreign ownership)."""
+    for name in (f"*.{zone_name}", zone_name):
+        recs = await list_dns_records(token, zone_id, name=name)
+        cname = next((r for r in recs if r.get("type") == "CNAME"), None)
+        if cname:
+            content = (cname.get("content") or "").strip().lower().strip(".")
+            return content if content.endswith(".cfargotunnel.com") else None
+    return None
+
+
+async def domain_owned_by_local_tunnel(
+    session: AsyncSession, domain_name: str, *,
+    state: dict[str, Any] | None = None,
+    cache: dict[str, bool] | None = None,
+    strict: bool = False,
+) -> bool:
+    """Whether THIS install's tunnel owns `domain_name`'s wildcard routing.
+
+    True (owned — caller changes nothing, the wildcard flow stands) when the
+    wildcard/apex CNAME points at our tunnel, when neither record exists or
+    isn't a tunnel CNAME, when no zone in the account covers the domain, when
+    no tunnel is configured here, or — fail-safe — on any Cloudflare API error
+    (strict=True re-raises instead, for callers that must not act on a guess).
+    False only when the record demonstrably points at a DIFFERENT tunnel.
+    `cache` (domain -> bool) dedupes probes within one deploy run."""
+    key = domain_name.strip().lower().strip(".")
+    if cache is not None and key in cache:
+        return cache[key]
+    owned = True
+    try:
+        st = state if state is not None else await load_state(session)
+        token = get_token(st)
+        tunnel_id = st.get("tunnel_id")
+        if token and tunnel_id:
+            zones = await list_zones(token, account_id=st.get("account_id"))
+            zone = resolve_zone_for(zones, key)
+            if zone:
+                actual = await wildcard_tunnel_cname(token, zone["id"], zone["name"])
+                if actual is not None:
+                    owned = actual == tunnel_target(tunnel_id).lower()
+    except CloudflareError:
+        if strict:
+            raise
+        owned = True  # fail-safe: behave as before (no override records)
+    if cache is not None:
+        cache[key] = owned
+    return owned
+
+
+async def list_pages_projects(token: str, account_id: str) -> list[dict[str, Any]]:
+    """Pages projects in the account — doubles as the 'does this token carry
+    Cloudflare Pages: Edit' capability probe (403 without it)."""
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(
+            f"{API}/accounts/{account_id}/pages/projects", headers=_headers(token)
+        )
+    return _unwrap(r) or []
 
 
 def resolve_zone_for(
@@ -357,10 +466,37 @@ def resolve_zone_for(
     return best
 
 
-def build_ingress(domains: list[dict[str, Any]], service_url: str = "http://traefik:80") -> list[dict[str, Any]]:
-    """Build the Cloudflare-side ingress array from Domain rows."""
+def build_ingress(
+    domains: list[dict[str, Any]],
+    service_url: str = "http://traefik:80",
+    tcp_rules: list[dict[str, Any]] | None = None,
+    extra_hostnames: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build the Cloudflare-side ingress array from Domain rows.
+
+    `tcp_rules` are `{"hostname": ..., "service": "tcp://<container>:<port>"}`
+    entries for database/cache hosts serverless workloads dial through the
+    tunnel (see targetslib.all_tunnel_tcp_rules). They are PREPENDED: ingress
+    rules match top-down, so the specific TCP hostnames must precede the
+    domain wildcard rules — and the catch-all stays last.
+
+    `extra_hostnames` are specific hosts THIS tunnel serves under a domain
+    whose wildcard belongs to ANOTHER cluster's tunnel (per-host DNS overrides
+    — targetslib.load_dns_overrides). Each gets an explicit http rule to
+    `service_url`, placed before the domain rules like the tcp entries."""
     rules: list[dict[str, Any]] = []
     seen: set[str] = set()
+    for t in tcp_rules or []:
+        hostname = t["hostname"]
+        if hostname in seen:
+            continue
+        seen.add(hostname)
+        rules.append({"hostname": hostname, "service": t["service"]})
+    for hostname in extra_hostnames or []:
+        if hostname in seen:
+            continue
+        seen.add(hostname)
+        rules.append({"hostname": hostname, "service": service_url})
     for d in domains:
         for hostname in (d["name"], f"*.{d['name']}"):
             if hostname in seen:
@@ -369,3 +505,106 @@ def build_ingress(domains: list[dict[str, Any]], service_url: str = "http://trae
             rules.append({"hostname": hostname, "service": service_url})
     rules.append({"service": "http_status:404"})
     return rules
+
+
+# ───── Cloudflare Access (serverless → homebox DB path) ───────────────────────
+#
+# Serverless consumers (Cloud Run / App Runner) reach homebox-hosted databases
+# through the tunnel's TCP ingress. That path is public at the edge, so every
+# DB hostname is fronted by an Access application that only admits the
+# cluster's shared service token; the wrapper image (targets/artifacts.py
+# wrap_with_access_proxy) presents it via `cloudflared access tcp`.
+
+ACCESS_SERVICE_TOKEN_NAME = "homebox-db-access"
+
+
+async def ensure_access_service_token(
+    session: AsyncSession, state: dict[str, Any]
+) -> tuple[str, str]:
+    """Return (client_id, client_secret) of the cluster's shared Access service
+    token, creating it once. The secret is only returned by Cloudflare at
+    creation time, so it is encrypted into `state["db_access_token"]` and
+    reused from there on every later call."""
+    cached = state.get("db_access_token") or {}
+    if cached.get("client_id") and cached.get("client_secret_encrypted"):
+        secret = decrypt(cached["client_secret_encrypted"])
+        if secret:
+            return cached["client_id"], secret
+
+    token = get_token(state)
+    account_id = state.get("account_id")
+    if not token or not account_id:
+        raise CloudflareError(0, "Cloudflare token/account not configured")
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.post(
+            f"{API}/accounts/{account_id}/access/service_tokens",
+            headers=_headers(token),
+            json={"name": ACCESS_SERVICE_TOKEN_NAME, "duration": "8760h"},
+        )
+    result = _unwrap(r) or {}
+    client_id = result.get("client_id")
+    client_secret = result.get("client_secret")
+    if not client_id or not client_secret:
+        raise CloudflareError(
+            r.status_code, "Access service token create returned no credentials"
+        )
+    state["db_access_token"] = {
+        "token_id": result.get("id"),
+        "client_id": client_id,
+        "client_secret_encrypted": encrypt(client_secret),
+    }
+    await save_state(session, state)
+    return client_id, client_secret
+
+
+async def ensure_access_tcp_app(
+    token: str, account_id: str, hostname: str, service_token_id: str
+) -> str:
+    """Idempotently ensure an Access application fronts `hostname` with a
+    non-identity policy admitting the shared service token. Returns the app id.
+    Safe to double-run (coordinator handover): matched by domain, the policy
+    by its name."""
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.get(
+            f"{API}/accounts/{account_id}/access/apps",
+            headers=_headers(token),
+            params={"per_page": 100},
+        )
+        apps = _unwrap(r) or []
+        app = next(
+            (a for a in apps if (a.get("domain") or "").lower() == hostname.lower()),
+            None,
+        )
+        if app is None:
+            r = await c.post(
+                f"{API}/accounts/{account_id}/access/apps",
+                headers=_headers(token),
+                json={
+                    "name": f"Homebox DB {hostname}",
+                    "domain": hostname,
+                    "type": "self_hosted",
+                    "session_duration": "24h",
+                },
+            )
+            app = _unwrap(r) or {}
+        app_id = app.get("id")
+        if not app_id:
+            raise CloudflareError(r.status_code, f"Access app for {hostname} has no id")
+
+        r = await c.get(
+            f"{API}/accounts/{account_id}/access/apps/{app_id}/policies",
+            headers=_headers(token),
+        )
+        policies = _unwrap(r) or []
+        if not any(p.get("name") == "homebox-db-token" for p in policies):
+            r = await c.post(
+                f"{API}/accounts/{account_id}/access/apps/{app_id}/policies",
+                headers=_headers(token),
+                json={
+                    "name": "homebox-db-token",
+                    "decision": "non_identity",
+                    "include": [{"service_token": {"token_id": service_token_id}}],
+                },
+            )
+            _unwrap(r)
+    return app_id

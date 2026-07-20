@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft, ExternalLink, RefreshCw } from "lucide-react";
 import { api } from "../lib/api";
 import { useToast } from "../lib/toast";
 import { Modal } from "../components/Modal";
+import { ServiceIcon } from "../components/ServiceIcon";
+import { useTabIndicator } from "../lib/useTabIndicator";
 import type { EnvironmentInfo, MetricsResponse, ServiceItem } from "../lib/types";
 
 const WINDOWS = ["1h", "6h", "24h", "7d"] as const;
@@ -56,6 +58,10 @@ export function ServicePanel({ projectId, svc, env }: {
 }) {
   const pid = projectId;
   const isData = svc.kind === "database" || svc.kind === "cache";
+  const [tab, setTab] = useState<"data" | "monitoring" | "deployment" | "environment">("data");
+  const tabsRef = useRef<HTMLDivElement>(null);
+  useTabIndicator(tabsRef, ".tab.active", [tab]);
+  const instance = env?.instances.find(i => i.service_name === svc.name);
 
   return (
     <>
@@ -63,28 +69,35 @@ export function ServicePanel({ projectId, svc, env }: {
         <Link to={`/projects/${pid}/services`} className="back-btn" aria-label="Back to services" title="Back to services">
           <ArrowLeft size={18} />
         </Link>
+        <ServiceIcon kind={svc.kind} size={21} />
         <h2 style={{ margin: 0 }}>{svc.name}</h2>
-        <span className="badge plain">{svc.kind}</span>
-        {svc.is_public
-          ? <span className="badge ok">Public</span>
-          : <span className="badge muted plain">Internal</span>}
-        {svc.internal_port && <span className="dim">port {svc.internal_port}</span>}
+        <span className="service-header-endpoint">
+          {svc.is_public ? (instance?.url ? (
+              <a href={instance.url} target="_blank" rel="noopener">
+                {instance.url.replace(/^https?:\/\//, "")} <ExternalLink size={11} />
+              </a>
+            ) : <span className="badge ok">Public</span>
+          ) : <span className="badge muted plain">Internal</span>}
+        </span>
       </div>
-      <div style={{ marginTop: "1rem" }} />
+      <div className="tabs service-detail-tabs" role="tablist" ref={tabsRef}>
+        <span className="tab-indicator" aria-hidden />
+        {(["data", "monitoring", "deployment", "environment"] as const).map(key => (
+          <button key={key} role="tab" aria-selected={tab === key}
+            className={`tab ${tab === key ? "active" : ""}`} onClick={() => setTab(key)}>
+            {key[0].toUpperCase() + key.slice(1)}
+          </button>
+        ))}
+      </div>
 
-      {env && isData && <DataBrowser svc={svc} env={env} />}
-      {env && !isData && svc.is_public && <RequestMonitor pid={pid} svc={svc} env={env} />}
-      {env && !isData && !svc.is_public && (
-        <div className="card"><span className="dim">
-          Internal stateless service — no public endpoint to monitor. Resource metrics are on the project page.
-        </span></div>
+      {tab === "data" && env && isData && <DataBrowser svc={svc} env={env} />}
+      {tab === "data" && env && !isData && svc.is_public && <RequestMonitor pid={pid} svc={svc} env={env} />}
+      {tab === "data" && env && !isData && !svc.is_public && (
+        <div className="card"><span className="dim">This internal service has no browsable data endpoint.</span></div>
       )}
-
-      {env && <Monitoring svc={svc} env={env} />}
-
-      {env && <TargetSelector svc={svc} env={env} />}
-
-      <EnvVarsEditor svc={svc} projectId={pid} />
+      {tab === "monitoring" && env && <Monitoring svc={svc} env={env} />}
+      {tab === "deployment" && env && <TargetSelector svc={svc} env={env} />}
+      {tab === "environment" && <EnvVarsEditor svc={svc} projectId={pid} />}
     </>
   );
 }
@@ -92,30 +105,61 @@ export function ServicePanel({ projectId, svc, env }: {
 // ─── Deployment target (per environment) ─────────────────────────────────────
 
 const TARGET_LABELS: Record<string, string> = {
-  homebox: "Homebox (this cluster)",
-  cloudflare: "Cloudflare Pages",
+  homebox: "Homebox",
+  cloudflare: "Cloudflare",
   aws: "AWS",
   gcp: "Google Cloud",
 };
 const TARGET_HINTS: Record<string, string> = {
   homebox: "Runs on your own hardware. No extra cost.",
-  cloudflare: "Static assets on Cloudflare's CDN. Free tier is generous.",
+  cloudflare: "Static → Pages (CDN, generous free tier); web/api → Containers (scale-to-zero, needs a Dockerfile; serves from workers.dev in v1).",
   aws: "Static → S3; web/api → App Runner (~$5+/mo); database → EC2 VM (~$15+/mo).",
-  gcp: "Static → GCS; web/api → Cloud Run (scale-to-zero); database → GCE VM (~$15+/mo).",
+  gcp: "Static → GCS; web/api → Cloud Run (scale-to-zero; serves from run.app until domain mapping lands); database → GCE VM (~$15+/mo).",
 };
 const TARGET_PROVIDER: Record<string, string> = {
   aws: "aws", gcp: "gcp", cloudflare: "cloudflare",
 };
 
+// Local shims (System.tsx-style) — the structured options shape from
+// GET /api/services/{id}/targets after cluster-scoped homebox targets (D3).
+interface TargetLocation {
+  kind: "local" | "cluster" | "node";
+  id: string | null;
+  name: string;
+  local: boolean;
+}
+interface TargetOption {
+  value: string;
+  label?: string;
+  locations?: TargetLocation[];   // present on the "homebox" option
+}
 interface TargetsResponse {
-  options: string[];
+  options: TargetOption[];
   targets: {
     id: number; environment_id: number | null; target: string;
     integration_id: number | null; config: Record<string, unknown>;
     status: string | null; endpoint: string | null; error: string | null;
-    updated_at: string | null;
+    updated_at: string | null; inherited: boolean;
   }[];
 }
+
+// Select-value encoding: "homebox" (this homebox / absent location),
+// "homebox:cluster:<id>", "homebox:node:<id>", or a cloud provider value.
+const encodeTarget = (target: string, config: Record<string, unknown> | undefined): string => {
+  if (target !== "homebox") return target;
+  if (config?.cluster_id) return `homebox:cluster:${config.cluster_id}`;
+  if (config?.node_id) return `homebox:node:${config.node_id}`;
+  return "homebox";
+};
+const decodeTarget = (v: string): { target: string; config: Record<string, unknown> } => {
+  if (v.startsWith("homebox:cluster:"))
+    return { target: "homebox", config: { cluster_id: v.slice("homebox:cluster:".length) } };
+  if (v.startsWith("homebox:node:"))
+    return { target: "homebox", config: { node_id: v.slice("homebox:node:".length) } };
+  return { target: v, config: {} };
+};
+const locationValue = (loc: TargetLocation): string =>
+  loc.kind === "local" || loc.id === null ? "homebox" : `homebox:${loc.kind}:${loc.id}`;
 
 function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }) {
   const qc = useQueryClient();
@@ -133,11 +177,43 @@ function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }
   const envRow = data?.targets.find(t => t.environment_id === env.id);
   const defaultRow = data?.targets.find(t => t.environment_id === null);
   const effective = envRow ?? defaultRow;
-  const current = effective?.target ?? "homebox";
-  const options = data?.options ?? ["homebox"];
+  const baseTarget = effective?.target ?? "homebox";
+  const effectiveValue = encodeTarget(baseTarget, effective?.config);
+  const current = !effective || effective.inherited ? "default" : effectiveValue;
+  const options: TargetOption[] = data?.options ?? [{ value: "homebox" }];
+
+  // "Homebox" group: This Homebox (absent location) + every cluster /
+  // standalone node the linked account knows about.
+  const rawLocations = options.find(o => o.value === "homebox")?.locations ?? [];
+  const locations: TargetLocation[] = rawLocations.some(l => l.kind === "local")
+    ? rawLocations
+    : [{ kind: "local", id: null, name: "This Homebox", local: true }, ...rawLocations];
+
+  // Foreign homebox location → the service runs on ANOTHER cluster/node;
+  // status here is synced, read-only.
+  const currentLoc = effectiveValue.startsWith("homebox:")
+    ? locations.find(l => locationValue(l) === effectiveValue)
+    : undefined;
+  const isForeign = effectiveValue.startsWith("homebox:") && !(currentLoc?.local ?? false);
+  const foreignName = currentLoc?.name
+    ?? String(effective?.config?.cluster_id ?? effective?.config?.node_id ?? "");
+  const knownValues = new Set<string>([
+    ...locations.map(locationValue),
+    ...options.filter(o => o.value !== "homebox").map(o => o.value),
+  ]);
 
   const save = useMutation({
-    mutationFn: (target: string) => {
+    mutationFn: (encoded: string) => {
+      if (encoded === "default") {
+        if (envRow && !envRow.inherited) {
+          return api.del(`/api/services/${svc.id}/target?environment_id=${env.id}`);
+        }
+        if (defaultRow && !defaultRow.inherited) {
+          return api.del(`/api/services/${svc.id}/target`);
+        }
+        return Promise.resolve({ ok: true });
+      }
+      const { target, config } = decodeTarget(encoded);
       const provider = TARGET_PROVIDER[target];
       const integ = provider
         ? integrations?.find(i => i.provider === provider)
@@ -149,6 +225,7 @@ function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }
         environment_id: env.id,
         target,
         integration_id: integ?.id ?? null,
+        config,
       });
     },
     onSuccess: () => {
@@ -163,6 +240,7 @@ function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }
       <div className="row" style={{ marginTop: "1.75rem" }}>
         <h2 style={{ margin: 0 }}>Deployment target</h2>
         <div className="spacer" />
+        {isForeign && <span className="badge plain">Runs on {foreignName}</span>}
         {effective?.status === "live" && effective.endpoint && (
           <span className="badge ok">live · {effective.endpoint}</span>
         )}
@@ -177,15 +255,35 @@ function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }
             disabled={save.isPending}
             onChange={(e) => save.mutate(e.target.value)}
           >
-            {options.map(t => (
-              <option key={t} value={t}>{TARGET_LABELS[t] ?? t}</option>
+            <option value="default">Default ({TARGET_LABELS[baseTarget] ?? baseTarget})</option>
+            <optgroup label="Homebox">
+              {locations.map(loc => (
+                <option key={locationValue(loc)} value={locationValue(loc)}>
+                  {loc.kind === "local" ? loc.name : `${loc.name}${loc.local ? " (this " + loc.kind + ")" : ""}`}
+                </option>
+              ))}
+              {!knownValues.has(effectiveValue) && effectiveValue.startsWith("homebox:") && (
+                <option value={effectiveValue}>{foreignName || effectiveValue}</option>
+              )}
+            </optgroup>
+            {options.filter(o => o.value !== "homebox").map(o => (
+              <option key={o.value} value={o.value}>{TARGET_LABELS[o.value] ?? o.label ?? o.value}</option>
             ))}
           </select>
-          <span className="hint">{TARGET_HINTS[current]}</span>
-          {!envRow && defaultRow && (
-            <span className="hint">Inherited from the service-wide default.</span>
+          <span className="hint">{TARGET_HINTS[baseTarget]}</span>
+          {(!effective || effective.inherited) && (
+            <span className="hint">Inherited from the project deployment target.</span>
           )}
-          {current !== "homebox" && (
+          {!envRow && defaultRow && !defaultRow.inherited && (
+            <span className="hint">Inherited from the service-wide override.</span>
+          )}
+          {isForeign && (
+            <span className="hint">
+              This service runs on <b>{foreignName}</b> — status shown here is
+              synced from the owning cluster and read-only.
+            </span>
+          )}
+          {baseTarget !== "homebox" && (
             <span className="hint">
               Changing the target redeploys this environment; the previous
               target's resources are destroyed once the new one is live.

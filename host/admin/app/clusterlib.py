@@ -592,6 +592,59 @@ async def load_account(session: AsyncSession) -> dict[str, Any] | None:
     return val if isinstance(val, dict) and val.get("token_encrypted") else None
 
 
+# ───── stored provider tokens (silent account auth, G4) ──────────────────────
+#
+# Every successful OAuth flow that yields a provider access token persists it
+# ENCRYPTED under the "provider_tokens" setting, keyed "<provider>:<email>":
+#   {"github:al@example.com": {"token_encrypted": ..., "saved_at": iso}}
+# Node-local by design: the key is NOT in cluster_sync.CLUSTER_SETTINGS, so it
+# never rides peer sync or the account vault. No API ever returns the token.
+
+PROVIDER_TOKENS_KEY = "provider_tokens"
+
+
+async def load_provider_tokens(session: AsyncSession) -> dict[str, dict[str, Any]]:
+    val = await _get_setting(session, PROVIDER_TOKENS_KEY)
+    return dict(val) if isinstance(val, dict) else {}
+
+
+async def save_provider_token(
+    session: AsyncSession, provider: str, email: str, access_token: str,
+) -> None:
+    """Upsert one provider token (encrypted at rest). Commits."""
+    if not (provider and email and access_token):
+        return
+    tokens = await load_provider_tokens(session)
+    tokens[f"{provider.strip().lower()}:{email.strip().lower()}"] = {
+        "token_encrypted": crypto.encrypt(access_token),
+        "saved_at": datetime.utcnow().isoformat(),
+    }
+    await _set_setting(session, PROVIDER_TOKENS_KEY, tokens)
+    await session.commit()
+
+
+async def delete_provider_token(session: AsyncSession, key: str) -> None:
+    tokens = await load_provider_tokens(session)
+    if key in tokens:
+        tokens.pop(key, None)
+        await _set_setting(session, PROVIDER_TOKENS_KEY, tokens)
+        await session.commit()
+
+
+def freshest_provider_tokens(
+    tokens: dict[str, dict[str, Any]], provider: str | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Usable stored tokens, freshest first, optionally filtered by provider."""
+    items = [
+        (k, v) for k, v in tokens.items()
+        if isinstance(v, dict) and v.get("token_encrypted")
+    ]
+    if provider:
+        want = provider.strip().lower()
+        items = [(k, v) for k, v in items if k.split(":", 1)[0] == want]
+    return sorted(items, key=lambda kv: str(kv[1].get("saved_at") or ""), reverse=True)
+
+
 async def link_account_flow(
     session: AsyncSession, *, control_plane_url: str, account_token_plain: str,
     node_name: str, peer_url: str,
@@ -681,6 +734,148 @@ async def _maybe_autojoin(session: AsyncSession, overview: dict[str, Any]) -> No
         peer_url=acct.get("peer_url") or "",
         node_name=acct.get("node_name") or "",
     )
+
+
+# ───── typed remote-op directives (poll channel, D5) ─────────────────────────
+#
+# The poll response's new-style "directives" list carries remote operations
+# queued from the god view / portal: [{id, type, payload}]. The legacy join
+# "directive" field is unchanged (_maybe_autojoin above). Each directive is
+# executed locally via the existing flows and acked to the CP; results are
+# remembered in-process so a re-delivered directive (ack lost) is re-acked,
+# never re-executed.
+
+_handled_directives: dict[str, tuple[str, str]] = {}  # id -> (status, detail)
+_HANDLED_DIRECTIVES_CAP = 500
+
+
+async def _execute_split_cluster(session: AsyncSession, payload: dict[str, Any]) -> tuple[str, str]:
+    """v1 split-cluster: the directive's RECIPIENT splits off to found the new
+    cluster (directives are point-to-point — an ordinal election here could
+    wait on a node that never received it), then invites the other listed
+    nodes (they join via the CP's normal join directives)."""
+    node_ids = [str(n) for n in (payload.get("node_ids") or []) if n]
+    name = (payload.get("name") or "").strip()
+    if not node_ids or not name:
+        return ("error", "split_cluster requires node_ids and name")
+    self_id = await get_node_id(session)
+    if self_id not in node_ids:
+        return ("error", "this node is not in the split set — send the directive to a member of it")
+    state = await load_cluster(session)
+    if not state:
+        return ("error", "this node is not in a cluster")
+    acct = await load_account(session)
+    acct_token = crypto.decrypt(acct["token_encrypted"]) if acct else ""
+    cp_url = (acct or {}).get("control_plane_url") or state["control_plane_url"]
+    res = await split_off_flow(session, name=name)
+    new_id = res["cluster_id"]
+    invited: list[str] = []
+    errors: list[str] = []
+    for nid in node_ids:
+        if nid == self_id:
+            continue
+        try:
+            await _cp("POST", cp_url, f"/v1/clusters/{new_id}/invite",
+                      token=acct_token, body={"node_id": nid})
+            invited.append(nid)
+        except ControlPlaneError as e:
+            errors.append(f"{nid}: {e.detail}")
+    detail = f"founded cluster {new_id} ({res['name']}); invited: {', '.join(invited) or 'none'}"
+    if errors:
+        return ("error", detail + "; invite errors: " + "; ".join(errors))
+    return ("done", detail)
+
+
+async def _execute_directive(session: AsyncSession, d: dict[str, Any]) -> tuple[str, str]:
+    """Run one typed directive; returns (status, detail) for the ack."""
+    dtype = d.get("type")
+    payload = d.get("payload") or {}
+    node_id = await get_node_id(session)
+
+    if dtype == "set_serving":
+        serving = bool(payload.get("serving"))
+        if not serving:
+            # Same last-serving-node guard as the UI route: never let the
+            # cluster (or a mirror-less roster) lose ALL app ingress.
+            state = await load_cluster(session)
+            if state and not await serving_peers_excluding(session, state, node_id):
+                if not await online_mirror_standby(session, state, node_id):
+                    return ("error",
+                            "refused: this is the last serving node — at least one "
+                            "node must keep serving app traffic (enable another node "
+                            "or add an online mirror first)")
+        result = await apply_app_serving(session, serving)
+        return ("done", f"serving={result.get('serving')} connector={result.get('connector', '-')}")
+
+    if dtype == "split_off":
+        state = await load_cluster(session)
+        acct = await load_account(session)
+        default_name = ((state or {}).get("node_name")
+                        or (acct or {}).get("node_name") or "node")
+        name = (payload.get("name") or "").strip() or f"{default_name}-cluster"
+        res = await split_off_flow(session, name=name)
+        return ("done", f"split off into cluster {res['cluster_id']} ({res['name']})")
+
+    if dtype == "split_cluster":
+        return await _execute_split_cluster(session, payload)
+
+    if dtype == "join":
+        # New-style join (typed) — same semantics as the legacy field.
+        if await load_cluster(session):
+            return ("error", "already in a cluster — leave it first")
+        if not payload.get("join_token"):
+            return ("error", "join directive missing join_token")
+        acct = await load_account(session)
+        if not acct:
+            return ("error", "no account link on this node")
+        await join_cluster_flow(
+            session,
+            control_plane_url=acct["control_plane_url"],
+            join_token=payload["join_token"],
+            peer_url=acct.get("peer_url") or "",
+            node_name=acct.get("node_name") or "",
+        )
+        return ("done", "joined cluster")
+
+    return ("error", f"unknown directive type {dtype!r}")
+
+
+async def handle_directives(session: AsyncSession, overview: dict[str, Any]) -> None:
+    """Execute + ack every typed directive in a poll response. Idempotent per
+    directive id; a bad directive never crashes the loop — it's acked as an
+    error and the loop moves on."""
+    directives = overview.get("directives")
+    if not isinstance(directives, list) or not directives:
+        return
+    acct = await load_account(session)
+    if not acct:
+        return
+    cp_url = acct["control_plane_url"]
+    token = crypto.decrypt(acct["token_encrypted"])
+    for d in directives:
+        if not isinstance(d, dict) or not d.get("id"):
+            continue
+        did = str(d["id"])
+        if did in _handled_directives:
+            status, detail = _handled_directives[did]  # re-ack only, never re-run
+        else:
+            try:
+                status, detail = await _execute_directive(session, d)
+            except (ControlPlaneError, PeerError, ValueError) as e:
+                status, detail = "error", str(e)
+            except Exception as e:  # noqa: BLE001 — never let one directive kill the loop
+                log.exception("directive %s (%s) failed", did, d.get("type"))
+                status, detail = "error", str(e)
+            if len(_handled_directives) >= _HANDLED_DIRECTIVES_CAP:
+                for k in list(_handled_directives)[:_HANDLED_DIRECTIVES_CAP // 2]:
+                    _handled_directives.pop(k, None)
+            _handled_directives[did] = (status, detail)
+            log.info("directive %s (%s): %s — %s", did, d.get("type"), status, detail)
+        try:
+            await _cp("POST", cp_url, f"/v1/accounts/directives/{did}/ack",
+                      token=token, body={"status": status, "detail": detail})
+        except ControlPlaneError as e:
+            log.warning("directive ack failed for %s (will re-ack next poll): %s", did, e)
 
 
 # ───── leave / disconnect ─────────────────────────────────────────────────────
@@ -1022,8 +1217,15 @@ async def ensure_db_replication(session: AsyncSession, state: dict[str, Any]) ->
                 secret, project.name, env.name, info["service"],
             )
             try:
+                # Cloud DB VMs replicating this stack's database join as extra
+                # Spock nodes; the coordinator also wires the VM's own subs.
+                from . import targetslib
+                extra_nodes = await targetslib.db_vm_extra_nodes(
+                    session, project, env, info["service"])
                 res = await cluster_db.ensure_replication(
                     stack=stack, info=info, state=state, self_node_id=node_id,
+                    extra_nodes=extra_nodes,
+                    wire_extra=await targetslib.is_cloud_coordinator(session, state),
                 )
                 if res.get("subs_created") or res.get("tables_added"):
                     log.info("cluster db reconcile %s/%s: +tables %s +subs %s",
@@ -1407,6 +1609,12 @@ async def cluster_loop() -> None:
                     overview = await account_poll(session)
                     if overview:
                         await _maybe_autojoin(session, overview)
+                        # Typed remote-op directives (set_serving/split_off/
+                        # split_cluster/join) ride the same poll response.
+                        try:
+                            await handle_directives(session, overview)
+                        except Exception:  # noqa: BLE001
+                            log.exception("directive handling failed")
                 except ControlPlaneError as e:
                     log.warning("account poll failed: %s", e)
                 # Cloud metadata backup: for account-linked nodes (clustered or
@@ -1418,6 +1626,14 @@ async def cluster_loop() -> None:
                         await backuplib.push_backup_if_changed(session)
                     except Exception:  # noqa: BLE001
                         log.exception("cloud backup push failed")
+                    # Account metadata vault: pull→merge→push, coordinator (or
+                    # standalone linked node) only. vault_tick records its own
+                    # errors on the vault_state setting; this is the backstop.
+                    try:
+                        from . import vaultlib
+                        await vaultlib.vault_tick(session)
+                    except Exception:  # noqa: BLE001
+                        log.exception("vault tick failed")
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — the loop must survive anything

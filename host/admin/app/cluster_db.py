@@ -434,6 +434,27 @@ def infos_from_compose(rd: Path) -> list[dict[str, Any]]:
 # ───── post-up wiring (also called from the cluster reconcile loop) ───────────
 
 
+async def _psql_remote(container: str, admin_user: str, admin_password: str,
+                       db: str, host: str, port: int, sql: str,
+                       timeout: int = 30) -> tuple[int, str]:
+    """Run psql against a REMOTE Postgres (a cloud DB VM over its mesh IP)
+    using the LOCAL project container's psql binary — no ssh or agent on the
+    VM. Same admin credentials: the VM was provisioned with the project's."""
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "exec", "-e", f"PGPASSWORD={admin_password}", container,
+        "psql", "-h", host, "-p", str(port), "-U", admin_user, "-d", db,
+        "-tA", "-v", "ON_ERROR_STOP=1", "-c", sql,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return 124, "psql timed out"
+    return proc.returncode or 0, out.decode("utf-8", "replace").strip()
+
+
 async def _psql(container: str, admin_user: str, admin_password: str, db: str, sql: str,
                 timeout: int = 30) -> tuple[int, str]:
     proc = await asyncio.create_subprocess_exec(
@@ -456,6 +477,8 @@ async def ensure_replication(
     info: dict[str, Any],
     state: dict[str, Any],
     self_node_id: str,
+    extra_nodes: list[dict[str, Any]] | None = None,
+    wire_extra: bool = False,
 ) -> dict[str, Any]:
     """Idempotently wire this node's DB into the cluster mesh: default-repset
     membership for all public tables + one subscription per peer. Safe to call
@@ -622,11 +645,18 @@ async def ensure_replication(
             else:
                 result["errors"].append(f"repset add lolor.{table}: {aout[:200]}")
 
-    # 3. subscriptions to every CURRENT peer …
+    # 3. subscriptions to every CURRENT peer … Cloud DB VMs (extra_nodes:
+    # {ordinal, host: <mesh ip>, port, node_name}) count as peers too — this
+    # node subscribes to them like any other; their side is wired in 3b.
     code, out = await _psql(container, admin, pw, db, "SELECT sub_name FROM spock.subscription;")
     existing_subs = set(x.strip() for x in out.splitlines() if x.strip()) if code == 0 else set()
     my_ord = info["ordinal"]
     peers = roster_peer_ordinals(state, self_node_id)
+    extra_by_ord: dict[int, dict[str, Any]] = {
+        int(n["ordinal"]): n for n in (extra_nodes or []) if n.get("ordinal")
+    }
+    for e_ord, e in extra_by_ord.items():
+        peers[e_ord] = {"__extra__": True, **e}
     expected = {f"sub_n{my_ord}_n{p_ord}" for p_ord in peers}
     # Prefer the WireGuard overlay for peers whose tunnel is up: across NAT the
     # peer's LAN IP isn't reachable and its Postgres port isn't public, so the
@@ -647,16 +677,21 @@ async def ensure_replication(
     if code == 0 and out.strip() == "t":
         local_has_data = True
     for p_ord, peer in peers.items():
-        if p_ord in overlay_up:
-            host, via = meshlib.mesh_ip(p_ord), "mesh"
+        if peer.get("__extra__"):
+            # Cloud DB VM: always via its mesh IP (that's the only path its
+            # firewall guarantees), Postgres on the VM's own 5432.
+            host, via = peer.get("host"), "mesh-vm"
+            port = int(peer.get("port") or 5432)
+        elif p_ord in overlay_up:
+            host, via, port = meshlib.mesh_ip(p_ord), "mesh", info["port"]
         else:
-            host, via = peer_host(peer), "direct"
+            host, via, port = peer_host(peer), "direct", info["port"]
         if not host:
             continue
         sub = f"sub_n{my_ord}_n{p_ord}"
         if sub in existing_subs:
             continue
-        dsn = (f"host={host} port={info['port']} dbname={db} "
+        dsn = (f"host={host} port={port} dbname={db} "
                f"user={info['repl_user']} password={info['repl_password']}")
         sync_clause = "" if local_has_data else ", synchronize_data := true"
         code, sout = await _psql(
@@ -666,10 +701,49 @@ async def ensure_replication(
         )
         if code == 0:
             result["subs_created"].append(sub)
-            log.info("cluster db: created %s on %s → %s:%s (%s)", sub, container, host, info["port"], via)
+            log.info("cluster db: created %s on %s → %s:%s (%s)", sub, container, host, port, via)
         else:
             # Peer likely not deployed/reachable yet — the reconcile loop retries.
             result["errors"].append(f"{sub}: {sout[:200]}")
+
+    # 3b. wire the VM side (coordinator only — wire_extra): the VM subscribes
+    # to this node and every roster peer over their mesh IPs. Runs psql inside
+    # the LOCAL project container but CONNECTED to the VM's Postgres — no ssh,
+    # no agent on the VM beyond Postgres itself.
+    if wire_extra and extra_by_ord:
+        node_ords = {my_ord: meshlib.mesh_ip(my_ord)}
+        for p_ord in roster_peer_ordinals(state, self_node_id):
+            node_ords[p_ord] = meshlib.mesh_ip(p_ord)
+        for e_ord, e in extra_by_ord.items():
+            e_host, e_port = e.get("host"), int(e.get("port") or 5432)
+            if not e_host:
+                continue
+            code, out = await _psql_remote(
+                container, admin, pw, db, e_host, e_port,
+                "SELECT sub_name FROM spock.subscription;")
+            vm_subs = set(x.strip() for x in out.splitlines() if x.strip()) if code == 0 else set()
+            if code != 0:
+                result["errors"].append(f"vm n{e_ord} unreachable: {out[:200]}")
+                continue
+            for n_ord, n_ip in node_ords.items():
+                sub = f"sub_n{e_ord}_n{n_ord}"
+                if sub in vm_subs:
+                    continue
+                dsn = (f"host={n_ip} port={info['port']} dbname={db} "
+                       f"user={info['repl_user']} password={info['repl_password']}")
+                # The VM starts empty → first sub copies existing rows.
+                sync = ", synchronize_data := true" if not vm_subs else ""
+                code, sout = await _psql_remote(
+                    container, admin, pw, db, e_host, e_port,
+                    f"SELECT spock.sub_create(subscription_name := '{sub}', "
+                    f"provider_dsn := '{dsn}'{sync});",
+                    timeout=180,
+                )
+                if code == 0:
+                    vm_subs.add(sub)
+                    result["subs_created"].append(f"{sub}@vm")
+                else:
+                    result["errors"].append(f"{sub}@vm: {sout[:200]}")
 
     # 4. … and NONE to departed ones. Dropping the sub is what stops pulling
     # from a gone peer; peers dropping THEIR subs to us is what releases our

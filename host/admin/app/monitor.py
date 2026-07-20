@@ -243,6 +243,16 @@ async def _cycle(cycle: int = 0) -> None:
                 await _finish_pending_zones(session, state)
             except Exception:  # noqa: BLE001
                 log.exception("pending-zone check failed")
+            # Cloud deployment targets: self-heal stuck/error targets every
+            # ~5 min. Coordinator-gated inside (single-node = coordinator);
+            # no-op while everything is live.
+            try:
+                from . import targetslib
+                from .clusterlib import load_cluster
+                await targetslib.reconcile_targets(
+                    session, await load_cluster(session))
+            except Exception:  # noqa: BLE001
+                log.exception("target reconcile failed")
         if cycle % 120 == 0 and cf.get_token(state) and state.get("tunnel_id"):
             try:
                 d_status, d_detail = await _dns_drift_check(session, state)

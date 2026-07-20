@@ -1,21 +1,23 @@
 import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Github, Plus, ExternalLink, Cloud, ChevronRight } from "lucide-react";
+import { Github, Plus, ExternalLink, Cloud, CloudCog, Server, ChevronRight } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { useToast } from "../lib/toast";
 import type { CloudflareAccount, IntegrationItem, OAuthSettings, SetTokenResponse } from "../lib/types";
 
 /**
- * Integrations — every connection to an external system (GitHub orgs +
- * Cloudflare), as a card list. Each card links to /integrations/:id for
- * details and actions. New connections go through the Add wizard: pick a
- * provider, connect via OAuth (or paste a token), save.
+ * Integrations — every connection to an external system (GitHub orgs,
+ * Cloudflare, AWS, GCP), as a card list. Each card links to /integrations/:id
+ * for details and actions. New connections go through the Add wizard: pick a
+ * provider, connect via OAuth (or paste a token / keys), save.
  */
 
 export function providerLogo(provider: string) {
   if (provider === "github") return <Github aria-hidden />;
+  if (provider === "aws") return <Server aria-hidden />;
+  if (provider === "gcp") return <CloudCog aria-hidden />;
   return <Cloud aria-hidden />;
 }
 
@@ -72,9 +74,13 @@ export function Integrations() {
 function ProviderCard({ i }: { i: IntegrationItem }) {
   const title = i.provider === "github"
     ? (i.account_login ?? "GitHub")
-    : (i.name || "Cloudflare");
+    : (i.name || (i.provider === "aws" ? "AWS" : i.provider === "gcp" ? "Google Cloud" : "Cloudflare"));
   const sub = i.provider === "github"
     ? `GitHub · ${i.source === "oauth" ? "OAuth" : "token"} · ${i.project_count} project${i.project_count === 1 ? "" : "s"}`
+    : i.provider === "aws"
+    ? `AWS · account ${i.account_login ?? "?"}`
+    : i.provider === "gcp"
+    ? `Google Cloud · ${i.account_login ?? "project"}`
     : `Cloudflare · ${i.account_id ? i.account_id.slice(0, 8) + "…" : "account"}`;
 
   return (
@@ -93,7 +99,7 @@ function ProviderCard({ i }: { i: IntegrationItem }) {
 
 // ─── Add wizard: pick provider → connect (OAuth first, token fallback) ────────
 
-type AddStep = "pick" | "github" | "cloudflare";
+type AddStep = "pick" | "github" | "cloudflare" | "aws" | "gcp";
 
 function AddIntegrationModal({ open, onClose, hasCloudflare }: {
   open: boolean; onClose: () => void; hasCloudflare: boolean;
@@ -107,6 +113,8 @@ function AddIntegrationModal({ open, onClose, hasCloudflare }: {
 
   const title = step === "pick" ? "Add integration"
     : step === "github" ? "Connect GitHub"
+    : step === "aws" ? "Connect AWS"
+    : step === "gcp" ? "Connect Google Cloud"
     : "Connect Cloudflare";
 
   return (
@@ -121,6 +129,12 @@ function AddIntegrationModal({ open, onClose, hasCloudflare }: {
       )}
       {step === "cloudflare" && (
         <button className="btn primary" type="submit" form="add-cloudflare-form">Save</button>
+      )}
+      {step === "aws" && (
+        <button className="btn primary" type="submit" form="add-aws-form">Save</button>
+      )}
+      {step === "gcp" && (
+        <button className="btn primary" type="submit" form="add-gcp-form">Save</button>
       )}
     </>}>
       {step === "pick" && (
@@ -137,11 +151,23 @@ function AddIntegrationModal({ open, onClose, hasCloudflare }: {
               Cloudflare
               <small>{hasCloudflare ? "already connected" : "tunnel, DNS & domains"}</small>
             </button>
+            <button className="provider-tile" onClick={() => setStep("aws")}>
+              <span className="provider-logo"><Server aria-hidden /></span>
+              AWS
+              <small>Deploy services to S3, App Runner, EC2</small>
+            </button>
+            <button className="provider-tile" onClick={() => setStep("gcp")}>
+              <span className="provider-logo"><CloudCog aria-hidden /></span>
+              Google Cloud
+              <small>Deploy services to GCS, Cloud Run, GCE</small>
+            </button>
           </div>
         </>
       )}
       {step === "github" && <GithubConnect onDone={close} />}
       {step === "cloudflare" && <CloudflareConnect onDone={close} />}
+      {step === "aws" && <AwsConnect onDone={close} />}
+      {step === "gcp" && <GcpConnect onDone={close} />}
     </Modal>
   );
 }
@@ -266,6 +292,94 @@ function CloudflareConnect({ onDone }: { onDone: () => void }) {
           </span>
         </div>
       )}
+    </form>
+  );
+}
+
+function AwsConnect({ onDone }: { onDone: () => void }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [keyId, setKeyId] = useState("");
+  const [secret, setSecret] = useState("");
+  const [region, setRegion] = useState("us-east-1");
+
+  const connect = useMutation({
+    mutationFn: () => api.post("/api/integrations/aws/connect", {
+      access_key_id: keyId.trim(), secret_access_key: secret.trim(), region: region.trim() || "us-east-1",
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["integrations"] });
+      toast.show("AWS connected", "ok");
+      onDone();
+    },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
+  function submit(e: FormEvent) { e.preventDefault(); if (!connect.isPending) connect.mutate(); }
+
+  return (
+    <form id="add-aws-form" onSubmit={submit}>
+      <div className="field">
+        <label className="lbl">Access key ID</label>
+        <input value={keyId} onChange={e => setKeyId(e.target.value)} placeholder="AKIA…" required autoFocus />
+      </div>
+      <div className="field">
+        <label className="lbl">Secret access key</label>
+        <input type="password" value={secret} onChange={e => setSecret(e.target.value)}
+          placeholder="Paste the secret key" required />
+        <span className="hint">
+          {connect.isPending
+            ? <span className="row"><span className="spinner" /> Verifying with AWS…</span>
+            : <>Keys for an IAM user with deploy permissions — verified via STS, then encrypted at rest.</>}
+        </span>
+      </div>
+      <div className="field">
+        <label className="lbl">Region</label>
+        <input value={region} onChange={e => setRegion(e.target.value)} placeholder="us-east-1" />
+        <span className="hint">Default region for resources Homebox creates.</span>
+      </div>
+    </form>
+  );
+}
+
+function GcpConnect({ onDone }: { onDone: () => void }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [saJson, setSaJson] = useState("");
+  const [region, setRegion] = useState("us-central1");
+
+  const connect = useMutation({
+    mutationFn: () => api.post("/api/integrations/gcp/connect", {
+      service_account_json: saJson.trim(), region: region.trim() || "us-central1",
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["integrations"] });
+      toast.show("Google Cloud connected", "ok");
+      onDone();
+    },
+    onError: (e) => toast.show(String(e), "fail"),
+  });
+
+  function submit(e: FormEvent) { e.preventDefault(); if (!connect.isPending) connect.mutate(); }
+
+  return (
+    <form id="add-gcp-form" onSubmit={submit}>
+      <div className="field">
+        <label className="lbl">Service-account key (JSON)</label>
+        <textarea value={saJson} onChange={e => setSaJson(e.target.value)} rows={7}
+          placeholder='{"type": "service_account", "project_id": "…", …}' required autoFocus
+          style={{ fontFamily: "monospace", fontSize: "0.78rem" }} />
+        <span className="hint">
+          {connect.isPending
+            ? <span className="row"><span className="spinner" /> Verifying with Google Cloud…</span>
+            : <>Create a service account with Editor role and paste its JSON key.</>}
+        </span>
+      </div>
+      <div className="field">
+        <label className="lbl">Region</label>
+        <input value={region} onChange={e => setRegion(e.target.value)} placeholder="us-central1" />
+        <span className="hint">Default region for resources Homebox creates.</span>
+      </div>
     </form>
   );
 }

@@ -135,7 +135,12 @@ def _peer_endpoint(peer: dict, my_public_ip: str) -> str | None:
     return None
 
 
-def build_conf(*, priv: str, my_ordinal: int, peers: list[dict], my_public_ip: str) -> str:
+def build_conf(*, priv: str, my_ordinal: int, peers: list[dict], my_public_ip: str,
+               extra_peers: list[dict] | None = None) -> str:
+    """wg0.conf for this node. `peers` are cluster roster nodes; `extra_peers`
+    are non-roster mesh members — cloud database VMs (targetslib
+    mesh_extra_peers) with a known public endpoint we always dial:
+    {ordinal, wg_pubkey, endpoint: "ip:port"}."""
     lines = [
         "[Interface]",
         f"PrivateKey = {priv}",
@@ -152,6 +157,17 @@ def build_conf(*, priv: str, my_ordinal: int, peers: list[dict], my_public_ip: s
         lines.append(f"PublicKey = {wg_pub}")
         lines.append(f"AllowedIPs = {mesh_ip(ordinal)}/32")
         ep = _peer_endpoint(p, my_public_ip)
+        if ep:
+            lines.append(f"Endpoint = {ep}")
+        lines.append("PersistentKeepalive = 25")
+        lines.append("")
+    for p in extra_peers or []:
+        wg_pub, ordinal, ep = p.get("wg_pubkey"), p.get("ordinal"), p.get("endpoint")
+        if not wg_pub or not ordinal:
+            continue
+        lines.append("[Peer]")
+        lines.append(f"PublicKey = {wg_pub}")
+        lines.append(f"AllowedIPs = {mesh_ip(ordinal)}/32")
         if ep:
             lines.append(f"Endpoint = {ep}")
         lines.append("PersistentKeepalive = 25")
@@ -242,9 +258,18 @@ async def ensure_mesh(session: AsyncSession, state: dict) -> None:
     peers = [n for n in roster if n.get("node_id") != node_id and n.get("wg_pubkey")]
 
     priv, _pub = await get_wg_keys(session)
+    # Cloud database VMs are mesh members too — every node dials them at
+    # their public endpoint (they can't be in the CP roster).
+    from . import targetslib
+    try:
+        extra = await targetslib.mesh_extra_peers(session)
+    except Exception:  # noqa: BLE001 — mesh must not break on a targets bug
+        log.exception("mesh: could not load extra peers")
+        extra = []
     conf = build_conf(
         priv=priv, my_ordinal=me["ordinal"], peers=peers,
         my_public_ip=me.get("public_ip") or "",
+        extra_peers=extra,
     )
 
     if not await _image_exists():

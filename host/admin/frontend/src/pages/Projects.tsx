@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ChevronRight, Plus } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
+import { ProjectIconPicker } from "../components/ProjectIconPicker";
 import { useToast } from "../lib/toast";
 import type { DeploymentStatus, EnvironmentInfo, IntegrationItem, ProjectItem } from "../lib/types";
 
@@ -86,7 +87,12 @@ function ProjectRow({ p }: { p: ProjectItem }) {
 
   return (
     <tr className="clickable" onClick={() => nav(`/projects/${p.id}`)}>
-      <td><strong>{p.name}</strong></td>
+      <td>
+        <div className="row" style={{ flexWrap: "nowrap" }}>
+          <ProjectIconPicker projectId={p.id} icon={p.icon} name={p.name} size={18} />
+          <strong>{p.name}</strong>
+        </div>
+      </td>
       <td className="dim">
         <a href={`https://github.com/${p.repo_full_name}`} target="_blank" rel="noopener" onClick={e => e.stopPropagation()}>
           {repoShort}

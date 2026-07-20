@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .. import backuplib, clusterlib
+from .. import backuplib, clusterlib, vaultlib
 from ..auth import require_session_api
 from ..config import settings
 from ..db import get_session
@@ -131,6 +131,12 @@ async def create_cluster(
 ):
     if await clusterlib.load_cluster(session):
         raise HTTPException(409, "This node is already in a cluster. Leave it first.")
+    # D7: clustering requires a linked homebox.sh account. (POST /join stays
+    # open — mirror VMs bootstrap through the token join.)
+    if not await clusterlib.load_account(session):
+        raise HTTPException(
+            412, "Link your homebox.sh account before creating a cluster "
+                 "(System page → Link Account).")
     peer_url = body.peer_url.strip().rstrip("/")
     if not peer_url.startswith("http"):
         peer_url = f"http://{peer_url}"
@@ -384,6 +390,8 @@ async def account_status(
     account = account if isinstance(account, dict) else {}
     backup = await clusterlib._get_setting(session, backuplib.CLOUD_BACKUP_KEY)
     backup = backup if isinstance(backup, dict) else {}
+    vault = await vaultlib.get_vault_state(session)
+    post_link = await vaultlib.get_post_link_state(session)
     return {
         "linked": True,
         "control_plane_url": acct.get("control_plane_url"),
@@ -394,6 +402,10 @@ async def account_status(
         "email": account.get("email"),
         "plan": account.get("plan"),
         "backup": {"pushed_at": backup.get("pushed_at"), "error": backup.get("error")},
+        "vault": {"version": vault.get("version"), "pushed_at": vault.get("pushed_at"),
+                  "pulled_at": vault.get("pulled_at"), "error": vault.get("error")},
+        # Post-link pipeline progress (link → sync → identity → cluster).
+        "post_link": post_link or None,
         "suggested": None,  # already linked — nothing to suggest
     }
 
@@ -460,7 +472,84 @@ async def account_link(
         )
     except clusterlib.ControlPlaneError as e:
         raise HTTPException(502, str(e))
+    # The post-link pipeline (vault restore → identity auto-create → default
+    # new cluster) runs in the background (own session) so this response
+    # returns immediately; progress rides the post_link/vault_state settings.
+    vaultlib.schedule_post_link()
     return {"ok": True}
+
+
+class LinkSilentBody(BaseModel):
+    provider: str | None = None  # restrict to one provider's stored tokens
+
+
+@router.post("/account/link-silent")
+async def account_link_silent(
+    body: LinkSilentBody | None = None,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """G4: link this node to a homebox.sh account WITHOUT a browser round-trip,
+    by re-authing with a stored (encrypted) provider token from an earlier
+    OAuth login/link. Tries the freshest usable token first; a token the CP
+    rejects as invalid/expired (401) is deleted. 412 when nothing usable
+    remains — the UI falls back to the inline AccountAuthModal."""
+    import socket
+
+    body = body or LinkSilentBody()
+    state = await clusterlib.load_cluster(session)
+    acct = await clusterlib.load_account(session)
+    cp_url = ((state or {}).get("control_plane_url")
+              or settings.homebox_control_plane_url)
+    node_name = (
+        (acct or {}).get("node_name") or (state or {}).get("node_name")
+        or socket.gethostname() or "homebox"
+    )
+    peer_url = (acct or {}).get("peer_url") or (state or {}).get("peer_url") or ""
+
+    from .. import crypto
+    candidates = clusterlib.freshest_provider_tokens(
+        await clusterlib.load_provider_tokens(session), body.provider)
+    for key, entry in candidates:
+        provider, _, email = key.partition(":")
+        access_token = crypto.decrypt(entry.get("token_encrypted") or "")
+        if not access_token:
+            # Undecryptable (e.g. key rotation) — useless forever, drop it.
+            await clusterlib.delete_provider_token(session, key)
+            continue
+        try:
+            reg = await clusterlib._cp(
+                "POST", cp_url, "/v1/accounts/register",
+                body={"provider": provider, "access_token": access_token,
+                      "label": f"node {node_name}"},
+            )
+        except clusterlib.ControlPlaneError as e:
+            if e.status_code == 401:
+                # Provider token invalid/expired — forget it, try the next.
+                await clusterlib.delete_provider_token(session, key)
+                continue
+            # Pass other CP errors through (402 plan gate, 502 provider down…).
+            if e.status_code and 400 <= e.status_code < 500:
+                raise HTTPException(e.status_code, e.detail)
+            raise HTTPException(502, str(e))
+        account_token = (reg.get("account_token") or "").strip()
+        if not account_token:
+            raise HTTPException(502, "The account service returned no token.")
+        try:
+            await clusterlib.link_account_flow(
+                session,
+                control_plane_url=cp_url,
+                account_token_plain=account_token,
+                node_name=node_name,
+                peer_url=peer_url,
+            )
+        except clusterlib.ControlPlaneError as e:
+            raise _cp_http(e)
+        linked_email = (reg.get("email") or email or "").strip().lower() or None
+        # Same post-link path as the OAuth account-link flow.
+        vaultlib.schedule_post_link(provider=provider, email=linked_email)
+        return {"ok": True, "provider": provider, "email": linked_email}
+    raise HTTPException(412, "no stored provider token")
 
 
 @router.delete("/account")
@@ -504,7 +593,10 @@ async def account_create_cluster(
         raise HTTPException(409, "This node is already in a cluster. Leave it first.")
     acct = await clusterlib.load_account(session)
     if not acct:
-        raise HTTPException(404, "Link a homebox.sh account first.")
+        # D7: clustering requires a linked account.
+        raise HTTPException(
+            412, "Link your homebox.sh account before creating a cluster "
+                 "(System page → Link Account).")
     from .. import crypto
     try:
         state = await clusterlib.create_cluster_flow(
@@ -590,6 +682,69 @@ async def account_invite(
     except clusterlib.ControlPlaneError as e:
         raise _cp_http(e)
     return {"ok": True, "invited": body.node_id, "cluster_id": cluster_id}
+
+
+# ───── fleet god view: topology + remote-op directives ────────────────────────
+
+
+@router.get("/account/topology")
+async def account_topology(
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """The account-wide fleet view, proxied from the control plane and
+    annotated with this node's identity, pending cloud-node provisions, and
+    local vault sync freshness."""
+    acct = await clusterlib.load_account(session)
+    if not acct:
+        raise HTTPException(412, "Link your homebox.sh account to see the fleet topology.")
+    from .. import crypto
+    try:
+        topo = await clusterlib._cp(
+            "GET", acct["control_plane_url"], "/v1/accounts/topology",
+            token=crypto.decrypt(acct["token_encrypted"]))
+    except clusterlib.ControlPlaneError as e:
+        raise _cp_http(e)
+    topo["this_node_id"] = await clusterlib.get_node_id(session)
+    provisions = await clusterlib._get_setting(session, "node_provisions")
+    topo["provisions"] = provisions if isinstance(provisions, list) else []
+    vault = await vaultlib.get_vault_state(session)
+    topo["vault_state"] = {"pushed_at": vault.get("pushed_at"),
+                           "pulled_at": vault.get("pulled_at"),
+                           "error": vault.get("error")}
+    return topo
+
+
+class DirectiveBody(BaseModel):
+    node_id: str
+    type: str
+    payload: dict = {}
+
+
+@router.post("/account/directives")
+async def account_directive(
+    body: DirectiveBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Queue a remote op (set_serving / split_off / split_cluster) for another
+    linked node — it executes on that node's next account poll (≤60s)."""
+    acct = await clusterlib.load_account(session)
+    if not acct:
+        raise HTTPException(412, "Link your homebox.sh account first.")
+    from .. import crypto
+    try:
+        resp = await clusterlib._cp(
+            "POST", acct["control_plane_url"], "/v1/accounts/directives",
+            token=crypto.decrypt(acct["token_encrypted"]),
+            body={"node_id": body.node_id, "type": body.type,
+                  "payload": body.payload or {}})
+    except clusterlib.ControlPlaneError as e:
+        # Pass CP 4xx (402 plan gate, 400 validation, …) through with detail.
+        if e.status_code and 400 <= e.status_code < 500:
+            raise HTTPException(e.status_code, e.detail)
+        raise HTTPException(502, str(e))
+    return resp
 
 
 # ───── premium: billing upgrade + cloud mirror ────────────────────────────────

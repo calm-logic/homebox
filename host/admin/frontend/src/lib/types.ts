@@ -45,6 +45,7 @@ export interface DeploymentItem extends DeploymentInfo {
 export interface DeploymentDetailData extends DeploymentItem {
   log_tail: string | null;
   stack_name: string;
+  repo_full_name: string;
   environment: { id: number; name: string };
 }
 
@@ -111,6 +112,10 @@ export interface ProjectItem {
   domain_id: number | null;
   domain: string | null;
   domain_mode: "container" | "base" | null;
+  icon: string | null;
+  deployment_target: "automatic" | "homebox" | "aws" | "gcp" | "cloudflare";
+  deployment_target_integration_id: number | null;
+  deployment_target_config: Record<string, unknown>;
   description: string | null;
   dissected_at: string | null;
   detected_stack: { services?: DetectedStackEntry[] };
@@ -294,6 +299,14 @@ export interface LoginProviders {
   google: boolean;
 }
 
+/** GET /api/auth/login-options — everything the login page needs to render. */
+export interface LoginOptions {
+  oauth_providers: string[]; // e.g. ["github", "google"]
+  /** False on a fresh install (no enabled Identity yet) — show the
+   *  "paste the installer password" hint and skip the OAuth buttons. */
+  has_identities: boolean;
+}
+
 export interface OAuthSettings {
   configured: boolean;
   client_id: string | null;
@@ -355,10 +368,122 @@ export interface AccountBackup {
   error: string | null;
 }
 
+// ── Fleet topology (the account-wide "god view") ────────────────────────────
+
+/** License summary attached to a cluster in the topology payload. Fields are
+ *  optional/defensive — the control plane may report more or less depending
+ *  on age. */
+export interface TopologyLicense {
+  plan?: string;
+  valid?: boolean;
+  max_nodes?: number;
+  node_count?: number;
+  features?: string[];
+  expires_at?: string | null;
+  in_grace?: boolean;
+  expired?: boolean;
+}
+
+export interface TopologyMirror {
+  status: string; // none | pending | provisioning | active | failed | decommissioning | decommissioned
+  node_id?: string | null;
+}
+
+/** A node row in the topology — cluster roster and standalone nodes share
+ *  this shape (standalone rows additionally carry backup_updated_at). */
+export interface TopologyNode {
+  node_id: string;
+  name: string;
+  peer_url: string;
+  version?: string | null;
+  ordinal?: number | null;
+  serving?: boolean;
+  role?: NodeRole;
+  online: boolean;
+  last_seen?: string | number | null;
+  /** Standalone nodes only: epoch seconds of the last metadata backup push. */
+  backup_updated_at?: number | null;
+}
+
+export interface TopologyCluster {
+  cluster_id: string;
+  name: string;
+  license?: TopologyLicense | null;
+  mirror?: TopologyMirror | null;
+  nodes: TopologyNode[];
+}
+
+export type DirectiveType = "join" | "set_serving" | "split_off" | "split_cluster";
+
+/** A pending/acked remote-op directive queued on the control plane. */
+export interface AccountDirective {
+  id: number | string;
+  node_id: string;
+  type: DirectiveType | string;
+  payload: Record<string, unknown> | null;
+  status: string; // pending | done | failed | ...
+  created_at: string | null;
+}
+
+/** A cloud-node provision (EC2/GCE VM being booted into the account). */
+export interface NodeProvision {
+  id: number | string;
+  name: string;
+  provider: string; // aws | gcp
+  region: string;
+  status: string;   // pending | provisioning | joining | active | failed | ...
+  node_id?: string | null;
+  error?: string | null;
+  created_at: string | null;
+}
+
+/** Account-vault sync freshness as seen by this node. */
+export interface VaultState {
+  version?: number | null;
+  pushed_at: string | null;
+  pulled_at: string | null;
+  error: string | null;
+}
+
+/** GET /api/cluster/account/topology (node) or /v1/accounts/topology (portal).
+ *  The portal variant omits this_node_id, provisions and vault_state. */
+export interface AccountTopology {
+  account: { email: string | null; plan: string; features: string[] };
+  clusters: TopologyCluster[];
+  standalone_nodes: TopologyNode[];
+  vault?: { version: number; updated_at: string | null } | null;
+  directives?: AccountDirective[];
+  this_node_id?: string | null;
+  provisions?: NodeProvision[];
+  vault_state?: VaultState | null;
+}
+
 /** Offered when the admin login identity matches a homebox.sh account provider. */
 export interface AccountSuggestion {
   provider: "github" | "google";
   email: string;
+}
+
+/** Progress of the post-link pipeline (vault restore → identity auto-create
+ *  → default new cluster), from the node's "post_link" setting. */
+export interface PostLinkState {
+  stage?: "restoring" | "identity" | "cluster" | "done" | string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  updated_at?: string | null;
+  restore_ok?: boolean | null;
+  restore_error?: string | null;
+  identity_email?: string | null;
+  identity_created?: boolean | null;
+  identity_error?: string | null;
+  cluster_created?: boolean | null;
+  cluster_id?: string | null;
+  cluster_name?: string | null;
+  /** True when the plan has no cluster feature — node stays standalone. */
+  standalone?: boolean | null;
+  cluster_error?: string | null;
+  error?: string | null;
+  provider?: string | null;
 }
 
 export interface AccountStatus {
@@ -369,6 +494,10 @@ export interface AccountStatus {
   email?: string | null;
   plan?: string | null;
   backup?: AccountBackup | null;
+  /** Account-vault sync freshness (push/pull timestamps + last error). */
+  vault?: VaultState | null;
+  /** Post-link pipeline progress (link → sync → cluster). */
+  post_link?: PostLinkState | null;
   /** Only present when not linked. */
   suggested?: AccountSuggestion | null;
   overview?: AccountOverview;

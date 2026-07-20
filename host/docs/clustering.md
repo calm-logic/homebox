@@ -2,6 +2,11 @@
 
 Status: **PHASE 1 SLICE IMPLEMENTED** (2026-07-04) — see §0 below. Original design follows.
 
+> 2026-07-18: linked accounts, the account metadata vault (cross-cluster
+> config sync with restore-on-link), remote-op directives, the fleet topology
+> view, and cloud-node provisioning are built — see `linked-accounts.md`.
+> Cluster creation now requires a linked account.
+
 ---
 
 ## 0. What's implemented (EOD slice, 2026-07-04)
@@ -687,3 +692,23 @@ onto **all** of that account's homeboxes — not just the node you're looking at
    registry (Phase 5) must do multi-arch or stay per-arch.
 5. Backup story in a cluster: any node can `pg_dump` (data is everywhere) — but define which
    node runs scheduled backups (coordinator lease again).
+
+---
+
+## 13. Mesh extensions for deployment targets (2026-07-15)
+
+The per-service deployment-targets feature (see **targets.md**) extends the
+cluster mesh in two ways:
+
+- **Cloud DB VMs as extra mesh members**: EC2/GCE database VMs run the same
+  pgEdge container and join WireGuard (reserved ordinal range ≥ 0xF000 —
+  `targetslib.MESH_ORDINAL_BASE`; roster ordinals stay small so no
+  collision). `meshlib.ensure_mesh` pulls `targetslib.mesh_extra_peers()`;
+  nodes dial the VM's public IP :51820 (the VM has no Endpoint lines).
+  Spock wiring: `cluster_db.ensure_replication(extra_nodes=…, wire_extra=…)`
+  subscribes both directions; the VM side is driven over `_psql_remote`
+  (psql from the local container to the VM's mesh IP — no SSH on the VM).
+- **Serverless → homebox DB**: Cloud Run/App Runner consumers can't run
+  WireGuard; they reach homebox DBs through tunnel TCP ingress + Cloudflare
+  Access service tokens + a cloudflared proxy baked into their images
+  (`targets/artifacts.wrap_with_access_proxy`).

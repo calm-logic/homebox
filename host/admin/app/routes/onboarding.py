@@ -8,10 +8,18 @@ each backed by an existing endpoint plus this state probe:
     2. Create a Homebox tunnel       →  POST /api/tunnel/connect
     3. (Optional) Pick admin domain  →  POST /api/onboarding/admin-domain
 
+The fast path ("Log in with Homebox", demo-video gap G7): linking a homebox.sh
+account restores the account vault, which imports the Integration rows —
+including the Cloudflare one with its encrypted token. Step 1 is therefore
+already satisfied without a paste (cf.load_state reads that same Integration
+row), /state reports it with a `synced` flag, and POST /auto-tunnel lets the
+wizard advance step 2 with a single call.
+
 The /state endpoint is what the SPA polls to know whether onboarding is done
 and whether to redirect into the wizard.
 """
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,10 +29,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import cloudflare as cf
 from ..auth import require_session_api
+from ..clusterlib import load_account
 from ..db import get_session
 from ..host import write_traefik_dynamic
-from ..models import Domain, Project, Setting
+from ..models import Domain, Integration, Project, Setting
+from ..vaultlib import get_vault_state
 from ..webhooks_lib import sync_project_webhook
+from .tunnel import ConnectTunnelBody, connect_tunnel
 
 router = APIRouter(prefix="/api/onboarding")
 
@@ -49,6 +60,30 @@ async def _set_setting(session: AsyncSession, key: str, value: Any) -> None:
 
 # ───── State probe ────────────────────────────────────────────────────────────
 
+async def _cloudflare_synced(session: AsyncSession, token_set: bool) -> bool:
+    """True when the Cloudflare integration arrived via the account-vault
+    restore rather than a manual token paste. Inference: the vault recorded a
+    pull, and the Integration row hasn't been touched since (a manual POST
+    /api/tunnel/token stamps `updated_at = now` > pulled_at, while the vault
+    import preserves the exported row's original, older timestamp)."""
+    if not token_set:
+        return False
+    vs = await get_vault_state(session)
+    pulled_raw = vs.get("pulled_at")
+    if not pulled_raw:
+        return False
+    try:
+        pulled = datetime.fromisoformat(str(pulled_raw))
+    except ValueError:
+        return False
+    row = (await session.execute(
+        select(Integration).where(Integration.provider == cf.PROVIDER)
+    )).scalar_one_or_none()
+    if row is None:
+        return False
+    return row.updated_at is None or row.updated_at <= pulled
+
+
 @router.get("/state")
 async def onboarding_state(
     user: str = Depends(require_session_api),
@@ -60,14 +95,53 @@ async def onboarding_state(
     tunnel_set = bool(state.get("tunnel_id"))
     admin_domain = await _get_setting(session, ADMIN_DOMAIN_KEY)
 
+    # Account fast path: linked homebox.sh account + vault-restore progress.
+    linked = (await load_account(session)) is not None
+    vault_state = await get_vault_state(session)
+
     return {
         "complete": token_set and tunnel_set,
+        "account": {
+            "linked": linked,
+            # True while restore_on_link is importing the vault — the wizard
+            # shows "Syncing from your account…" until steps flip done.
+            "restoring": bool(vault_state.get("restoring")),
+        },
         "steps": {
-            "cloudflare_token": {"done": token_set, "account_name": state.get("account_name")},
+            "cloudflare_token": {
+                "done": token_set,
+                "account_name": state.get("account_name"),
+                "synced": await _cloudflare_synced(session, token_set),
+            },
             "tunnel": {"done": tunnel_set, "tunnel_name": state.get("tunnel_name")},
             "admin_domain": {"done": bool(admin_domain), "hostname": admin_domain},
         },
     }
+
+
+# ───── Auto-tunnel (fast path, step 2 in one call) ────────────────────────────
+
+@router.post("/auto-tunnel")
+async def auto_tunnel(
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Create (or adopt) this box's tunnel with the default name — the wizard
+    calls this once the Cloudflare step auto-completes from a synced
+    integration, so step 2 needs no form. Delegates to the same connect flow
+    as POST /api/tunnel/connect (name collisions adopt our own tunnel there).
+    Idempotent: a tunnel that's already configured is reported as-is."""
+    state = await cf.load_state(session)
+    if state.get("tunnel_id"):
+        return {
+            "ok": True,
+            "already": True,
+            "tunnel_id": state["tunnel_id"],
+            "tunnel_name": state.get("tunnel_name"),
+        }
+    if not cf.get_token(state):
+        raise HTTPException(400, "Connect a Cloudflare API token first.")
+    return await connect_tunnel(ConnectTunnelBody(), user=user, session=session)
 
 
 # ───── Pick admin domain ──────────────────────────────────────────────────────

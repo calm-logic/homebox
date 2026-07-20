@@ -69,7 +69,8 @@ class Integration(Base):
     )
 
     projects: Mapped[list["Project"]] = relationship(
-        back_populates="integration", cascade="all, delete-orphan"
+        back_populates="integration", cascade="all, delete-orphan",
+        foreign_keys="Project.integration_id",
     )
 
 
@@ -92,6 +93,15 @@ class Project(Base):
     # How this project's hostnames are shaped (see app/urls.py): container =
     # name-prefixed subdomains; base = this project owns the whole domain.
     domain_mode: Mapped[str] = mapped_column(String(32), default="container")
+    # Project presentation and default deployment placement. ServiceTarget
+    # rows may override this per service/environment; generated inherited rows
+    # keep the existing deploy engine's state/provisioning semantics intact.
+    icon: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deployment_target: Mapped[str] = mapped_column(String(16), default="homebox")
+    deployment_target_integration_id: Mapped[int | None] = mapped_column(
+        ForeignKey("integrations.id", ondelete="SET NULL"), nullable=True
+    )
+    deployment_target_config: Mapped[dict] = mapped_column(JSON, default=dict)
     managed: Mapped[bool] = mapped_column(Boolean, default=False)
     auto_deploy: Mapped[bool] = mapped_column(Boolean, default=True)
     # Gate push auto-deploys on GitHub checks passing (no-op for repos with no
@@ -107,7 +117,9 @@ class Project(Base):
     # like dissection, which must not promote a stale config copy to "newest".
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    integration: Mapped["Integration | None"] = relationship(back_populates="projects")
+    integration: Mapped["Integration | None"] = relationship(
+        back_populates="projects", foreign_keys=[integration_id]
+    )
     domain: Mapped["Domain | None"] = relationship()
     environments: Mapped[list["Environment"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
@@ -209,6 +221,49 @@ class ServiceEnvVar(Base):
     service: Mapped["Service"] = relationship(back_populates="env_vars")
 
 
+class ServiceTarget(Base):
+    """Where one service deploys, per environment. No row (or target='homebox')
+    = the default: docker compose on this cluster. `environment_id` NULL = the
+    service-wide default row; an env-specific row overrides it (same convention
+    as ServiceEnvVar). One row per (service, environment) — enforced in the
+    route, since NULLs defeat a DB unique constraint.
+
+    Two column groups with SEPARATE cluster-sync timestamps, because two
+    different nodes legitimately mutate them:
+      config  + updated_at        — USER intent (target, integration, region…);
+                                    stamped only by user-facing edit routes.
+      state   + state_updated_at  — MACHINE state (status, endpoint,
+                                    resource_ids, dns record, mesh identity,
+                                    previous-target for teardown); written only
+                                    by the cloud-coordinator node's deploys.
+    Cluster sync applies newer-wins per group so a UI retarget on node A can't
+    clobber resource ids provisioned on node B (see cluster_sync.py)."""
+    __tablename__ = "service_targets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    service_id: Mapped[int] = mapped_column(
+        ForeignKey("services.id", ondelete="CASCADE"), index=True
+    )
+    environment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("environments.id", ondelete="CASCADE"), nullable=True
+    )
+    target: Mapped[str] = mapped_column(String(16), default="homebox")  # homebox | aws | gcp | cloudflare
+    # The CLOUD account used (aws/gcp/cloudflare Integration). Independent of
+    # the project's SOURCE integration — integration-less (public-repo)
+    # projects can still cloud-target. SET NULL on disconnect: the target row
+    # survives but deploys fail with a clear "reconnect" error.
+    integration_id: Mapped[int | None] = mapped_column(
+        ForeignKey("integrations.id", ondelete="SET NULL"), nullable=True
+    )
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+    state: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    state_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    service: Mapped["Service"] = relationship()
+
+
 class Deployment(Base):
     """One deploy event for a (project, environment) — our own workflow run."""
     __tablename__ = "deployments"
@@ -256,6 +311,9 @@ class ServiceInstance(Base):
     container_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="unknown")
+    # Where this instance runs. 'homebox' = a local container; cloud values
+    # (aws|gcp|cloudflare) have container_name NULL and url = the public host.
+    target: Mapped[str] = mapped_column(String(16), default="homebox")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     deployment: Mapped["Deployment"] = relationship(back_populates="instances")

@@ -1,224 +1,231 @@
 # =============================================================================
 # Homebox One-Liner Installer (Windows)
 # =============================================================================
-# Usage:
-#   irm https://raw.githubusercontent.com/calm-logic/homebox/master/host/install.ps1 | iex
+# Usage (any PowerShell prompt, no Administrator required):
+#   powershell -ExecutionPolicy Bypass -c "irm https://homebox.sh/install.ps1 | iex"
+#   # (mirror: irm https://raw.githubusercontent.com/calm-logic/homebox/master/host/install.ps1 | iex)
 #
-# Requires: PowerShell 5.1+ and Administrator privileges.
+# Uninstall - parameters cannot cross an `irm | iex` pipe, so invoke the
+# downloaded script text as a scriptblock (or download the file and run it):
+#   powershell -ExecutionPolicy Bypass -c "& ([scriptblock]::Create((irm https://homebox.sh/install.ps1))) -Uninstall"
+#   powershell -ExecutionPolicy Bypass -c "& ([scriptblock]::Create((irm https://homebox.sh/install.ps1))) -Uninstall -Yes -Purge"
+#   .\install.ps1 -Uninstall [-Yes] [-Purge]
+#
+#   -Uninstall  remove Homebox from the WSL distro instead of installing
+#   -Yes        skip the confirmation prompt (required for unattended runs)
+#   -Purge      also delete docker volumes (databases!), ~/.homebox secrets,
+#               and Homebox docker images inside WSL
+#
+# Homebox runs inside WSL2 using Docker Desktop's WSL integration. This is a
+# thin bootstrapper that:
+#   1. Checks Windows 10/11
+#   2. Checks Docker Desktop is installed and running
+#   3. Checks a WSL2 distro exists and Docker integration is enabled in it
+#   4. Runs the canonical installer (https://homebox.sh/install.sh) inside
+#      your default WSL distro (its output streams here, including the
+#      first-run admin password)
+#   5. Opens the admin UI (http://localhost:7765) from Windows
+#
+# Safe to re-run at any time.
 # =============================================================================
+param(
+    [switch]$Uninstall,
+    [switch]$Yes,
+    [switch]$Purge
+)
 
 $ErrorActionPreference = "Stop"
+$env:WSL_UTF8 = "1"  # make wsl.exe emit UTF-8 so its output parses cleanly
 
-$RepoUrl = "https://github.com/calm-logic/homebox.git"
-$Branch = "master"
-$HomeboxDir = "$env:USERPROFILE\homebox"
+function Write-Info([string]$msg) { Write-Host "[INFO]  $msg" -ForegroundColor Green }
+function Write-Warn([string]$msg) { Write-Host "[WARN]  $msg" -ForegroundColor Yellow }
+function Write-Fail([string]$msg) { Write-Host "[FAIL]  $msg" -ForegroundColor Red }
+function Write-Step([string]$msg) { Write-Host ""; Write-Host "-- $msg --" -ForegroundColor Cyan }
 
-# ── Banner ───────────────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "  Homebox - Self-hosted Internal PaaS" -ForegroundColor Cyan
-Write-Host ""
+function Install-Homebox {
+    $script:ExitCode = 1
 
-# ── Admin check ──────────────────────────────────────────────────────────────
-$isAdmin = ([Security.Principal.WindowsPrincipal] `
-    [Security.Principal.WindowsIdentity]::GetCurrent() `
-).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Write-Host ""
+    Write-Host "  Homebox - Self-hosted Internal PaaS" -ForegroundColor Cyan
+    Write-Host ""
 
-if (-not $isAdmin) {
-    Write-Host "[WARN]  Re-launching as Administrator..." -ForegroundColor Yellow
-    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    exit
-}
+    # -- Step 1/4: Windows preflight ------------------------------------------
+    Write-Step "Step 1/4: Windows preflight"
+    $os = [Environment]::OSVersion.Version
+    if ($os.Major -lt 10) {
+        Write-Fail "Windows 10 or 11 is required (detected version $os)."
+        return
+    }
+    Write-Info "Windows $($os.Major) (build $($os.Build)) detected."
 
-# ── Docker ───────────────────────────────────────────────────────────────────
-$dockerOk = $false
-try {
-    $null = docker info 2>$null
-    $dockerOk = $true
-    Write-Host "[INFO]  Docker is running: $(docker --version)" -ForegroundColor Green
-} catch {}
+    # -- Step 2/4: Docker Desktop ----------------------------------------------
+    Write-Step "Step 2/4: Docker Desktop"
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Write-Fail "Docker Desktop is not installed."
+        Write-Host ""
+        Write-Host "  Install it (with the WSL 2 backend, the default) from:"
+        Write-Host "      https://www.docker.com/products/docker-desktop/" -ForegroundColor White
+        Write-Host "  or:"
+        Write-Host "      winget install Docker.DockerDesktop" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  Then start Docker Desktop and re-run this installer:"
+        Write-Host '      powershell -ExecutionPolicy Bypass -c "irm https://homebox.sh/install.ps1 | iex"' -ForegroundColor White
+        return
+    }
+    cmd /c "docker info >NUL 2>&1"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Docker is installed but not running."
+        Write-Host "  Start Docker Desktop, wait until it says 'Engine running', then re-run this installer."
+        return
+    }
+    Write-Info "Docker is running: $(docker --version)"
 
-if (-not $dockerOk) {
-    $hasDocker = $false
-    try { $null = Get-Command docker -ErrorAction Stop; $hasDocker = $true } catch {}
-
-    if ($hasDocker) {
-        Write-Host "[FAIL]  Docker is installed but not running. Start Docker Desktop and re-run." -ForegroundColor Red
-        exit 1
+    # -- Step 3/4: WSL2 ----------------------------------------------------------
+    Write-Step "Step 3/4: WSL2"
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        Write-Fail "WSL (Windows Subsystem for Linux) is not available."
+        Write-Host ""
+        Write-Host "  Install it with this one command (a reboot may be required):"
+        Write-Host ""
+        Write-Host "      wsl --install -d Ubuntu" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  After it finishes (create your Linux username/password when asked),"
+        Write-Host "  re-run this installer."
+        return
     }
 
-    Write-Host "[INFO]  Docker not found. Installing Docker Desktop..." -ForegroundColor Yellow
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        winget install Docker.DockerDesktop --accept-package-agreements --accept-source-agreements
+    $distros = @()
+    try {
+        $distros = @(cmd /c "wsl.exe -l -q 2>NUL" | ForEach-Object { ($_ -replace "`0", "").Trim() } | Where-Object { $_ })
+    } catch {}
+    if ($distros.Count -eq 0) {
+        Write-Fail "No WSL distro is installed."
+        Write-Host ""
+        Write-Host "  Install Ubuntu with this one command (a reboot may be required):"
+        Write-Host ""
+        Write-Host "      wsl --install -d Ubuntu" -ForegroundColor White
+        Write-Host ""
+        Write-Host "  After it finishes (create your Linux username/password when asked),"
+        Write-Host "  re-run this installer."
+        return
+    }
+    Write-Info "WSL distro(s) found: $($distros -join ', ')"
+
+    # Docker integration: Windows docker works (checked above) - verify docker
+    # is also reachable inside the default WSL distro.
+    cmd /c "wsl.exe -e docker info >NUL 2>&1"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Docker works on Windows but is not available inside your default WSL distro."
+        Write-Host ""
+        Write-Host "  Fix: Docker Desktop -> Settings -> Resources -> WSL integration ->"
+        Write-Host "  turn ON 'Enable integration with my default WSL distro' (and the"
+        Write-Host "  toggle for your distro), click 'Apply & restart', then re-run this"
+        Write-Host "  installer."
+        Write-Host ""
+        Write-Host "  If your distro is WSL1, convert it to WSL2 first:"
+        Write-Host "      wsl --set-version <distro-name> 2" -ForegroundColor White
+        return
+    }
+    Write-Info "Docker Desktop WSL integration is enabled."
+
+    # -- Step 4/4: Install inside WSL --------------------------------------------
+    Write-Step "Step 4/4: Installing Homebox inside WSL"
+    Write-Info "Running the canonical installer in your default WSL distro."
+    Write-Warn "You may be asked for your WSL (Linux) sudo password."
+    Write-Host ""
+
+    # HOMEBOX_NO_BROWSER=1: the in-WSL browser open is skipped; we open the
+    # admin from Windows below (WSL2 forwards localhost automatically).
+    wsl.exe -e bash -lc "curl -fsSL https://homebox.sh/install.sh | HOMEBOX_NO_BROWSER=1 bash"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Fail "The installer exited with code $LASTEXITCODE (see output above)."
+        Write-Host "  Fix the reported problem and re-run this installer - it is safe to run repeatedly."
+        return
+    }
+
+    # -- Open the admin UI from Windows ------------------------------------------
+    Write-Host ""
+    Write-Info "Opening the Homebox admin: http://localhost:7765"
+    try {
+        Start-Process "http://localhost:7765"
+    } catch {
+        Write-Warn "Could not open a browser automatically - open http://localhost:7765 yourself."
+    }
+    Write-Info "Log in with the first-run password printed above."
+
+    $script:ExitCode = 0
+}
+
+function Uninstall-Homebox {
+    $script:ExitCode = 1
+
+    Write-Host ""
+    Write-Host "  Homebox - Self-hosted Internal PaaS (uninstall)" -ForegroundColor Cyan
+    Write-Host ""
+
+    # -- Step 1/2: preflight (lighter than install: docker + WSL just need to
+    # be present; the canonical uninstaller degrades gracefully inside WSL) ----
+    Write-Step "Step 1/2: Preflight"
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        Write-Fail "WSL is not available - nothing to uninstall (Homebox runs inside WSL)."
+        return
+    }
+    $distros = @()
+    try {
+        $distros = @(cmd /c "wsl.exe -l -q 2>NUL" | ForEach-Object { ($_ -replace "`0", "").Trim() } | Where-Object { $_ })
+    } catch {}
+    if ($distros.Count -eq 0) {
+        Write-Fail "No WSL distro is installed - nothing to uninstall."
+        return
+    }
+    Write-Info "WSL distro(s) found: $($distros -join ', ')"
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Write-Warn "Docker Desktop not found - container cleanup inside WSL will be skipped."
     } else {
-        Write-Host "[FAIL]  winget not available. Install Docker Desktop manually:" -ForegroundColor Red
-        Write-Host "        https://docker.com/products/docker-desktop" -ForegroundColor Red
-        exit 1
+        cmd /c "docker info >NUL 2>&1"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Docker is installed but not running - start Docker Desktop first for a"
+            Write-Warn "complete cleanup (containers/volumes are otherwise left in place)."
+        }
     }
-    Write-Host "[WARN]  Docker Desktop installed. Start it, then re-run this script:" -ForegroundColor Yellow
-    Write-Host "        irm https://raw.githubusercontent.com/calm-logic/homebox/main/host/install.ps1 | iex" -ForegroundColor Yellow
-    exit 0
+
+    # -- Step 2/2: run the canonical uninstaller inside WSL -----------------------
+    Write-Step "Step 2/2: Uninstalling Homebox inside WSL"
+    $flags = "--uninstall"
+    if ($Yes)   { $flags = "$flags --yes" }
+    if ($Purge) { $flags = "$flags --purge" }
+    if (-not $Yes) {
+        Write-Info "You will be asked to confirm inside WSL (pass -Yes to skip)."
+    }
+    Write-Warn "You may be asked for your WSL (Linux) sudo password."
+    Write-Host ""
+
+    wsl.exe -e bash -lc "curl -fsSL https://homebox.sh/install.sh | bash -s -- $flags"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ""
+        Write-Fail "The uninstaller exited with code $LASTEXITCODE (see output above)."
+        return
+    }
+
+    Write-Host ""
+    Write-Info "Homebox has been removed from your WSL distro."
+    Write-Info "Docker Desktop itself and the WSL distro were left untouched."
+    if (-not $Purge) {
+        Write-Info "Data volumes and ~/.homebox secrets were kept (re-run with -Purge to delete them)."
+    }
+
+    $script:ExitCode = 0
 }
 
-# ── Git ──────────────────────────────────────────────────────────────────────
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Host "[INFO]  Installing git..." -ForegroundColor Yellow
-    winget install Git.Git --accept-package-agreements --accept-source-agreements
-    $env:PATH = "$env:ProgramFiles\Git\cmd;$env:PATH"
+$script:ExitCode = 0
+if ($Uninstall) {
+    Uninstall-Homebox
+} else {
+    Install-Homebox
 }
-
-# ── Download Homebox ─────────────────────────────────────────────────────────
-$CloneDir = Join-Path $env:TEMP "homebox-install-$(Get-Random)"
-Write-Host "[INFO]  Downloading Homebox..." -ForegroundColor Green
-git clone --depth 1 --branch $Branch $RepoUrl $CloneDir 2>$null
-
-# ── Create directories ──────────────────────────────────────────────────────
-Write-Host "[INFO]  Creating directories under $HomeboxDir" -ForegroundColor Green
-New-Item -ItemType Directory -Force -Path "$HomeboxDir\traefik" | Out-Null
-New-Item -ItemType Directory -Force -Path "$HomeboxDir\projects" | Out-Null
-New-Item -ItemType Directory -Force -Path "$HomeboxDir\base-infrastructure" | Out-Null
-
-$SrcInfra = Join-Path $CloneDir "host\host-provisioner\base-infrastructure"
-Copy-Item "$SrcInfra\docker-compose.yml" "$HomeboxDir\base-infrastructure\" -Force
-Copy-Item "$SrcInfra\.env.example"       "$HomeboxDir\base-infrastructure\" -Force
-Copy-Item "$SrcInfra\dynamic_conf.yml"   "$HomeboxDir\traefik\" -Force
-
-# ── Docker network ──────────────────────────────────────────────────────────
-try { docker network inspect traefik-net 2>$null | Out-Null }
-catch { docker network create traefik-net | Out-Null }
-Write-Host "[INFO]  Docker network traefik-net ready." -ForegroundColor Green
-
-# ── Interactive configuration ────────────────────────────────────────────────
-Write-Host ""
-Write-Host "── Domain Configuration ──" -ForegroundColor Cyan
-$domain = Read-Host "Enter your root domain (e.g. example.com)"
-if ([string]::IsNullOrWhiteSpace($domain)) {
-    Write-Host "[FAIL]  Domain cannot be empty." -ForegroundColor Red
-    exit 1
+# Only call `exit` when running as a script file; under `irm | iex` an exit
+# would close the user's interactive shell.
+if ($PSCommandPath -and $script:ExitCode -ne 0) {
+    exit $script:ExitCode
 }
-
-Write-Host ""
-Write-Host "── Dashboard Authentication ──" -ForegroundColor Cyan
-$dashUser = Read-Host "Dashboard username [admin]"
-if ([string]::IsNullOrWhiteSpace($dashUser)) { $dashUser = "admin" }
-
-$dashPass = Read-Host "Dashboard password" -AsSecureString
-$dashPassPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($dashPass))
-
-Write-Host "[INFO]  Generating credentials..." -ForegroundColor Green
-$hash = docker run --rm httpd:2-alpine htpasswd -nb $dashUser $dashPassPlain 2>$null
-$hashEscaped = $hash -replace '\$', '$$'
-
-# Write .env
-$envContent = @"
-HOMEBOX_DOMAIN=$domain
-TRAEFIK_DASHBOARD_AUTH=$hashEscaped
-TRAEFIK_DYNAMIC_CONF_DIR=$HomeboxDir\traefik
-"@
-$envContent | Set-Content "$HomeboxDir\base-infrastructure\.env" -Encoding UTF8
-Write-Host "[INFO]  Environment file written." -ForegroundColor Green
-
-# ── Cloudflare Tunnel (optional) ────────────────────────────────────────────
-Write-Host ""
-$setupTunnel = Read-Host "Set up a Cloudflare Tunnel? [y/N]"
-if ($setupTunnel -match '^[Yy]') {
-    if (-not (Get-Command cloudflared -ErrorAction SilentlyContinue)) {
-        Write-Host "[INFO]  Installing cloudflared..." -ForegroundColor Yellow
-        winget install Cloudflare.cloudflared --accept-package-agreements --accept-source-agreements
-    }
-
-    Write-Host "[INFO]  Authenticating with Cloudflare (opens browser)..." -ForegroundColor Green
-    cloudflared tunnel login
-
-    $tunnelExists = cloudflared tunnel list 2>$null | Select-String "homebox"
-    if ($tunnelExists) {
-        Write-Host "[INFO]  Tunnel 'homebox' already exists." -ForegroundColor Green
-    } else {
-        cloudflared tunnel create homebox
-    }
-
-    $tunnelId = (cloudflared tunnel list 2>$null | Select-String "homebox" |
-        ForEach-Object { ($_ -split '\s+')[0] })
-
-    $cfDir = "$env:USERPROFILE\.cloudflared"
-    New-Item -ItemType Directory -Force -Path $cfDir | Out-Null
-
-    @"
-tunnel: $tunnelId
-credentials-file: $cfDir\$tunnelId.json
-
-ingress:
-  - hostname: "*.$domain"
-    service: http://localhost:80
-  - service: http_status:404
-"@ | Set-Content "$cfDir\config.yml" -Encoding UTF8
-
-    Write-Host "[INFO]  Tunnel config written to $cfDir\config.yml" -ForegroundColor Green
-
-    cloudflared tunnel route dns homebox "*.$domain" 2>$null
-    cloudflared service install 2>$null
-    Write-Host "[DONE]  Cloudflare Tunnel configured." -ForegroundColor Green
-}
-
-# ── GitHub Actions Runner (optional) ────────────────────────────────────────
-Write-Host ""
-$setupRunner = Read-Host "Set up a GitHub Actions self-hosted runner? [y/N]"
-if ($setupRunner -match '^[Yy]') {
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        Write-Host "[INFO]  Installing GitHub CLI..." -ForegroundColor Yellow
-        winget install GitHub.cli --accept-package-agreements --accept-source-agreements
-    }
-
-    if (-not (gh auth status 2>$null)) {
-        gh auth login
-    }
-
-    $repoUrl = Read-Host "GitHub repository URL (e.g. https://github.com/owner/repo)"
-    $ownerRepo = $repoUrl -replace 'https://github.com/' -replace '\.git$' -replace '/$'
-
-    $token = gh api "repos/$ownerRepo/actions/runners/registration-token" -q '.token' 2>$null
-
-    if ($token) {
-        $runnerVersion = (gh api repos/actions/runner/releases/latest -q '.tag_name') -replace '^v'
-        $runnerDir = "$HomeboxDir\actions-runner"
-        New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null
-
-        $runnerUrl = "https://github.com/actions/runner/releases/download/v$runnerVersion/actions-runner-win-x64-$runnerVersion.zip"
-        $runnerZip = "$env:TEMP\actions-runner.zip"
-
-        Write-Host "[INFO]  Downloading runner v$runnerVersion..." -ForegroundColor Green
-        Invoke-WebRequest -Uri $runnerUrl -OutFile $runnerZip
-        Expand-Archive -Path $runnerZip -DestinationPath $runnerDir -Force
-
-        Push-Location $runnerDir
-        .\config.cmd --url $repoUrl --token $token --unattended --name "homebox-$env:COMPUTERNAME" --labels "homebox,self-hosted" --replace
-        .\svc.cmd install
-        .\svc.cmd start
-        Pop-Location
-
-        Write-Host "[DONE]  GitHub Actions runner installed and started." -ForegroundColor Green
-    } else {
-        Write-Host "[WARN]  Could not get registration token. Set up the runner manually." -ForegroundColor Yellow
-    }
-}
-
-# ── Start infrastructure ────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "── Starting Base Infrastructure ──" -ForegroundColor Cyan
-Push-Location "$HomeboxDir\base-infrastructure"
-docker compose --env-file .env up -d
-Pop-Location
-
-# ── Cleanup ──────────────────────────────────────────────────────────────────
-Remove-Item -Recurse -Force $CloneDir -ErrorAction SilentlyContinue
-
-Write-Host ""
-Write-Host "==============================================" -ForegroundColor Green
-Write-Host "  Homebox setup complete!" -ForegroundColor Green
-Write-Host "==============================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "[INFO]  Dashboard: http://dashboard.$domain" -ForegroundColor Green
-Write-Host "[INFO]  Install the developer CLI on your workstation:" -ForegroundColor Green
-Write-Host "        pip install ./host/cli" -ForegroundColor White
-Write-Host "        homebox init" -ForegroundColor White
-Write-Host ""

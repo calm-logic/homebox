@@ -66,7 +66,18 @@ async def _push_ingress(state: dict[str, Any], session: AsyncSession) -> None:
     domains = (
         await session.execute(select(Domain).order_by(Domain.name))
     ).scalars().all()
-    ingress = cf.build_ingress([{"name": d.name} for d in domains])
+    from ..targetslib import all_tunnel_tcp_rules, load_dns_overrides
+    # Per-host DNS overrides (cross-cluster domain sharing, G12): hostnames we
+    # serve under a domain whose wildcard belongs to another cluster's tunnel
+    # get explicit http rules. Kwarg passed only when any exist, keeping the
+    # call shape stable for the common case.
+    overrides = await load_dns_overrides(session)
+    extra = {"extra_hostnames": sorted(overrides)} if overrides else {}
+    ingress = cf.build_ingress(
+        [{"name": d.name} for d in domains],
+        tcp_rules=await all_tunnel_tcp_rules(session),
+        **extra,
+    )
     await cf.put_tunnel_config(token, state["account_id"], state["tunnel_id"], ingress)
 
 
@@ -103,6 +114,40 @@ async def _served_hostnames(session: AsyncSession) -> set[str]:
     return {u.split("://", 1)[-1].split("/", 1)[0].lower() for u in urls if u}
 
 
+async def _foreign_wildcard_target(
+    token: str, account_id: str, zone: dict[str, Any], domain_name: str,
+    our_target: str, live_cache: dict[str, bool],
+) -> str | None:
+    """The domain's `*.<domain>` (apex fallback) CNAME target when it points at
+    ANOTHER cluster's LIVE tunnel — i.e. the wildcard routing is owned
+    elsewhere (linked accounts, G12) and must not be repointed or reported as
+    drift here. None when the wildcard is ours, absent, not a tunnel CNAME, or
+    aimed at a DEAD tunnel (that's classic drift to repair, not foreign
+    ownership). API errors → None: the report/repair proceeds exactly as it
+    always has."""
+    try:
+        content = None
+        for name in (f"*.{domain_name}", domain_name):
+            recs = await cf.list_dns_records(token, zone["id"], name=name)
+            cname = next((r for r in recs if r.get("type") == "CNAME"), None)
+            if cname:
+                content = (cname.get("content") or "").strip().lower().strip(".")
+                break
+        if not content or not content.endswith(".cfargotunnel.com") \
+                or content == our_target.lower():
+            return None
+        other_id = content.split(".", 1)[0]
+        if other_id not in live_cache:
+            try:
+                other = await cf.get_tunnel(token, account_id, other_id)
+                live_cache[other_id] = bool(other.get("connections"))
+            except cf.CloudflareError:
+                live_cache[other_id] = False  # uninspectable → dead → repairable
+        return content if live_cache[other_id] else None
+    except cf.CloudflareError:
+        return None
+
+
 async def _dns_report(state: dict[str, Any], session: AsyncSession) -> dict[str, Any]:
     """Compare every tunnel-served hostname's CNAME against the current tunnel
     target so the UI can surface stale/missing records before they cause an
@@ -129,19 +174,52 @@ async def _dns_report(state: dict[str, Any], session: AsyncSession) -> dict[str,
         report["in_sync"] = False
         return report
 
+    # Hostnames routed to a CLOUD deployment target (Pages/S3/Cloud Run/…)
+    # deliberately do NOT point at the tunnel — their expected value is the
+    # target's CNAME, and the repair below must never "fix" them back. Same
+    # for hostnames whose service is homebox-targeted at a DIFFERENT
+    # cluster/node (linked accounts): the OWNING cluster manages those
+    # records (cname_target None keeps them out of the specific-host report
+    # rows below — we can't know the foreign tunnel's target).
+    from ..targetslib import (
+        cloud_routed_hostnames, foreign_homebox_hostnames, load_dns_overrides,
+    )
+    excluded = await cloud_routed_hostnames(session)
+    excluded.update(await foreign_homebox_hostnames(session))
+    # Per-host overrides WE wrote on a foreign-owned domain (G12): deliberate
+    # specific-beats-wildcard records whose expected target is OUR tunnel —
+    # they get their own report rows below, never counted as drift.
+    for host in await load_dns_overrides(session):
+        excluded.setdefault(host.lower(), {
+            "cname_target": target, "proxied": True, "target": "homebox",
+        })
+
     report["checked"] = True
+    seen_hosts: set[str] = set()
+    live_cache: dict[str, bool] = {}
     for d in await _all_domains(session):
         zone = cf.resolve_zone_for(zones, d.name)
+        # Apex/wildcard owned by ANOTHER cluster's live tunnel: informational,
+        # not drift — that cluster manages these records.
+        foreign_target = await _foreign_wildcard_target(
+            token, account_id, zone, d.name, target, live_cache) if zone else None
         for host in _dns_hostnames(d):
+            excl = excluded.get(host.lower())
+            expected = (excl.get("cname_target") or target) if excl \
+                else (foreign_target or target)
+            want_proxied = excl.get("proxied", True) if excl else True
+            seen_hosts.add(host.lower())
             entry: dict[str, Any] = {
                 "hostname": host,
                 "domain": d.name,
                 "zone": zone.get("name") if zone else None,
-                "expected": target,
+                "expected": expected,
                 "actual": None,
                 "proxied": None,
                 "status": "ok",
             }
+            if excl:
+                entry["cloud_target"] = excl.get("target")
             if not zone:
                 # Not on Cloudflare (or different account) — not ours to manage.
                 entry["status"] = "no_zone"
@@ -162,12 +240,51 @@ async def _dns_report(state: dict[str, Any], session: AsyncSession) -> dict[str,
                         entry["actual"] = actual
                         entry["proxied"] = proxied
                         entry["status"] = (
-                            "ok" if actual == target.lower() and proxied else "stale"
+                            "ok" if actual == (expected or "").lower()
+                            and proxied == want_proxied else "stale"
                         )
-            # `no_zone` is informational, not a failure we can fix.
-            if entry["status"] not in ("ok", "no_zone"):
+            if foreign_target and not excl:
+                # Another cluster's records: whatever their state, they're not
+                # OURS to fix — surface as informational, like no_zone.
+                entry["foreign_cluster"] = True
+                if entry["status"] in ("stale", "missing"):
+                    entry["status"] = "foreign"
+            # `no_zone`/`foreign` are informational, not failures we can fix.
+            if entry["status"] not in ("ok", "no_zone", "foreign"):
                 report["in_sync"] = False
             report["records"].append(entry)
+
+    # Cloud-routed SPECIFIC hostnames (not the apex/wildcard) get their own
+    # report rows so drift on them is visible too.
+    for host, excl in excluded.items():
+        if host in seen_hosts or not excl.get("cname_target"):
+            continue
+        zone = cf.resolve_zone_for(zones, host)
+        entry = {
+            "hostname": host, "domain": None,
+            "zone": zone.get("name") if zone else None,
+            "expected": excl["cname_target"], "actual": None, "proxied": None,
+            "status": "ok", "cloud_target": excl.get("target"),
+        }
+        if not zone:
+            entry["status"] = "no_zone"
+        else:
+            try:
+                recs = await cf.list_dns_records(token, zone["id"], name=host)
+                cname = next((r for r in recs if r.get("type") == "CNAME"), None)
+                if not cname:
+                    entry["status"] = "missing"
+                else:
+                    actual = (cname.get("content") or "").strip().lower().strip(".")
+                    entry["actual"] = actual
+                    entry["proxied"] = bool(cname.get("proxied"))
+                    entry["status"] = "ok" if actual == excl["cname_target"].lower() else "stale"
+            except cf.CloudflareError as e:
+                entry["status"] = "error"
+                entry["error"] = str(e)
+        if entry["status"] not in ("ok", "no_zone"):
+            report["in_sync"] = False
+        report["records"].append(entry)
     return report
 
 
@@ -189,7 +306,31 @@ async def _resync_dns(state: dict[str, Any], session: AsyncSession) -> dict[str,
     target = cf.tunnel_target(tunnel_id)
     result["tunnel_target"] = target
     zones = await cf.list_zones(token, account_id=account_id)
+
+    # Hostnames owned by a cloud deployment target must NOT be repointed at
+    # the tunnel — that's the exact record the cloud deploy wrote. Missing an
+    # exclusion here would silently break the cloud service every hour (the
+    # monitor runs this repair on a schedule). Hostnames whose service is
+    # homebox-targeted at a DIFFERENT cluster/node are excluded for the same
+    # reason: their CNAME points at the OWNING cluster's tunnel, and
+    # repointing it here would steal the traffic to a node not running the
+    # service.
+    from ..targetslib import (
+        cloud_routed_hostnames, foreign_homebox_hostnames, load_dns_overrides,
+    )
+    excluded = await cloud_routed_hostnames(session)
+    excluded.update(await foreign_homebox_hostnames(session))
+    # Per-host overrides WE wrote on a foreign-owned domain (G12): actively
+    # maintained at OUR tunnel below, and excluded from the generic stale-
+    # record sweep so it never second-guesses them.
+    overrides = await load_dns_overrides(session)
+    for host in overrides:
+        excluded.setdefault(host.lower(), {
+            "cname_target": target, "proxied": True, "target": "homebox",
+        })
+
     dirty = False
+    live_cache: dict[str, bool] = {}
     for d in await _all_domains(session):
         zone = cf.resolve_zone_for(zones, d.name)
         if not zone:
@@ -197,8 +338,25 @@ async def _resync_dns(state: dict[str, Any], session: AsyncSession) -> dict[str,
                 {"hostname": d.name, "reason": "no connected Cloudflare zone covers this domain"}
             )
             continue
+        # A wildcard pointing at ANOTHER cluster's LIVE tunnel is ownership,
+        # not drift — repointing it would steal every app that cluster serves
+        # under the domain. (A DEAD foreign tunnel is still repaired: that is
+        # the classic re-created-tunnel Error 1033 case.)
+        foreign_target = await _foreign_wildcard_target(
+            token, account_id, zone, d.name, target, live_cache)
+        if foreign_target:
+            result["skipped"].append({
+                "hostname": f"*.{d.name}",
+                "reason": f"wildcard owned by another cluster's live tunnel ({foreign_target})",
+            })
+            continue
         wired_any = False
         for host in _dns_hostnames(d):
+            if host.lower() in excluded:
+                result["skipped"].append(
+                    {"hostname": host, "reason": "owned by a cloud deployment target"}
+                )
+                continue
             try:
                 await cf.upsert_cname(token, zone["id"], host, target, proxied=True)
                 result["updated"].append(host)
@@ -210,6 +368,28 @@ async def _resync_dns(state: dict[str, Any], session: AsyncSession) -> dict[str,
             dirty = True
     if dirty:
         await session.commit()
+
+    # Per-host overrides we own (G12): keep them pinned at OUR tunnel — a
+    # drifted or deleted override record breaks exactly the hostname it was
+    # created to serve (the wildcard would hand it back to the other cluster).
+    for host in sorted(overrides):
+        zone = cf.resolve_zone_for(zones, host)
+        if not zone:
+            result["skipped"].append(
+                {"hostname": host, "reason": "no connected Cloudflare zone covers this override"}
+            )
+            continue
+        try:
+            recs = await cf.list_dns_records(token, zone["id"], name=host)
+            cname = next((r for r in recs if r.get("type") == "CNAME"), None)
+            actual = (cname.get("content") or "").strip().lower().strip(".") \
+                if cname else None
+            if actual == target.lower() and bool(cname.get("proxied")):
+                continue  # already correct — nothing to write
+            await cf.upsert_cname(token, zone["id"], host, target, proxied=True)
+            result["updated"].append(host)
+        except cf.CloudflareError as e:
+            result["errors"].append({"hostname": host, "error": str(e)})
 
     # Per-project hostnames: a leftover specific record (older install, old
     # tunnel id) shadows the wildcard and 530s just that host. Repoint any
@@ -227,6 +407,10 @@ async def _resync_dns(state: dict[str, Any], session: AsyncSession) -> dict[str,
             continue
         for r in records:
             name = (r.get("name") or "").lower()
+            if name in excluded:
+                # Cloud deployment target owns this record (it doesn't contain
+                # cfargotunnel.com today, but never rely on that shape).
+                continue
             if (r.get("type") == "CNAME" and name in hosts_in_zone
                     and "cfargotunnel.com" in (r.get("content") or "")
                     and r.get("content") != target):
@@ -367,6 +551,15 @@ async def _validate_and_store_token(
                 missing.append("Zone · Zone · Read")
         if missing:
             raise HTTPException(400, _missing_scope_hint(missing))
+
+        # Pages scope is OPTIONAL (only the Pages deployment target needs it)
+        # — never block the token on it, just record the capability so the
+        # targets UI can hint "re-scope your token" up front.
+        try:
+            await cf.list_pages_projects(token, state["account_id"])
+            state["pages_ok"] = True
+        except cf.CloudflareError as e:
+            state["pages_ok"] = not _is_auth(e)
 
     await cf.save_state(session, state)
 

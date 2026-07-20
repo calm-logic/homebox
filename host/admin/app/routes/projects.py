@@ -6,8 +6,13 @@ repo into Services with auto-wired connection env vars. Deploys target a
 (project, environment) and are tracked as Deployment + ServiceInstance rows.
 """
 
+import base64
+import binascii
+import mimetypes
+import posixpath
 import re
 from datetime import datetime
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -34,6 +39,9 @@ _DEFAULT_ENVS = [
     {"name": "production", "kind": "production", "slug_suffix": "", "is_default": True},
     {"name": "dev", "kind": "dev", "slug_suffix": "--dev", "is_default": False},
 ]
+
+_BUILTIN_ICONS = {"folder", "rocket", "box", "code", "globe", "database", "sparkles"}
+_MAX_ICON_BYTES = 2 * 1024 * 1024
 
 
 # ───── helpers ────────────────────────────────────────────────────────────────
@@ -129,6 +137,9 @@ async def dissect_project(session: AsyncSession, project: Project) -> list[disse
         ]
     }
     project.dissected_at = datetime.utcnow()
+    await session.flush()
+    from ..targetslib import sync_project_target_rows
+    await sync_project_target_rows(session, project)
     await session.commit()
     return detected
 
@@ -137,6 +148,10 @@ async def queue_deploy(session: AsyncSession, background: BackgroundTasks,
                        env: Environment, *, trigger: str) -> Deployment:
     """Create a queued Deployment for an environment and schedule run_deploy."""
     project = await session.get(Project, env.project_id)
+    # Re-evaluate Automatic against currently connected providers at deploy
+    # time, and materialize defaults for services added since the last sync.
+    from ..targetslib import sync_project_target_rows
+    await sync_project_target_rows(session, project)
     dep = Deployment(
         environment_id=env.id,
         status="queued",
@@ -212,6 +227,10 @@ def _serialize_project(p: Project, integration: Integration | None, domain: Doma
         "domain_id": p.domain_id,
         "domain": domain.name if domain else None,
         "domain_mode": p.domain_mode,
+        "icon": p.icon,
+        "deployment_target": p.deployment_target,
+        "deployment_target_integration_id": p.deployment_target_integration_id,
+        "deployment_target_config": p.deployment_target_config or {},
         "description": p.description,
         "dissected_at": p.dissected_at.isoformat() if p.dissected_at else None,
         "detected_stack": p.detected_stack or {},
@@ -262,6 +281,98 @@ async def get_project(
     result = _serialize_project(p, integration, domain, envs)
     result["services"] = [_serialize_service(s, all_vars) for s in services]
     return result
+
+
+@router.get("/{project_id}/target-options")
+async def project_target_options(
+    project_id: int,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Every deployment target implemented by this Homebox plus account
+    locations used for the project-wide Homebox default."""
+    await _get_project(session, project_id)
+    from .services import _account_locations, _TARGET_LABELS
+    locations, _linked = await _account_locations(session)
+    integrations = (await session.execute(
+        select(Integration).where(
+            Integration.provider.in_(("aws", "gcp", "cloudflare")),
+            Integration.status == "connected",
+        )
+    )).scalars().all()
+    return {
+        "options": [
+            {"value": "automatic", "label": "Automatic"},
+            {"value": "homebox", "label": "Homebox", "locations": locations},
+            *[{"value": key, "label": _TARGET_LABELS[key]}
+              for key in ("cloudflare", "aws", "gcp")],
+        ],
+        "integrations": [
+            {"id": i.id, "provider": i.provider,
+             "label": i.name or i.account_login or i.provider.upper()}
+            for i in integrations
+        ],
+    }
+
+
+@router.get("/{project_id}/icon-options")
+async def project_icon_options(
+    project_id: int,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Return image references found in README.md. Repository-relative images
+    become bounded data URLs (so private repos work without exposing a token);
+    HTTPS images remain remote URLs. Bad/missing/oversized references are
+    simply omitted."""
+    p = await _get_project(session, project_id)
+    integration = await session.get(Integration, p.integration_id) if p.integration_id else None
+    token = decrypted_token(integration) if integration else None
+    try:
+        readme = await github.get_readme(token, p.repo_full_name, p.default_branch)
+        markdown = base64.b64decode(
+            str(readme.get("content") or "").replace("\n", "")
+        ).decode("utf-8", errors="replace")
+    except (httpx.HTTPError, ValueError, binascii.Error):
+        return {"images": []}
+
+    refs = re.findall(r"!\[[^\]]*\]\(\s*<?([^\s)>]+)", markdown)
+    refs += re.findall(r"<img\b[^>]*\bsrc=[\"']([^\"']+)", markdown, flags=re.I)
+    readme_dir = posixpath.dirname(str(readme.get("path") or "README.md"))
+    images: list[dict] = []
+    seen: set[str] = set()
+    for ref in refs:
+        ref = ref.strip()
+        if not ref or ref in seen or len(images) >= 12:
+            continue
+        seen.add(ref)
+        try:
+            if ref.startswith("data:image/"):
+                src = _validate_icon(ref)
+                if not src:
+                    continue
+                mime = src[5:src.index(";")]
+            elif urlparse(ref).scheme == "https":
+                # Let the browser load externally-hosted README images.
+                # Fetching arbitrary README URLs here would create an SSRF path.
+                src = ref
+                mime = "remote"
+            else:
+                path = posixpath.normpath(posixpath.join(readme_dir, ref.split("#", 1)[0].split("?", 1)[0]))
+                if path.startswith("../"):
+                    continue
+                raw = await github.get_file_bytes(
+                    token, p.repo_full_name, path, p.default_branch, _MAX_ICON_BYTES
+                )
+                mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            if not ref.startswith("data:image/") and mime != "remote":
+                if mime not in ("image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml"):
+                    continue
+                src = f"data:{mime};base64,{base64.b64encode(raw).decode()}"
+            images.append({"src": src, "label": posixpath.basename(ref.split("?", 1)[0]) or "README image"})
+        except (httpx.HTTPError, ValueError, binascii.Error, OSError):
+            continue
+    return {"images": images}
 
 
 # ───── add a public repo by URL (no integration) ─────────────────────────────
@@ -469,12 +580,41 @@ class PatchBody(BaseModel):
     domain_mode: str | None = None
     auto_deploy: bool | None = None
     require_checks: bool | None = None
+    icon: str | None = None
+    deployment_target: str | None = None
+    deployment_target_integration_id: int | None = None
+    deployment_target_config: dict | None = None
+
+
+def _validate_icon(value: str) -> str | None:
+    value = value.strip()
+    if not value:
+        return None
+    if value.startswith("builtin:"):
+        if value.removeprefix("builtin:") not in _BUILTIN_ICONS:
+            raise HTTPException(400, "Unknown built-in project icon")
+        return value
+    if value.startswith("https://") and len(value) <= 4096:
+        return value
+    if not value.startswith("data:image/") or ";base64," not in value:
+        raise HTTPException(400, "Project icon must be a built-in or uploaded image")
+    header, encoded = value.split(",", 1)
+    if not re.match(r"^data:image/(png|jpeg|webp|gif|svg\+xml);base64$", header, re.I):
+        raise HTTPException(400, "Use a PNG, JPEG, WebP, GIF, or SVG image")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(400, "Invalid project icon image")
+    if len(raw) > _MAX_ICON_BYTES:
+        raise HTTPException(413, "Project icons must be 2 MB or smaller")
+    return value
 
 
 @router.patch("/{project_id}")
 async def patch_project(
     project_id: int,
     body: PatchBody,
+    background: BackgroundTasks,
     user: str = Depends(require_session_api),
     session: AsyncSession = Depends(get_session),
 ):
@@ -501,10 +641,49 @@ async def patch_project(
         p.auto_deploy = body.auto_deploy
     if body.require_checks is not None:
         p.require_checks = body.require_checks
+    if body.icon is not None:
+        p.icon = _validate_icon(body.icon)
+    target_changed = body.deployment_target is not None
+    if body.deployment_target is not None:
+        from ..targetslib import PROJECT_TARGETS
+        if body.deployment_target not in PROJECT_TARGETS:
+            raise HTTPException(400, f"deployment_target must be one of {PROJECT_TARGETS}")
+        target = body.deployment_target
+        config = dict(body.deployment_target_config or {})
+        integration = None
+        if target in ("aws", "gcp", "cloudflare"):
+            if body.deployment_target_integration_id:
+                integration = await session.get(Integration, body.deployment_target_integration_id)
+            else:
+                integration = (await session.execute(
+                    select(Integration).where(
+                        Integration.provider == target, Integration.status == "connected"
+                    )
+                )).scalars().first()
+            if not integration or integration.provider != target:
+                raise HTTPException(400, f"Connect a {target.upper()} account first")
+        elif target == "homebox":
+            if config.get("cluster_id") and config.get("node_id"):
+                raise HTTPException(400, "cluster_id and node_id are mutually exclusive")
+        else:
+            config = {}
+        p.deployment_target = target
+        p.deployment_target_integration_id = integration.id if integration else None
+        p.deployment_target_config = config
     p.updated_at = datetime.utcnow()  # cluster sync: newer-wins config edit
+    if target_changed:
+        from ..targetslib import sync_project_target_rows
+        await sync_project_target_rows(session, p)
     await session.commit()
     if body.auto_deploy is not None:
         await sync_project_webhook(session, p)
+    if target_changed and p.managed:
+        for env in await _project_envs(session, p.id):
+            has_deploy = (await session.execute(
+                select(Deployment.id).where(Deployment.environment_id == env.id).limit(1)
+            )).scalar_one_or_none()
+            if has_deploy:
+                await queue_deploy(session, background, env, trigger="config")
     return {"ok": True, "id": p.id, "name": p.name}
 
 
@@ -644,6 +823,7 @@ async def deployment_detail(
         "id": dep.id, "status": dep.status, "commit_sha": dep.commit_sha,
         "trigger": dep.trigger, "error": dep.error, "log_tail": dep.log_tail,
         "stack_name": dep.stack_name,
+        "repo_full_name": p.repo_full_name,
         "environment": {"id": env.id, "name": env.name},
         "created_at": dep.created_at.isoformat() if dep.created_at else None,
         "updated_at": dep.updated_at.isoformat() if dep.updated_at else None,

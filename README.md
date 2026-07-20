@@ -18,10 +18,12 @@ Install on any machine with a single command:
 curl -fsSL https://homebox.sh/install.sh | bash
 ```
 
-**Windows (PowerShell as Administrator):**
+**Windows (PowerShell, no Administrator needed):**
 ```powershell
-irm https://raw.githubusercontent.com/calm-logic/homebox/main/host/install.ps1 | iex
+powershell -ExecutionPolicy Bypass -c "irm https://homebox.sh/install.ps1 | iex"
 ```
+Verifies Docker Desktop + WSL2, runs the same installer inside your default WSL distro,
+then opens the admin UI at `http://localhost:7765` from Windows.
 
 The installer will:
 1. Check for (or install) Docker
@@ -29,6 +31,18 @@ The installer will:
 3. Generate admin credentials (saved to `~/.homebox/secrets.json`)
 4. Bring up the **Homebox Admin UI** on `http://localhost:7765`
 5. Open your browser: domains, Cloudflare tunnel, GitHub runner, and projects are all configured from there
+
+**Uninstall** — the same installer with `--uninstall`. By default it keeps your data
+volumes and `~/.homebox` secrets so a reinstall adopts them; add `--purge` to wipe those too:
+
+```bash
+# macOS / Linux
+curl -fsSL https://homebox.sh/install.sh | bash -s -- --uninstall --yes --purge
+```
+```powershell
+# Windows (parameters can't cross an irm|iex pipe, so invoke it as a scriptblock)
+powershell -ExecutionPolicy Bypass -c "& ([scriptblock]::Create((irm https://homebox.sh/install.ps1))) -Uninstall -Yes -Purge"
+```
 
 ## 🏗️ Architecture
 

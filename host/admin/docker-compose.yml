@@ -20,6 +20,13 @@ services:
       retries: 10
 
   app:
+    # Prebuilt image published by .github/workflows/admin-image.yml on every
+    # master push touching host/admin/**. `build: .` is kept deliberately:
+    #   - `docker compose pull app`      → pulls the prebuilt image (fast path)
+    #   - `docker compose up -d --build` → builds from source and tags the
+    #     result with this same image name (offline / dev fallback)
+    # configure.sh tries the pull first and falls back to the build.
+    image: ghcr.io/calm-logic/homebox-admin:${HOMEBOX_ADMIN_IMAGE_TAG:-latest}
     build: .
     container_name: homebox-admin
     restart: unless-stopped

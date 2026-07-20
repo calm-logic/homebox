@@ -1,27 +1,50 @@
 /**
- * First-run wizard. Three steps wired to existing endpoints:
- *   1. Connect Cloudflare       → POST /api/tunnel/token (token + account pick)
- *   2. Create Homebox tunnel    → POST /api/tunnel/connect
- *   3. Pick admin domain (opt)  → POST /api/onboarding/admin-domain
+ * First-run wizard. The fast path plus three steps wired to existing endpoints:
+ *   1. Log in with Homebox (opt) → POST /api/cluster/account/link-silent
+ *      (falls back to the AccountAuthModal on 412 — no stored token). The
+ *      post-link vault restore imports the Cloudflare integration, which
+ *      auto-completes step 2 and lets us auto-run step 3 via
+ *      POST /api/onboarding/auto-tunnel. Zero pastes on camera.
+ *   2. Connect Cloudflare       → POST /api/tunnel/token (token + account pick)
+ *   3. Create Homebox tunnel    → POST /api/tunnel/connect
+ *   4. Pick admin domain (opt)  → POST /api/onboarding/admin-domain
  *
  * The wizard is gated in App.tsx — when /api/onboarding/state.complete is
- * false, every other route redirects here. Step 3 is optional ("Skip"
- * dismisses the wizard with admin still on http://localhost:7765 only).
+ * false, every other route redirects here. The manual path (token paste)
+ * stays fully available for accountless installs.
  */
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Cloud, ExternalLink, CheckCircle2, ArrowRight, AlertTriangle } from "lucide-react";
+import { Cloud, ExternalLink, CheckCircle2, ArrowRight, AlertTriangle, LogIn } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { useToast } from "../lib/toast";
 import { Logo } from "../components/Logo";
+import { AccountAuthModal } from "../components/AccountAuthModal";
 import type {
   CloudflareAccount,
   CloudflareZone,
   OnboardingState,
   SetTokenResponse,
 } from "../lib/types";
+
+// Local extensions of OnboardingState (types.ts is owned elsewhere): the
+// backend now reports the linked-account fast path.
+interface OnboardingAccount {
+  linked: boolean;
+  /** True while the post-link vault restore is importing. */
+  restoring?: boolean;
+}
+type WizardState = OnboardingState & {
+  account?: OnboardingAccount;
+  steps: OnboardingState["steps"] & {
+    cloudflare_token: OnboardingState["steps"]["cloudflare_token"] & {
+      /** The integration arrived via the account-vault restore, not a paste. */
+      synced?: boolean;
+    };
+  };
+};
 
 interface TunnelConflict {
   kind: "name_collision";
@@ -45,13 +68,14 @@ const CF_TOKEN_TEMPLATE_URL =
 export function Onboarding() {
   const qc = useQueryClient();
   const nav = useNavigate();
-  const { data: state } = useQuery<OnboardingState>({
+  const toast = useToast();
+  const { data: state } = useQuery<WizardState>({
     queryKey: ["onboarding"],
-    queryFn: () => api.get<OnboardingState>("/api/onboarding/state"),
+    queryFn: () => api.get<WizardState>("/api/onboarding/state"),
     refetchInterval: 4000,
   });
 
-  // Decide which step is "active" — the first not-done step.
+  // Decide which manual step is "active" — the first not-done step.
   const activeStep = useMemo<1 | 2 | 3>(() => {
     if (!state) return 1;
     if (!state.steps.cloudflare_token.done) return 1;
@@ -63,6 +87,57 @@ export function Onboarding() {
     qc.invalidateQueries({ queryKey: ["onboarding"] });
     nav("/", { replace: true });
   }
+
+  // ── "Log in with Homebox" fast path ──
+  const linked = !!state?.account?.linked;
+  const cfSynced = !!state?.steps.cloudflare_token.synced;
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+
+  function onLinked() {
+    setAuthModalOpen(false);
+    qc.invalidateQueries({ queryKey: ["onboarding"] });
+    toast.show("Account linked — pulling your saved setup…", "ok");
+  }
+
+  const linkSilent = useMutation({
+    mutationFn: () => api.post<{ linked: boolean }>("/api/cluster/account/link-silent", {}),
+    onSuccess: onLinked,
+    onError: (e) => {
+      // 412 = no stored provider/account token on this box — fall back to the
+      // inline auth modal (OAuth buttons + account-token paste).
+      if (e instanceof ApiError && e.status === 412) { setAuthModalOpen(true); return; }
+      toast.show(String(e), "fail");
+    },
+  });
+
+  // Once the Cloudflare step auto-completes from the synced integration,
+  // advance step 3 with one call. Fire-once; a failure falls back to the
+  // manual tunnel form below.
+  const autoTunnelFired = useRef(false);
+  const autoTunnel = useMutation({
+    mutationFn: () => api.post<{ ok: boolean; already?: boolean }>("/api/onboarding/auto-tunnel", {}),
+    onSuccess: (resp) => {
+      qc.invalidateQueries({ queryKey: ["onboarding"] });
+      qc.invalidateQueries({ queryKey: ["tunnel"] });
+      if (!resp.already) toast.show("Tunnel created with your synced Cloudflare credentials", "ok");
+    },
+    onError: (e) => toast.show(`Automatic tunnel setup failed — create it below. ${String(e)}`, "fail"),
+  });
+  useEffect(() => {
+    if (!state || autoTunnelFired.current) return;
+    if (linked && cfSynced && state.steps.cloudflare_token.done && !state.steps.tunnel.done) {
+      autoTunnelFired.current = true;
+      autoTunnel.mutate();
+    }
+  }, [state, linked, cfSynced]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fast path only: once everything required is done, collapse the wizard
+  // into the app. Manual installs keep the explicit finish/skip on step 4.
+  useEffect(() => {
+    if (state?.complete && autoTunnelFired.current) finish();
+  }, [state?.complete]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const syncingAccount = linked && !state?.steps.cloudflare_token.done;
 
   return (
     <div className="onboarding-shell">
@@ -76,18 +151,48 @@ export function Onboarding() {
       <ol className="onboarding-steps">
         <Step
           number={1}
-          title="Connect Cloudflare"
-          done={!!state?.steps.cloudflare_token.done}
-          active={activeStep === 1}
-          subtitle={state?.steps.cloudflare_token.account_name
-            ? <>Connected to <strong>{state.steps.cloudflare_token.account_name}</strong></>
-            : <>Connect your Cloudflare account so this host can route traffic.</>}
+          title="Log in with Homebox (optional)"
+          done={linked}
+          active={!linked && !state?.complete}
+          subtitle={linked
+            ? (syncingAccount
+              ? <><span className="spinner" /> Linked — syncing your saved setup from your account…</>
+              : <>Linked — your saved setup synced from your account.</>)
+            : <>Link your homebox.sh account to pull your saved integrations, domains and projects.</>}
         >
-          {activeStep === 1 && <Step1Connect />}
+          {!linked && !state?.complete && (
+            <div className="btn-row">
+              <button
+                className="btn primary" type="button"
+                onClick={() => linkSilent.mutate()}
+                disabled={linkSilent.isPending}
+              >
+                {linkSilent.isPending ? <span className="spinner" /> : <><LogIn size={14} /> Log in with Homebox</>}
+              </button>
+              <span className="dim">No account? Continue below with a Cloudflare API token instead.</span>
+            </div>
+          )}
         </Step>
 
         <Step
           number={2}
+          title="Connect Cloudflare"
+          done={!!state?.steps.cloudflare_token.done}
+          active={activeStep === 1}
+          subtitle={state?.steps.cloudflare_token.done && cfSynced
+            ? <>Synced from your account{state.steps.cloudflare_token.account_name
+              ? <> — connected to <strong>{state.steps.cloudflare_token.account_name}</strong></> : null}</>
+            : state?.steps.cloudflare_token.account_name
+              ? <>Connected to <strong>{state.steps.cloudflare_token.account_name}</strong></>
+              : <>Connect your Cloudflare account so this host can route traffic.</>}
+        >
+          {activeStep === 1 && (syncingAccount
+            ? <p className="dim" style={{ margin: 0 }}><span className="spinner" /> Waiting for your synced Cloudflare integration…</p>
+            : <Step1Connect />)}
+        </Step>
+
+        <Step
+          number={3}
           title="Create the Homebox tunnel"
           done={!!state?.steps.tunnel.done}
           active={activeStep === 2}
@@ -95,11 +200,13 @@ export function Onboarding() {
             ? <>Running as <strong>{state.steps.tunnel.tunnel_name}</strong></>
             : <>A single tunnel routes every project on this host. Other Homebox installs make their own.</>}
         >
-          {activeStep === 2 && <Step2Tunnel />}
+          {activeStep === 2 && (autoTunnel.isPending
+            ? <p className="dim" style={{ margin: 0 }}><span className="spinner" /> Creating your tunnel with the synced credentials…</p>
+            : <Step2Tunnel />)}
         </Step>
 
         <Step
-          number={3}
+          number={4}
           title="Set a public admin URL (optional)"
           done={!!state?.steps.admin_domain.done}
           active={activeStep === 3}
@@ -110,6 +217,12 @@ export function Onboarding() {
           {activeStep === 3 && <Step3AdminDomain onDone={finish} onSkip={finish} />}
         </Step>
       </ol>
+
+      <AccountAuthModal
+        open={authModalOpen}
+        onClose={() => setAuthModalOpen(false)}
+        onLinked={onLinked}
+      />
     </div>
   );
 }

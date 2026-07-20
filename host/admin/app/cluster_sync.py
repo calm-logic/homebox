@@ -53,7 +53,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .models import (
     Deployment, Domain, Environment, Identity, Integration, Project, Service,
-    ServiceEnvVar, Setting,
+    ServiceEnvVar, ServiceTarget, Setting,
 )
 
 log = logging.getLogger("homebox.cluster.sync")
@@ -68,7 +68,8 @@ TOMBSTONES_KEY = "cluster_tombstones"
 TOMBSTONE_MAX_AGE_DAYS = 30
 TOMBSTONE_CAP = 500
 # Composite keys are stored as lists in JSON (project-scoped children).
-TOMBSTONE_KINDS = ("integration", "project", "service", "environment", "domain", "identity")
+TOMBSTONE_KINDS = ("integration", "project", "service", "environment", "domain",
+                   "identity", "service_target")
 
 
 def _canon(kind: str, key: Any) -> tuple:
@@ -220,6 +221,34 @@ async def _apply_tombstones(session: AsyncSession, tombs: list[dict[str, Any]]) 
                 if row is not None:
                     await session.delete(row)
                     deleted += 1
+            elif kind == "service_target":
+                # key = [project_name, service_name, env_name_or_""] — deleting
+                # the row resets the service/env to inherit (or homebox).
+                proj_name, svc_name, env_name = key
+                proj = await _project_by_name(proj_name)
+                if proj is not None:
+                    svc = (await session.execute(select(Service).where(
+                        Service.project_id == proj.id, Service.name == svc_name,
+                    ))).scalar_one_or_none()
+                    if svc is not None:
+                        q = select(ServiceTarget).where(ServiceTarget.service_id == svc.id)
+                        if env_name:
+                            env = (await session.execute(select(Environment).where(
+                                Environment.project_id == proj.id,
+                                Environment.name == env_name,
+                            ))).scalar_one_or_none()
+                            if env is None:
+                                continue
+                            q = q.where(ServiceTarget.environment_id == env.id)
+                        else:
+                            q = q.where(ServiceTarget.environment_id.is_(None))
+                        row = (await session.execute(q)).scalar_one_or_none()
+                        if row is not None:
+                            da = t.get("deleted_at") or ""
+                            if row.updated_at and da and row.updated_at.isoformat() > da:
+                                continue  # locally newer than the deletion → keep
+                            await session.delete(row)
+                            deleted += 1
         except Exception:  # noqa: BLE001 — one bad tombstone must not abort the sync
             log.exception("failed applying tombstone %s", t)
     if deleted:
@@ -237,6 +266,7 @@ async def export_state(session: AsyncSession, node_id: str) -> dict[str, Any]:
     environments = (await session.execute(select(Environment))).scalars().all()
     services = (await session.execute(select(Service))).scalars().all()
     env_vars = (await session.execute(select(ServiceEnvVar))).scalars().all()
+    service_targets = (await session.execute(select(ServiceTarget))).scalars().all()
     identities = (await session.execute(select(Identity))).scalars().all()
 
     integ_by_id = {i.id: i for i in integrations}
@@ -279,6 +309,14 @@ async def export_state(session: AsyncSession, node_id: str) -> dict[str, Any]:
                 ),
                 "domain_name": domain_by_id[p.domain_id].name if p.domain_id in domain_by_id else None,
                 "domain_mode": p.domain_mode,
+                "icon": p.icon,
+                "deployment_target": p.deployment_target,
+                "deployment_target_integration": (
+                    {"provider": integ_by_id[p.deployment_target_integration_id].provider,
+                     "account_login": integ_by_id[p.deployment_target_integration_id].account_login}
+                    if p.deployment_target_integration_id in integ_by_id else None
+                ),
+                "deployment_target_config": p.deployment_target_config or {},
                 "managed": p.managed, "auto_deploy": p.auto_deploy,
                 "require_checks": p.require_checks, "description": p.description,
                 "detected_stack": p.detected_stack or {},
@@ -325,6 +363,33 @@ async def export_state(session: AsyncSession, node_id: str) -> dict[str, Any]:
             }
             for v in env_vars
             if v.service_id in svc_by_id and svc_by_id[v.service_id].project_id in project_by_id
+        ],
+        # Deployment targets — natural key (project, service, environment|null).
+        # Two timestamp groups: updated_at covers user intent (target/
+        # integration/config), state_updated_at covers coordinator-written
+        # machine state; the importer resolves each group independently.
+        "service_targets": [
+            {
+                "project_name": project_by_id[svc_by_id[st.service_id].project_id].name,
+                "service_name": svc_by_id[st.service_id].name,
+                "environment_name": (
+                    env_by_id[st.environment_id].name
+                    if st.environment_id and st.environment_id in env_by_id else None
+                ),
+                "target": st.target,
+                "integration": (
+                    {"provider": integ_by_id[st.integration_id].provider,
+                     "account_login": integ_by_id[st.integration_id].account_login}
+                    if st.integration_id in integ_by_id else None
+                ),
+                "config": st.config or {},
+                "state": st.state or {},
+                "updated_at": _iso(st.updated_at),
+                "state_updated_at": _iso(st.state_updated_at),
+            }
+            for st in service_targets
+            if st.service_id in svc_by_id
+            and svc_by_id[st.service_id].project_id in project_by_id
         ],
         "identities": [{"email": i.email, "enabled": i.enabled} for i in identities],
         "settings": {},
@@ -504,6 +569,14 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
         local.domain_id = dom.id if dom else None
         local.default_branch = item.get("default_branch") or "main"
         local.domain_mode = item.get("domain_mode") or "container"
+        local.icon = item.get("icon")
+        local.deployment_target = item.get("deployment_target") or "homebox"
+        target_integ_ref = item.get("deployment_target_integration") or {}
+        target_integ = integ_map.get(
+            (target_integ_ref.get("provider"), target_integ_ref.get("account_login"))
+        )
+        local.deployment_target_integration_id = target_integ.id if target_integ else None
+        local.deployment_target_config = item.get("deployment_target_config") or {}
         local.managed = bool(item.get("managed"))
         local.auto_deploy = bool(item.get("auto_deploy"))
         local.require_checks = bool(item.get("require_checks"))
@@ -635,6 +708,62 @@ async def import_state(session: AsyncSession, data: dict[str, Any], *, mode: str
         local.value = item.get("value") or ""
         local.source = item.get("source") or "user"
         local.is_secret = bool(item.get("is_secret"))
+    await session.commit()
+
+    # deployment targets — natural key: (project, service, environment-or-None).
+    # PER-COLUMN-GROUP newer-wins: the user-intent group (target/integration/
+    # config, updated_at) and the coordinator-written machine group (state,
+    # state_updated_at) are compared and applied independently, so a UI
+    # retarget on one node never clobbers resource ids provisioned on another.
+    st_map: dict[tuple, ServiceTarget] = {}
+    for row in (await session.execute(select(ServiceTarget))).scalars():
+        svc = svc_by_id.get(row.service_id)
+        if not svc:
+            continue
+        proj = project_by_id.get(svc.project_id)
+        envname = env_by_id[row.environment_id].name if row.environment_id in env_by_id else None
+        if proj:
+            st_map[(proj.name, svc.name, envname)] = row
+    for item in data.get("service_targets") or []:
+        svc = svc_map.get((item["project_name"], item["service_name"]))
+        if not svc:
+            continue
+        envname = item.get("environment_name")
+        env = env_map.get((item["project_name"], envname)) if envname else None
+        if envname and env is None:
+            continue
+        cfg_ts = _parse_dt(item.get("updated_at"))
+        state_ts = _parse_dt(item.get("state_updated_at"))
+        if _tombstoned("service_target",
+                       [item["project_name"], item["service_name"], envname or ""],
+                       cfg_ts):
+            continue
+        key = (item["project_name"], item["service_name"], envname)
+        local = st_map.get(key)
+        created = local is None
+        if created:
+            local = ServiceTarget(
+                service_id=svc.id, environment_id=env.id if env else None,
+            )
+            session.add(local)
+            st_map[key] = local
+        applied = created
+        if created or _should_apply(cfg_ts, local.updated_at):
+            integ_ref = item.get("integration") or {}
+            integ = integ_map.get((integ_ref.get("provider"), integ_ref.get("account_login")))
+            local.target = item.get("target") or "homebox"
+            local.integration_id = integ.id if integ else None
+            local.config = item.get("config") or {}
+            if cfg_ts:
+                local.updated_at = cfg_ts
+            applied = True
+        if created or _should_apply(state_ts, local.state_updated_at):
+            local.state = item.get("state") or {}
+            if state_ts:
+                local.state_updated_at = state_ts
+            applied = True
+        if applied:
+            bump(created)
     await session.commit()
 
     # identities — natural key: email

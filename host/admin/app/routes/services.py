@@ -167,6 +167,294 @@ async def _redeploy_for_env_change(
     return out
 
 
+# ───── Deployment targets ─────────────────────────────────────────────────────
+# Where a service deploys, per environment: homebox (default) or a connected
+# cloud account. Rows follow the ServiceEnvVar convention (environment_id NULL
+# = service-wide default; env row overrides). See app/targetslib.py.
+
+_TARGET_PROVIDER = {"aws": "aws", "gcp": "gcp", "cloudflare": "cloudflare"}
+
+
+def _serialize_target(st) -> dict:
+    state = st.state or {}
+    config = dict(st.config or {})
+    inherited = bool(config.pop("_project_default", False))
+    return {
+        "id": st.id,
+        "environment_id": st.environment_id,
+        "target": st.target,
+        "integration_id": st.integration_id,
+        "config": config,
+        "inherited": inherited,
+        "status": state.get("status"),
+        "endpoint": state.get("endpoint"),
+        "error": state.get("error"),
+        "updated_at": st.updated_at.isoformat() if st.updated_at else None,
+    }
+
+
+_TARGET_LABELS = {"homebox": "Homebox", "aws": "AWS", "gcp": "Google Cloud",
+                  "cloudflare": "Cloudflare"}
+
+
+async def _account_locations(session: AsyncSession) -> tuple[list[dict], bool]:
+    """(homebox locations, linked) for the structured target options: with a
+    linked account, every cluster and every standalone linked node in the
+    account (from the cached overview — clusterlib.ACCOUNT_OVERVIEW_KEY);
+    otherwise the single "This Homebox" pseudo-location."""
+    from .. import clusterlib
+    fallback = [{"kind": "local", "id": None, "name": "This Homebox", "local": True}]
+    acct = await clusterlib.load_account(session)
+    if not acct:
+        return fallback, False
+    overview = await clusterlib._get_setting(session, clusterlib.ACCOUNT_OVERVIEW_KEY)
+    overview = overview if isinstance(overview, dict) else {}
+    state = await clusterlib.load_cluster(session)
+    local_cluster = state.get("cluster_id") if state else None
+    self_id = await clusterlib.get_node_id(session)
+    locs: list[dict] = []
+    for c in overview.get("clusters") or []:
+        locs.append({"kind": "cluster", "id": c.get("cluster_id"),
+                     "name": c.get("name") or c.get("cluster_id"),
+                     "local": c.get("cluster_id") == local_cluster})
+    for n in overview.get("nodes") or []:
+        if n.get("cluster_id"):
+            continue  # clustered nodes are addressed via their cluster
+        locs.append({"kind": "node", "id": n.get("node_id"),
+                     "name": n.get("name") or n.get("node_id"),
+                     "local": n.get("node_id") == self_id})
+    return (locs or fallback), True
+
+
+@router.get("/{service_id}/targets")
+async def list_targets(
+    service_id: int,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    from ..models import ServiceTarget
+    from ..targets import options_for_kind
+    svc = await _get_service(session, service_id)
+    rows = (await session.execute(
+        select(ServiceTarget).where(ServiceTarget.service_id == svc.id)
+    )).scalars().all()
+    locations, _linked = await _account_locations(session)
+    options = []
+    for t in options_for_kind(svc.kind):
+        opt: dict = {"value": t, "label": _TARGET_LABELS.get(t, t)}
+        if t == "homebox":
+            opt["locations"] = locations
+        options.append(opt)
+    return {
+        "options": options,
+        "targets": [_serialize_target(st) for st in rows],
+    }
+
+
+class PutTargetBody(BaseModel):
+    environment_id: int | None = None   # NULL = service-wide default row
+    target: str                          # homebox | aws | gcp | cloudflare
+    integration_id: int | None = None    # required for aws/gcp; auto for cloudflare
+    config: dict = {}
+
+
+@router.put("/{service_id}/target")
+async def put_target(
+    service_id: int,
+    body: PutTargetBody,
+    background: BackgroundTasks,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Set where this service deploys (optionally for one environment).
+    Changing the target queues a redeploy of the affected deployed
+    environments; the previous cloud target's resources are destroyed only
+    after the new target is live (state.previous drives that teardown)."""
+    from ..models import Environment, Integration, ServiceTarget
+    from ..targetslib import VALID_TARGETS
+    from ..targets import variant_for
+    svc = await _get_service(session, service_id)
+
+    if body.target not in VALID_TARGETS:
+        raise HTTPException(400, f"target must be one of {VALID_TARGETS}")
+    config = dict(body.config or {})
+    if body.target == "homebox":
+        # Location (linked accounts, D3): config may carry exactly one of
+        # cluster_id / node_id — which cluster (or standalone cluster-of-one
+        # node) of the account runs this service. Absent = "this homebox".
+        cluster_id = config.get("cluster_id")
+        node_id = config.get("node_id")
+        if cluster_id and node_id:
+            raise HTTPException(
+                400, "config.cluster_id and config.node_id are mutually exclusive")
+        if cluster_id or node_id:
+            from .. import clusterlib
+            acct = await clusterlib.load_account(session)
+            if not acct:
+                raise HTTPException(
+                    412, "Link a Homebox account to target another cluster or node.")
+            overview = await clusterlib._get_setting(
+                session, clusterlib.ACCOUNT_OVERVIEW_KEY)
+            overview = overview if isinstance(overview, dict) else {}
+            if cluster_id:
+                known = {c.get("cluster_id") for c in overview.get("clusters") or []}
+                if cluster_id not in known:
+                    raise HTTPException(
+                        400, "Unknown cluster for this account — refresh the "
+                             "account overview (System page) and try again.")
+            else:
+                standalone = {n.get("node_id") for n in overview.get("nodes") or []
+                              if not n.get("cluster_id")}
+                if node_id not in standalone:
+                    raise HTTPException(
+                        400, "Unknown standalone node for this account — it may "
+                             "have joined a cluster or been unlinked.")
+    integration = None
+    if body.target != "homebox":
+        if variant_for(body.target, svc.kind) is None:
+            raise HTTPException(
+                400, f"{svc.kind} services can't deploy to {body.target} yet.")
+        want_provider = _TARGET_PROVIDER[body.target]
+        if body.integration_id:
+            integration = await session.get(Integration, body.integration_id)
+            if not integration or integration.provider != want_provider:
+                raise HTTPException(400, f"integration_id is not a connected {want_provider} account")
+        else:
+            integration = (await session.execute(
+                select(Integration).where(Integration.provider == want_provider)
+            )).scalars().first()
+            if not integration:
+                raise HTTPException(
+                    400, f"Connect a {want_provider} account in Integrations first.")
+    if body.environment_id is not None:
+        env = await session.get(Environment, body.environment_id)
+        if not env or env.project_id != svc.project_id:
+            raise HTTPException(404, "Environment not found")
+
+    row = (await session.execute(
+        select(ServiceTarget).where(
+            ServiceTarget.service_id == svc.id,
+            (ServiceTarget.environment_id == body.environment_id)
+            if body.environment_id is not None
+            else ServiceTarget.environment_id.is_(None),
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        row = ServiceTarget(service_id=svc.id, environment_id=body.environment_id)
+        session.add(row)
+    elif row.target != body.target and row.target != "homebox":
+        # Remember what to tear down once the new target is live. Never
+        # overwrite an existing pending teardown (rapid retarget A→B→C must
+        # still destroy A). NOTE: homebox→homebox location moves never land
+        # here (both sides are target "homebox") — a cluster retarget writes
+        # no teardown state; the old cluster just drops the service from its
+        # stack on its next deploy.
+        state = dict(row.state or {})
+        if not state.get("previous"):
+            state["previous"] = {"target": row.target, "state": {
+                k: v for k, v in state.items() if k != "previous"}}
+        row.state = state
+        row.state_updated_at = datetime.utcnow()
+    row.target = body.target
+    row.integration_id = integration.id if integration else None
+    row.config = config
+    row.updated_at = datetime.utcnow()  # cluster sync: newer-wins config edit
+    await session.commit()
+
+    # Redeploy affected deployed environments so the change takes effect.
+    from .projects import queue_deploy
+    from ..models import Deployment, Project
+    project = await session.get(Project, svc.project_id)
+    redeployed: list[dict] = []
+    if project and project.managed:
+        envs = (await session.execute(
+            select(Environment).where(Environment.project_id == project.id)
+        )).scalars().all()
+        for env in envs:
+            if body.environment_id is not None and env.id != body.environment_id:
+                continue
+            has_deploy = (await session.execute(
+                select(Deployment.id).where(Deployment.environment_id == env.id).limit(1)
+            )).scalar_one_or_none()
+            if not has_deploy:
+                continue
+            dep = await queue_deploy(session, background, env, trigger="config")
+            redeployed.append({"environment": env.name, "deployment_id": dep.id})
+    return {"ok": True, "target": _serialize_target(row), "redeployed": redeployed}
+
+
+@router.delete("/{service_id}/target")
+async def delete_target(
+    service_id: int,
+    background: BackgroundTasks,
+    environment_id: int | None = None,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Remove a target row — the service/env falls back to inheriting (env row
+    removed) or the homebox default. Peers converge via a tombstone."""
+    from ..models import Deployment, Environment, Project, ServiceTarget
+    from .. import cluster_sync
+    svc = await _get_service(session, service_id)
+    row = (await session.execute(
+        select(ServiceTarget).where(
+            ServiceTarget.service_id == svc.id,
+            (ServiceTarget.environment_id == environment_id)
+            if environment_id is not None
+            else ServiceTarget.environment_id.is_(None),
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "No target override set")
+    project = await session.get(Project, svc.project_id)
+    env_name = ""
+    if environment_id is not None:
+        env = await session.get(Environment, environment_id)
+        env_name = env.name if env else ""
+    await session.delete(row)
+    await session.flush()
+    # Re-materialize the inherited project target so "Default" is a real,
+    # deployable fallback (including provider state rows), not a UI-only value.
+    from ..targetslib import sync_project_target_rows
+    if project:
+        await sync_project_target_rows(session, project)
+        await session.flush()
+    replacement = (await session.execute(
+        select(ServiceTarget).where(
+            ServiceTarget.service_id == svc.id,
+            (ServiceTarget.environment_id == environment_id)
+            if environment_id is not None
+            else ServiceTarget.environment_id.is_(None),
+        )
+    )).scalar_one_or_none()
+    if replacement is not None:
+        # Same natural key now carries the inherited project value. Give it the
+        # override-removal timestamp so cluster newer-wins sync applies it.
+        replacement.updated_at = datetime.utcnow()
+    else:
+        await cluster_sync.record_tombstones(
+            session, [("service_target", [project.name, svc.name, env_name])],
+            commit=False,
+        )
+    await session.commit()
+    redeployed: list[dict] = []
+    if project and project.managed:
+        from .projects import queue_deploy
+        envs = (await session.execute(
+            select(Environment).where(Environment.project_id == project.id)
+        )).scalars().all()
+        for env in envs:
+            if environment_id is not None and env.id != environment_id:
+                continue
+            has_deploy = (await session.execute(
+                select(Deployment.id).where(Deployment.environment_id == env.id).limit(1)
+            )).scalar_one_or_none()
+            if has_deploy:
+                dep = await queue_deploy(session, background, env, trigger="config")
+                redeployed.append({"environment": env.name, "deployment_id": dep.id})
+    return {"ok": True, "redeployed": redeployed}
+
+
 @router.get("/{service_id}/metrics")
 async def service_metrics(
     service_id: int,

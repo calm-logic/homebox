@@ -266,7 +266,27 @@ EOF
         warn "Base infrastructure not found at $HOMEBOX_INFRA_DIR — skipping Traefik."
     fi
 
-    (cd "$ADMIN_DEPLOY_DIR" && docker compose --env-file .env up -d --build)
+    # Admin image: pull-first, build-from-source fallback (G2). The compose
+    # file names the prebuilt image AND keeps `build: .`, so both paths tag
+    # the same image name. Force the source build with HOMEBOX_BUILD_FROM_SOURCE=1.
+    local admin_image up_build_flag="" pull_log="${TMPDIR:-/tmp}/homebox-admin-pull.log"
+    admin_image="$(homebox_admin_image)"
+    if [ "${HOMEBOX_BUILD_FROM_SOURCE:-0}" = "1" ]; then
+        info "Admin image: HOMEBOX_BUILD_FROM_SOURCE=1 — building from source."
+        up_build_flag="--build"
+    else
+        info "Admin image: pulling prebuilt ${admin_image} (log: $pull_log)..."
+        if (cd "$ADMIN_DEPLOY_DIR" && run_with_timeout "${HOMEBOX_PULL_TIMEOUT:-600}" \
+                docker compose --env-file .env pull app) >"$pull_log" 2>&1; then
+            info "Admin image: pulled prebuilt image — skipping the source build."
+        else
+            warn "Admin image: pull failed (offline or image not published — see $pull_log)."
+            info "Admin image: falling back to building from source (slower)."
+            up_build_flag="--build"
+        fi
+    fi
+    # shellcheck disable=SC2086  # up_build_flag is deliberately word-split ("" or --build)
+    (cd "$ADMIN_DEPLOY_DIR" && docker compose --env-file .env up -d $up_build_flag)
     success "Admin stack is up."
 }
 
@@ -301,6 +321,11 @@ print_summary_and_open() {
     info "connecting Cloudflare and assigning a public URL for the admin."
     echo ""
 
+    if [ "${HOMEBOX_NO_BROWSER:-}" = "1" ]; then
+        info "Skipping browser auto-open (HOMEBOX_NO_BROWSER=1)."
+        return 0
+    fi
+
     case "$PLATFORM" in
         macos) open "$local_url" >/dev/null 2>&1 || true ;;
         linux)
@@ -328,6 +353,11 @@ main() {
     generate_admin_env
     deploy_admin_source
     start_stacks
+    # Warm the deploy-time base images (node/nginx/nixpacks) in the background
+    # so the FIRST project deploy doesn't start with cold pulls (G2b).
+    # Best-effort + non-fatal; opt out with HOMEBOX_NO_PREPULL=1.
+    # shellcheck disable=SC2046  # word-splitting the image list is intended
+    prepull_images_bg "deploy base images" $(homebox_deploy_base_images)
     install_boot_unit
     print_summary_and_open
 }

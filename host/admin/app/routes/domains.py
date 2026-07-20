@@ -56,7 +56,11 @@ async def _push_remote_ingress(session: AsyncSession) -> None:
     if not token or not state.get("account_id") or not state.get("tunnel_id"):
         return
     rows = (await session.execute(select(Domain).order_by(Domain.name))).scalars().all()
-    ingress = cf.build_ingress([{"name": d.name} for d in rows])
+    from ..targetslib import all_tunnel_tcp_rules
+    ingress = cf.build_ingress(
+        [{"name": d.name} for d in rows],
+        tcp_rules=await all_tunnel_tcp_rules(session),
+    )
     await cf.put_tunnel_config(token, state["account_id"], state["tunnel_id"], ingress)
 
 

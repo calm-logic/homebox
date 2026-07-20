@@ -116,6 +116,13 @@ else
     fi
 fi
 
+# Start pulling the images the install needs (infra + prebuilt admin) in the
+# background NOW, so the downloads overlap with the rest of setup and
+# configure.sh's `docker compose pull app` hits a warm cache. Best-effort:
+# offline installs still work via configure.sh's build-from-source fallback.
+# shellcheck disable=SC2046  # word-splitting the image list is intended
+prepull_images_bg "infra + admin images" $(homebox_infra_images) "$(homebox_admin_image)"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Create directory layout
 # ─────────────────────────────────────────────────────────────────────────────

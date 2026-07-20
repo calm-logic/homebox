@@ -59,6 +59,22 @@ def verify_credentials(username: str, password: str) -> bool:
         return False
 
 
+def verify_password_only(password: str) -> Optional[str]:
+    """Password-only login (G3): there is exactly one local admin (the fixed
+    `homebox` user written by the installer), so the username adds nothing on
+    the form. Validates against the stored bcrypt hash and returns the stored
+    username (for the session) on success, else None."""
+    creds = _load_creds()
+    if not creds:
+        return None
+    expected_user, expected_hash = creds
+    try:
+        ok = bcrypt.checkpw(password.encode("utf-8"), expected_hash.encode("utf-8"))
+    except (ValueError, TypeError):
+        return None
+    return expected_user if ok else None
+
+
 def issue_session(response: Response, username: str) -> None:
     token = _serializer().dumps({"u": username, "iat": int(time.time())})
     response.set_cookie(

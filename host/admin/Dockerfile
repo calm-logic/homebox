@@ -38,6 +38,16 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
 # docker-compose file nor a Dockerfile. Single static binary.
 RUN curl -fsSL https://nixpacks.com/install.sh | bash
 
+# Node.js: the Cloudflare Containers deploy target has no headless REST API,
+# so app/targets/cloudflare_containers.py drives `npx wrangler@4 deploy`
+# (see the P3 notes in docs). NodeSource keeps this a single apt source; npx
+# ships with node. Wrangler itself is fetched by npx on first use and cached
+# under /root/.npm.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y -qq --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npx --version
+
 COPY pyproject.toml /srv/pyproject.toml
 RUN pip install --no-cache-dir \
     "fastapi>=0.115" \

@@ -266,6 +266,18 @@ async def _finish_account_link(provider: str, access_token: str, request: Reques
     if not account_token:
         return _err("The account service returned no token.")
 
+    # G4: persist the (validated) provider token encrypted, so future account
+    # operations can re-auth silently via POST /account/link-silent. The email
+    # keys the entry: prefer the CP's verified email, else ask the provider.
+    email = (reg.get("email") or "").strip().lower()
+    if not email:
+        try:
+            email = (await _resolve_verified_email(provider, access_token)) or ""
+        except httpx.HTTPError:
+            email = ""
+    if email:
+        await clusterlib.save_provider_token(session, provider, email, access_token)
+
     try:
         await clusterlib.link_account_flow(
             session,
@@ -276,6 +288,12 @@ async def _finish_account_link(provider: str, access_token: str, request: Reques
         )
     except clusterlib.ControlPlaneError as e:
         return _err(e.detail or "Linking this node to the account failed.")
+
+    # The post-link pipeline (vault restore → identity auto-create → default
+    # new cluster) runs in the background (own session) so the redirect
+    # returns immediately; progress rides the post_link/vault_state settings.
+    from .. import vaultlib
+    vaultlib.schedule_post_link(provider=provider, email=email or None)
 
     return {"ok": True, "purpose": "account-link", "redirect": "/system?account=linked"}
 
@@ -296,6 +314,9 @@ async def _finish_login(provider: str, access_token: str, response: Response, se
     identity.last_login_provider = provider
     identity.login_count = (identity.login_count or 0) + 1
     await session.commit()
+
+    # G4: keep the provider token (encrypted) for silent account auth later.
+    await clusterlib.save_provider_token(session, provider, email, access_token)
 
     issue_session(response, identity.email)
     return {"ok": True, "purpose": "login", "redirect": "/"}
@@ -366,6 +387,16 @@ async def _finish_connect(access_token: str, request: Request, session: AsyncSes
         await session.commit()
     except httpx.HTTPStatusError:
         await session.rollback()
+
+    # G4: the connect token is a plain GitHub OAuth token too — keep it
+    # (encrypted) for silent account auth. Best-effort: the email lookup needs
+    # one extra GitHub call and must never fail the connect.
+    try:
+        email = await _resolve_verified_email("github", access_token)
+        if email:
+            await clusterlib.save_provider_token(session, "github", email, access_token)
+    except httpx.HTTPError:
+        pass
 
     return {"ok": True, "purpose": "connect", "redirect": "/projects", "orgs": [login, *orgs]}
 

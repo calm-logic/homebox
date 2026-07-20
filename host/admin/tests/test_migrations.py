@@ -49,6 +49,25 @@ _TRANSITIONAL = [
     ("projects", "domain_mode"),
 ]
 
+# Artifacts introduced by POST-baseline migrations (0003+). Base.metadata
+# .create_all builds the CURRENT model — a faithful legacy DB must not carry
+# these, or re-running the migrations during adoption would double-add them.
+# Every new migration's columns/tables must be listed here.
+_POST_BASELINE_COLUMNS = [
+    ("projects", "updated_at"),          # 0003
+    ("environments", "updated_at"),      # 0003
+    ("domains", "updated_at"),           # 0003
+    ("service_instances", "target"),     # 0004
+    ("projects", "icon"),                # 0005
+    ("projects", "deployment_target"),   # 0005
+    ("projects", "deployment_target_integration_id"),  # 0005
+    ("projects", "deployment_target_config"),          # 0005
+]
+_POST_BASELINE_TABLES = [
+    "service_targets",                   # 0004
+]
+_EXPECTED_HEAD = "0005"
+
 
 def _admin_url_for(dbname: str) -> str:
     base = MAINT_URL.rsplit("/", 1)[0]
@@ -141,8 +160,10 @@ def test_fresh_matches_adopted_legacy():
                 "('org/legacy', 'legacy', 'main', 'container', true, true, true, "
                 "'{}', now())"
             )
-            for tbl, col in _TRANSITIONAL:
+            for tbl, col in _TRANSITIONAL + _POST_BASELINE_COLUMNS:
                 conn.exec_driver_sql(f"ALTER TABLE {tbl} DROP COLUMN {col}")
+            for tbl in _POST_BASELINE_TABLES:
+                conn.exec_driver_sql(f"DROP TABLE {tbl}")
             # Old installs also carried a NOT NULL domains.mode (no default),
             # which the rework moved to projects.domain_mode. Recreate it so
             # adoption proves revision 0002 drops it.
@@ -165,7 +186,7 @@ def test_fresh_matches_adopted_legacy():
         # And the legacy DB really did get re-adopted (columns restored + stamped).
         with create_engine(migrate.sync_url(legacy_url)).connect() as conn:
             ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-            assert ver == "0002"
+            assert ver == _EXPECTED_HEAD
             assert conn.execute(text(
                 "SELECT domain_mode FROM projects WHERE name='legacy'"
             )).scalar() == "container"

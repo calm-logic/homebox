@@ -1,6 +1,7 @@
 """Minimal GitHub REST client. Each call takes a PAT — the caller decides
 which org/repo's token to use. No retries; raises HTTPStatusError on failure."""
 
+import base64
 from typing import Any
 import httpx
 
@@ -72,6 +73,38 @@ async def get_repo(token: str | None, repo_full_name: str) -> dict[str, Any]:
         r = await c.get(f"{API}/repos/{repo_full_name}", headers=_headers(token))
         r.raise_for_status()
         return r.json()
+
+
+async def get_readme(token: str | None, repo_full_name: str, ref: str) -> dict[str, Any]:
+    """README metadata/content at a ref. GitHub returns small files base64
+    encoded; callers use path to resolve relative markdown image references."""
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(
+            f"{API}/repos/{repo_full_name}/readme", headers=_headers(token),
+            params={"ref": ref},
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+async def get_file_bytes(token: str | None, repo_full_name: str,
+                         path: str, ref: str, max_bytes: int) -> bytes:
+    """Read one repository file without exposing a private-repo token to the
+    browser. Reject unexpectedly large content before decoding where possible."""
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.get(
+            f"{API}/repos/{repo_full_name}/contents/{path}",
+            headers=_headers(token), params={"ref": ref},
+        )
+        r.raise_for_status()
+        data = r.json()
+        if int(data.get("size") or 0) > max_bytes:
+            raise ValueError("repository image is too large")
+        content = str(data.get("content") or "").replace("\n", "")
+        raw = base64.b64decode(content, validate=True)
+        if len(raw) > max_bytes:
+            raise ValueError("repository image is too large")
+        return raw
 
 
 async def search_public_repos(token: str | None, query: str, limit: int = 10) -> list[dict[str, Any]]:

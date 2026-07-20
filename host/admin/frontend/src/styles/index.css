@@ -473,6 +473,11 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
   width: var(--ind-w, 0px);
   transform: translateX(var(--ind-x, 0px));
 }
+.deploy-tab-action { margin-left: auto; padding: 0 0 0.35rem 0.5rem; align-self: center; }
+@media (max-width: 720px) {
+  .tabs { overflow-x: auto; }
+  .deploy-tab-action { position: sticky; right: 0; background: var(--bg); flex-wrap: nowrap; }
+}
 
 /* Vertical section tabs (project detail sidebar) */
 .project-layout { display: flex; align-items: flex-start; gap: 1.75rem; margin-top: 1.25rem; }
@@ -504,35 +509,45 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 }
 .project-panel { flex: 1; min-width: 0; }
 
+/* Mobile section nav: the same tabs as a fixed bottom bar. It's PORTALED to
+   <body> (see ProjectDetail) so no app container can trap the fixed
+   positioning; visibility is purely breakpoint-driven. */
+.vtabs-mobile { display: none; }
+
 @media (max-width: 720px) {
-  /* Section nav becomes a fixed bottom bar (app-style): equal-width tabs,
-     icon over a small label, no horizontal overflow. Padding on the layout
-     keeps the last content clear of the bar. */
   .project-layout {
     flex-direction: column; gap: 0.75rem;
+    /* keep the last content clear of the fixed bottom bar */
     padding-bottom: 4.75rem;
   }
-  .vtabs {
-    position: fixed; left: 0; right: 0; bottom: 0; top: auto; z-index: 60;
-    flex-direction: row; flex-wrap: nowrap;
-    flex: 0 0 auto; width: 100%;
+  .vtabs { display: none; }
+  .vtabs-mobile {
+    display: flex;
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 90;
     background: var(--bg-elev);
     border-top: 1px solid var(--border);
     padding: 0.3rem 0.35rem calc(0.3rem + env(safe-area-inset-bottom, 0px));
     gap: 0.15rem;
   }
-  .vtabs .vtab {
+  .vtabs-mobile .vtab {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
     flex: 1 1 0; min-width: 0;
-    flex-direction: column; align-items: center; justify-content: center;
     gap: 0.2rem;
+    background: none; border: none;
     padding: 0.35rem 0.1rem;
-    font-size: 0.6rem; font-weight: 500;
+    color: var(--text-dim);
+    font: inherit; font-size: 0.6rem; font-weight: 500;
     text-align: center;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .vtabs-mobile .vtab span {
+    max-width: 100%;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  /* The sliding indicator's math assumes an in-flow vertical list — hide it
-     here; the accent color already marks the active tab. */
-  .vtabs .tab-indicator { display: none; }
+  .vtabs-mobile .vtab svg { opacity: 0.85; flex-shrink: 0; }
+  .vtabs-mobile .vtab.active { color: var(--accent); }
+  .vtabs-mobile .vtab.active svg { opacity: 1; }
 }
 
 /* Standalone chips — small non-interactive markers ("this node", "this
@@ -654,6 +669,49 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .spacer { flex: 1; }
 .dim { color: var(--muted); font-size: 0.85rem; }
 .right { text-align: right; }
+
+/* Project and service identity/status affordances. */
+.project-icon-button {
+  width: 34px; height: 34px; padding: 0; flex: 0 0 auto;
+  display: inline-grid; place-items: center;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel); color: var(--accent); cursor: pointer;
+}
+.project-icon-button:hover { background: var(--panel-2); border-color: var(--border-strong); }
+.project-icon-image { display: block; object-fit: cover; border-radius: 6px; }
+.project-icon-popover {
+  position: fixed; z-index: 1100; width: 320px; max-width: calc(100vw - 16px);
+  padding: 0.8rem; border: 1px solid var(--border-strong); border-radius: var(--radius);
+  background: var(--bg-elev); box-shadow: var(--shadow);
+}
+.project-icon-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.35rem; margin-top: 0.4rem; }
+.project-icon-grid button {
+  min-width: 0; padding: 0.45rem 0.25rem; display: flex; flex-direction: column;
+  align-items: center; gap: 0.2rem; color: var(--text-dim); background: var(--panel);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer;
+}
+.project-icon-grid button:hover { color: var(--accent); background: var(--panel-2); }
+.project-icon-grid span { max-width: 100%; font-size: 0.62rem; overflow: hidden; text-overflow: ellipsis; }
+.project-icon-section-title { margin-top: 0.75rem; justify-content: space-between; }
+.project-readme-images { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.35rem; margin-top: 0.4rem; }
+.project-readme-images button {
+  height: 58px; padding: 0.2rem; overflow: hidden; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--panel); cursor: pointer;
+}
+.project-readme-images img { width: 100%; height: 100%; object-fit: contain; }
+.project-icon-popover .dim { display: inline-flex; align-items: center; gap: 0.3rem; }
+.service-kind-icon { color: var(--accent); flex: 0 0 auto; }
+.service-status { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; text-transform: capitalize; }
+.service-status.up { color: var(--success); }
+.service-status.down { color: var(--danger); }
+.service-status.restarting { color: var(--info); }
+.service-status.unknown { color: var(--muted); }
+.service-detail-tabs { margin: 0.75rem 0 1rem; }
+.service-header-endpoint { margin-left: auto; }
+.timestamp-button {
+  border: 0; padding: 0; background: none; color: inherit; font: inherit;
+  text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer;
+}
 
 .spinner {
   width: 1em; height: 1em; border: 2px solid var(--border-strong);
@@ -916,3 +974,19 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 }
 .menu-item:hover:not(:disabled) { background: var(--btn-bg-hover); }
 .menu-item:disabled { color: var(--muted); cursor: default; }
+
+/* ── Topology (fleet god view) ──────────────────────────────────────────── */
+/* Subtle inline status row for a pending directive or cloud-node provision,
+   indented under the node/cluster it affects. */
+.topo-pending {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.2rem 0 0.35rem 1.5rem;
+  color: var(--muted); font-size: 0.8rem;
+}
+.topo-pending .spinner { width: 10px; height: 10px; }
+.topo-pending strong { color: var(--text-dim); font-weight: 600; }
+
+/* Node multi-pick list in the split-cluster modal. */
+.node-picker { display: grid; gap: 0.45rem; margin-top: 0.7rem; }
+.node-picker label { cursor: pointer; }
+.node-picker input[type="checkbox"] { width: auto; }

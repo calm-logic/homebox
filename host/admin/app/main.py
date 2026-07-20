@@ -25,6 +25,7 @@ from .routes import (
     onboarding,
     peer as peer_routes,
     projects,
+    provision as provision_routes,
     runner,
     services,
     theme,
@@ -144,6 +145,7 @@ app.include_router(onboarding.router)
 app.include_router(identities_routes.router)
 app.include_router(theme.router)
 app.include_router(cluster_routes.router)
+app.include_router(provision_routes.router)
 app.include_router(peer_routes.router)
 
 

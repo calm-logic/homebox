@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { useMutation, UseMutationResult, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, ChevronRight, ExternalLink, MoreVertical, RefreshCw, Rocket, Square,
   Settings, LayoutDashboard, Boxes, Trash2,
@@ -10,11 +11,14 @@ import { DeploymentPanel } from "./DeploymentDetail";
 import { RuntimeLogsPanel } from "./RuntimeLogs";
 import { ServicePanel } from "./ServiceDetail";
 import { Modal } from "../components/Modal";
+import { ProjectIconPicker } from "../components/ProjectIconPicker";
+import { ServiceIcon, ServiceStatus } from "../components/ServiceIcon";
 import { useToast } from "../lib/toast";
+import { timeAgo } from "../lib/time";
 import { useTabIndicator } from "../lib/useTabIndicator";
 import type {
   DeploymentItem, DeploymentStatus, DomainItem, EnvironmentInfo,
-  ProjectDetailData, ProjectWorkflowRun,
+  ProjectDetailData,
 } from "../lib/types";
 
 export const BUSY: DeploymentStatus[] = ["queued", "cloning", "dissecting", "building", "starting"];
@@ -23,6 +27,10 @@ export const BUSY: DeploymentStatus[] = ["queued", "cloning", "dissecting", "bui
 export const utcDate = (iso: string) => new Date(/Z$|[+-]\d\d:\d\d$/.test(iso) ? iso : iso + "Z");
 
 type Section = "overview" | "deployments" | "services" | "settings";
+interface ProjectTargetOptions {
+  options: { value: string; label: string; locations?: { kind: "local" | "cluster" | "node"; id: string | null; name: string; local: boolean }[] }[];
+  integrations: { id: number; provider: string; label: string }[];
+}
 const SECTIONS: { key: Section; label: string; icon: typeof Settings }[] = [
   { key: "overview", label: "Overview", icon: LayoutDashboard },
   { key: "services", label: "Services", icon: Boxes },
@@ -74,15 +82,6 @@ export function historyBadge(status: string) {
   return <span className="badge info">{status[0].toUpperCase() + status.slice(1)}…</span>;
 }
 
-function serviceEnvBadge(env: EnvironmentInfo, serviceName: string) {
-  const inst = env.instances.find(i => i.service_name === serviceName);
-  if (!inst) return <span key={env.id} className="badge muted plain" style={{ textTransform: "capitalize" }}>{env.name}</span>;
-  if (inst.status === "unreachable") {
-    return <span key={env.id} className="badge fail" style={{ textTransform: "capitalize" }} title="Not responding">{env.name}</span>;
-  }
-  return <span key={env.id} className="badge ok" style={{ textTransform: "capitalize" }}>{env.name}</span>;
-}
-
 export function envUnreachable(env: EnvironmentInfo): boolean {
   return env.deployment?.status === "running"
     && env.instances.some(i => i.url && i.status === "unreachable");
@@ -109,7 +108,6 @@ export function ProjectDetail() {
   const id = Number(projectId);
   const qc = useQueryClient();
   const nav = useNavigate();
-  const toast = useToast();
   // Deployment- and service-detail URLs render inside the same chrome with
   // their section active; the panel swaps the list for the detail. /logs is a
   // pseudo-section under Overview: runtime container logs for the active env,
@@ -135,19 +133,7 @@ export function ProjectDetail() {
     queryFn: () => api.get<ProjectDetailData>(`/api/projects/${id}`),
     refetchInterval: 6000,
   });
-  const { data: runs } = useQuery<ProjectWorkflowRun[]>({
-    queryKey: ["project-workflows", id],
-    queryFn: () => api.get<ProjectWorkflowRun[]>(`/api/projects/${id}/workflows`),
-    // Integration-less projects (public repos by URL) have no Actions access.
-    enabled: !!project?.managed && !!project?.integration,
-  });
-
   const invalidate = () => qc.invalidateQueries({ queryKey: ["project", id] });
-  const refreshRuns = useMutation({
-    mutationFn: () => api.post(`/api/workflows/refresh`),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["project-workflows", id] }); toast.show("Refreshed", "ok"); },
-    onError: (e) => toast.show(String(e), "fail"),
-  });
 
   const vtabsRef = useRef<HTMLDivElement>(null);
   useTabIndicator(vtabsRef, ".vtab.active", [section]);
@@ -167,6 +153,7 @@ export function ProjectDetail() {
         <Link to="/projects" className="back-btn" aria-label="Back to projects" title="Back to projects">
           <ArrowLeft size={18} />
         </Link>
+        <ProjectIconPicker projectId={project.id} icon={project.icon} name={project.name} />
         <h1 style={{ margin: 0 }}>{project.name}</h1>
       </div>
       <p className="dim" style={{ marginTop: "0.25rem" }}>
@@ -174,7 +161,7 @@ export function ProjectDetail() {
       </p>
 
       <div className="project-layout">
-        {/* ─── Section nav (vertical tabs) ─────────────────────── */}
+        {/* ─── Section nav (vertical tabs; hidden on mobile) ─────── */}
         <div className="vtabs" role="tablist" aria-orientation="vertical" ref={vtabsRef}>
           <span className="tab-indicator" aria-hidden />
           {SECTIONS.map(s => {
@@ -192,6 +179,30 @@ export function ProjectDetail() {
             );
           })}
         </div>
+
+        {/* Mobile: the same nav as a bottom bar, portaled to <body> so no
+            app container (transform/overflow/stacking) can trap or bury the
+            fixed positioning. Shown/hidden purely via CSS breakpoints. */}
+        {createPortal(
+          <nav className="vtabs-mobile" role="tablist">
+            {SECTIONS.map(s => {
+              const Icon = s.icon;
+              return (
+                <button
+                  key={s.key}
+                  role="tab"
+                  aria-selected={section === s.key}
+                  className={`vtab ${section === s.key ? "active" : ""}`}
+                  onClick={() => goToSection(s.key)}
+                >
+                  <Icon size={17} aria-hidden />
+                  <span>{s.label}</span>
+                </button>
+              );
+            })}
+          </nav>,
+          document.body,
+        )}
 
         <div className="project-panel">
           {/* ─── Overview / Deployments / Services (one horizontal tab per env) ── */}
@@ -221,6 +232,13 @@ export function ProjectDetail() {
                       <span style={{ textTransform: "capitalize" }}>{env.name}</span>
                     </button>
                   ))}
+                  {section === "deployments" && (
+                    <DeployEnvironmentControl
+                      projectId={id}
+                      env={activeEnv}
+                      onChange={invalidate}
+                    />
+                  )}
                 </div>
                 {section === "overview" && (logsView ? (
                   <RuntimeLogsPanel key={activeEnv.id} projectId={id} env={activeEnv} />
@@ -233,12 +251,7 @@ export function ProjectDetail() {
                     deploymentId={Number(deploymentId)}
                     onEnv={eid => setEnvTab(prev => (prev === eid ? prev : eid))}
                   />
-                ) : (
-                  <>
-                    <Deployments key={activeEnv.id} projectId={id} envId={activeEnv.id} />
-                    {project.integration && <WorkflowRuns runs={runs} refreshRuns={refreshRuns} />}
-                  </>
-                ))}
+                ) : <Deployments key={activeEnv.id} projectId={id} envId={activeEnv.id} />)}
                 {section === "services" && serviceId && (() => {
                   const svc = project.services.find(s => s.id === Number(serviceId));
                   if (!svc) return <Navigate to={`/projects/${id}/services`} replace />;
@@ -250,30 +263,7 @@ export function ProjectDetail() {
                       <span className="dim">No services detected yet. Click <strong>Sync</strong> to dissect the repo.</span>
                     </div>
                   ) : (
-                    <table className="data-table">
-                      <thead><tr><th>Service</th><th>Kind</th><th>Exposure</th><th>Environments</th><th>Hostname</th><th className="right" /></tr></thead>
-                      <tbody>
-                        {project.services.map(s => {
-                          const host = s.is_public
-                            ? predictedHost(project.name, s.subdomain_label, activeEnv.slug_suffix, project.domain, project.domain_mode)
-                            : null;
-                          return (
-                            <tr key={s.id} className="clickable" onClick={() => nav(`/projects/${id}/services/${s.id}`)}>
-                              <td><strong>{s.name}</strong>{s.internal_port && <span className="dim"> :{s.internal_port}</span>}</td>
-                              <td><span className="badge plain">{s.kind}</span></td>
-                              <td>{s.is_public ? <span className="badge ok">Public</span> : <span className="badge muted plain">Internal</span>}</td>
-                              <td>
-                                <div className="row" style={{ gap: "0.35rem", flexWrap: "wrap" }}>
-                                  {project.environments.map(env => serviceEnvBadge(env, s.name))}
-                                </div>
-                              </td>
-                              <td className="dim">{host ? <code>{host}</code> : "—"}</td>
-                              <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                    <ServicesTable project={project} env={activeEnv} />
                   )
                 )}
               </>
@@ -285,6 +275,74 @@ export function ProjectDetail() {
         </div>
       </div>
     </>
+  );
+}
+
+function ServicesTable({ project, env }: { project: ProjectDetailData; env: EnvironmentInfo }) {
+  const nav = useNavigate();
+  const { data: runtime } = useQuery<{ containers: { service: string; state: string }[] }>({
+    queryKey: ["environment-runtime", project.id, env.id],
+    queryFn: () => api.get(`/api/projects/${project.id}/environments/${env.id}/runtime-logs`),
+    refetchInterval: 6000,
+    retry: false,
+  });
+  const liveState = new Map((runtime?.containers ?? []).map(container => [container.service, container.state]));
+
+  return (
+    <table className="data-table">
+      <thead><tr><th>Service</th><th>Exposure</th><th>Status</th><th>Hostname</th><th className="right" /></tr></thead>
+      <tbody>
+        {project.services.map(service => {
+          const host = service.is_public
+            ? predictedHost(project.name, service.subdomain_label, env.slug_suffix, project.domain, project.domain_mode)
+            : null;
+          const persisted = env.instances.find(instance => instance.service_name === service.name)?.status;
+          return (
+            <tr key={service.id} className="clickable" onClick={() => nav(`/projects/${project.id}/services/${service.id}`)}>
+              <td><span className="row" style={{ flexWrap: "nowrap" }}><ServiceIcon kind={service.kind} /><strong>{service.name}</strong>{service.internal_port && <span className="dim"> :{service.internal_port}</span>}</span></td>
+              <td>{service.is_public ? <span className="badge ok">Public</span> : <span className="badge muted plain">Internal</span>}</td>
+              <td><ServiceStatus status={liveState.get(service.name) ?? persisted} /></td>
+              <td className="dim">{host ? <code>{host}</code> : "—"}</td>
+              <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function deploymentState(env: EnvironmentInfo): string {
+  const status = env.deployment?.status;
+  if (status === "running") return envUnreachable(env) ? "Down" : "Running";
+  if (status === "stopped") return "Paused";
+  if (status && (BUSY.includes(status) || status.startsWith("pending"))) return "Deploying";
+  if (status === "failed" || status === "blocked") return "Failed";
+  return "Not deployed";
+}
+
+function DeployEnvironmentControl({ projectId, env, onChange }: {
+  projectId: number; env: EnvironmentInfo; onChange: () => void;
+}) {
+  const toast = useToast();
+  const busy = !!env.deployment && (BUSY.includes(env.deployment.status) || env.deployment.status.startsWith("pending"));
+  const deploy = useMutation({
+    mutationFn: () => api.post(`/api/projects/${projectId}/environments/${env.id}/deploy`),
+    onSuccess: () => { onChange(); toast.show(`Deploying ${env.name}`, "ok"); },
+    onError: e => toast.show(String(e), "fail"),
+  });
+  const state = deploymentState(env);
+  const stateClass = state === "Running" ? "success"
+    : state === "Deploying" ? "info"
+    : state === "Failed" || state === "Down" ? "fail"
+    : "muted";
+  return (
+    <div className="row deploy-tab-action">
+      <span className={`badge ${stateClass}`}>{state}</span>
+      <button className="btn small primary" disabled={busy || deploy.isPending} onClick={() => deploy.mutate()}>
+        {deploy.isPending ? <span className="spinner" /> : <Rocket size={13} />} Deploy
+      </button>
+    </div>
   );
 }
 
@@ -435,62 +493,15 @@ function Deployments({ projectId, envId }: { projectId: number; envId: number })
             <td title={d.error ?? undefined}>{historyBadge(d.status)}</td>
             <td>{d.commit_sha ? <code>{d.commit_sha.slice(0, 7)}</code> : <span className="dim">—</span>}</td>
             <td><span className="badge plain muted" style={{ textTransform: "capitalize" }}>{d.trigger}</span></td>
-            <td className="dim">{d.created_at ? utcDate(d.created_at).toLocaleString() : "—"}</td>
+            <td className="dim" title={d.created_at ? utcDate(d.created_at).toLocaleString() : undefined}>
+              {timeAgo(d.created_at) ?? "—"}
+            </td>
             <td className="actions"><ChevronRight size={15} className="dim" aria-hidden /></td>
           </tr>
         ))}
       </tbody>
     </table>
   );
-}
-
-function WorkflowRuns({ runs, refreshRuns }: {
-  runs: ProjectWorkflowRun[] | undefined;
-  refreshRuns: UseMutationResult<unknown, unknown, void, unknown>;
-}) {
-  return (
-    <>
-      <div className="row" style={{ marginTop: "1.75rem" }}>
-        <h3 style={{ margin: 0 }}>GitHub Actions</h3>
-        <div className="spacer" />
-        <button className="btn small" disabled={refreshRuns.isPending} onClick={() => refreshRuns.mutate()}>
-          <RefreshCw size={12} /> Refresh
-        </button>
-      </div>
-      {runs && runs.length > 0 ? (
-        <table className="data-table" style={{ marginTop: "0.5rem" }}>
-          <thead><tr><th>Workflow</th><th>Branch</th><th>Status</th><th>When</th><th className="right" /></tr></thead>
-          <tbody>
-            {runs.map(run => (
-              <tr key={run.id}>
-                <td>{run.name}</td>
-                <td><span className="badge muted plain">{run.head_branch}</span></td>
-                <td>{runBadge(run.status, run.conclusion)}</td>
-                <td className="dim">{run.created_at ? new Date(run.created_at).toLocaleString() : "—"}</td>
-                <td className="actions"><a className="btn small ghost" href={run.html_url} target="_blank" rel="noopener"><ExternalLink size={12} /></a></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <div className="card" style={{ marginTop: "0.5rem" }}>
-          <span className="dim">No GitHub Actions runs cached. Click <strong>Refresh</strong> to pull them.</span>
-        </div>
-      )}
-    </>
-  );
-}
-
-function runBadge(status: string, conclusion: string | null) {
-  if (status === "completed") {
-    if (conclusion === "success") return <span className="badge ok">Success</span>;
-    if (conclusion === "failure" || conclusion === "timed_out") return <span className="badge fail">Failed</span>;
-    if (conclusion === "cancelled") return <span className="badge warn">Cancelled</span>;
-    return <span className="badge plain">{conclusion || "Completed"}</span>;
-  }
-  if (status === "in_progress") return <span className="badge info">Running</span>;
-  if (status === "queued") return <span className="badge info">Queued</span>;
-  return <span className="badge plain">{status}</span>;
 }
 
 // ─── Settings panel (name + domain) ───────────────────────────────────────────
@@ -500,6 +511,13 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
   const toast = useToast();
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [name, setName] = useState(project.name);
+  const initialTarget = (() => {
+    if (project.deployment_target !== "homebox") return project.deployment_target;
+    if (project.deployment_target_config.cluster_id) return `homebox:cluster:${project.deployment_target_config.cluster_id}`;
+    if (project.deployment_target_config.node_id) return `homebox:node:${project.deployment_target_config.node_id}`;
+    return "homebox";
+  })();
+  const [targetValue, setTargetValue] = useState(initialTarget);
   const [domainId, setDomainId] = useState<string>(project.domain_id ? String(project.domain_id) : "");
   const [requireChecks, setRequireChecks] = useState(project.require_checks);
   // "By environment" reveals the per-env override rows below each toggle;
@@ -531,6 +549,10 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
   );
 
   const { data: domains } = useQuery<DomainItem[]>({ queryKey: ["domains"], queryFn: () => api.get<DomainItem[]>("/api/domains") });
+  const { data: targetOptions } = useQuery<ProjectTargetOptions>({
+    queryKey: ["project-target-options", project.id],
+    queryFn: () => api.get<ProjectTargetOptions>(`/api/projects/${project.id}/target-options`),
+  });
 
   const resolveDomain = (id: string): DomainItem | undefined =>
     id ? (domains ?? []).find(d => d.id === Number(id)) : (domains ?? []).find(d => d.is_primary);
@@ -541,10 +563,21 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
 
   const save = useMutation({
     mutationFn: async () => {
-      await api.patch(`/api/projects/${project.id}`, {
+      const projectPatch: Record<string, unknown> = {
         name, domain_id: domainId ? Number(domainId) : 0, domain_mode: domainMode,
         auto_deploy: deployMode !== "manual", require_checks: requireChecks,
-      });
+      };
+      if (targetValue !== initialTarget) {
+        const [target, locationKind, ...locationParts] = targetValue.split(":");
+        const locationId = locationParts.join(":");
+        projectPatch.deployment_target = target;
+        projectPatch.deployment_target_config = locationKind && locationId
+          ? { [`${locationKind}_id`]: locationId }
+          : {};
+        projectPatch.deployment_target_integration_id =
+          targetOptions?.integrations.find(i => i.provider === target)?.id ?? null;
+      }
+      await api.patch(`/api/projects/${project.id}`, projectPatch);
       for (const env of project.environments) {
         const body: Record<string, unknown> = {};
         const chosen = domainScope === "by_env" ? (envDomains[env.id] ?? "") : "";
@@ -657,6 +690,32 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
               </code>
             </span>
           ))}
+        </span>
+      </div>
+
+      <div className="field" style={{ marginTop: "0.85rem" }}>
+        <label className="lbl">Deployment target</label>
+        <select value={targetValue} onChange={e => setTargetValue(e.target.value)}>
+          <option value="automatic">Automatic</option>
+          <optgroup label="Homebox">
+            {(targetOptions?.options.find(o => o.value === "homebox")?.locations ?? [{ kind: "local", id: null, name: "This Homebox", local: true }]).map(location => {
+              const value = location.kind === "local" || location.id === null
+                ? "homebox"
+                : `homebox:${location.kind}:${location.id}`;
+              return <option key={value} value={value}>{location.name}{location.local && location.kind !== "local" ? ` (this ${location.kind})` : ""}</option>;
+            })}
+          </optgroup>
+          <optgroup label="Cloud">
+            {(targetOptions?.options ?? []).filter(o => ["cloudflare", "aws", "gcp"].includes(o.value)).map(option => {
+              const connected = targetOptions?.integrations.some(i => i.provider === option.value);
+              return <option key={option.value} value={option.value} disabled={!connected}>
+                {option.label}{connected ? "" : " (connect first)"}
+              </option>;
+            })}
+          </optgroup>
+        </select>
+        <span className="hint">
+          Automatic keeps development on Homebox and uses connected, supported cloud targets for production. A service can override this default.
         </span>
       </div>
 

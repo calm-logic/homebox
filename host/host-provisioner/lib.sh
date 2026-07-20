@@ -277,6 +277,69 @@ write_secrets_json() {
     chmod 600 "$file"
 }
 
+# ── Timeout wrapper ──────────────────────────────────────────────────────────
+# GNU `timeout` isn't guaranteed on macOS (no coreutils by default) — run the
+# command without a limit there rather than failing.
+run_with_timeout() {
+    local secs="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$secs" "$@"
+    else
+        "$@"
+    fi
+}
+
+# ── Image prepull (install speed) ────────────────────────────────────────────
+# Infra images the base stack + configure.sh need. Keep in sync with
+# host-provisioner/base-infrastructure/docker-compose.yml and the transient
+# httpd container configure.sh uses for bcrypt hashing.
+homebox_infra_images() {
+    echo "postgres:16-alpine traefik:v3.6 tecnativa/docker-socket-proxy:latest cloudflare/cloudflared:latest httpd:2-alpine"
+}
+
+# The prebuilt admin image (published by .github/workflows/admin-image.yml).
+# Must match the `image:` of the `app` service in host/admin/docker-compose.yml.
+homebox_admin_image() {
+    echo "ghcr.io/calm-logic/homebox-admin:${HOMEBOX_ADMIN_IMAGE_TAG:-latest}"
+}
+
+# Base images the deploy engine reaches for on a project's FIRST deploy
+# (host/admin/app/deploy.py): the static-SPA generated Dockerfile builds with
+# node:20-alpine (default builder) and serves via nginx:alpine; Nixpacks builds
+# start FROM the railwayapp base image. Warmed after the stack is up so the
+# first deploy doesn't start with cold pulls.
+homebox_deploy_base_images() {
+    # pgEdge postgres: pulled by any cluster-enabled project's first deploy
+    # (437 MiB compressed) — warming it here keeps that deploy fast.
+    echo "node:20-alpine nginx:alpine python:3.12-slim ghcr.io/railwayapp/nixpacks:ubuntu ghcr.io/pgedge/pgedge-postgres:16-spock5-standard"
+}
+
+# Pull a list of images in a detached background job so downloads overlap with
+# the rest of setup. Strictly best-effort: every pull is `|| true`, all output
+# goes to a log file, and a failure (offline, unpublished image) can never fail
+# the install. Opt out with HOMEBOX_NO_PREPULL=1.
+# Usage: prepull_images_bg "<label>" image [image...]
+prepull_images_bg() {
+    local label="$1"
+    shift
+    [ "$#" -gt 0 ] || return 0
+    if [ "${HOMEBOX_NO_PREPULL:-0}" = "1" ]; then
+        info "Image prepull disabled (HOMEBOX_NO_PREPULL=1)."
+        return 0
+    fi
+    command -v docker >/dev/null 2>&1 || return 0
+
+    local log="${TMPDIR:-/tmp}/homebox-prepull.log"
+    info "Warming image cache in the background ($label) — log: $log"
+    (
+        for img in "$@"; do
+            docker pull "$img" >>"$log" 2>&1 || true
+        done
+    ) >/dev/null 2>&1 </dev/null &
+    disown 2>/dev/null || true
+}
+
 # ── Boot auto-start (systemd) ─────────────────────────────────────────────────
 # Install + enable a systemd unit that brings the whole Homebox stack up in
 # order on boot. Needed because Docker Desktop / WSL has no docker.service to

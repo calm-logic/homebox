@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.egg-info/
 .eggs/
+.wrangler
 build/
 develop-eggs/
 .installed.cfg

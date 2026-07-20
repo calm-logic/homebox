@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Github } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { Logo } from "../components/Logo";
-import type { LoginProviders } from "../lib/types";
+import type { LoginOptions } from "../lib/types";
 
 function GoogleIcon({ size = 16 }: { size?: number }) {
   return (
@@ -18,7 +18,8 @@ function GoogleIcon({ size = 16 }: { size?: number }) {
 }
 
 export function Login() {
-  const [username, setUsername] = useState("homebox");
+  // Password-only (G3): there's exactly one local admin, so the form drops
+  // the username field — the backend defaults it internally.
   const [password, setPassword] = useState("");
   const [params] = useSearchParams();
   const [error, setError] = useState<string | null>(params.get("error"));
@@ -26,9 +27,9 @@ export function Login() {
   const nav = useNavigate();
   const qc = useQueryClient();
 
-  const { data: providers } = useQuery<LoginProviders>({
-    queryKey: ["login-providers"],
-    queryFn: () => api.get<LoginProviders>("/api/oauth/login-providers"),
+  const { data: options } = useQuery<LoginOptions>({
+    queryKey: ["login-options"],
+    queryFn: () => api.get<LoginOptions>("/api/auth/login-options"),
     staleTime: 30_000,
     retry: false,
   });
@@ -38,12 +39,12 @@ export function Login() {
     setBusy(true);
     setError(null);
     try {
-      await api.post("/api/auth/login", { username, password });
+      await api.post("/api/auth/login", { password });
       qc.invalidateQueries({ queryKey: ["me"] });
       const next = params.get("next") || "/";
       nav(next.startsWith("/") ? next : "/", { replace: true });
     } catch (err) {
-      setError(err instanceof ApiError && err.status === 401 ? "Invalid username or password." : String(err));
+      setError(err instanceof ApiError && err.status === 401 ? "Invalid password." : String(err));
       setBusy(false);
     }
   }
@@ -52,7 +53,12 @@ export function Login() {
     window.location.href = `/api/oauth/login/${provider}/start`;
   }
 
-  const showOAuth = providers && (providers.google || providers.github);
+  // OAuth sign-in only makes sense once an identity exists (post account
+  // link) — before that every provider login would be rejected anyway.
+  const oauthProviders = options?.has_identities ? (options.oauth_providers ?? []) : [];
+  const showOAuth = oauthProviders.includes("github") || oauthProviders.includes("google");
+  // Fresh install (no identity yet): the printed one-time password is the way in.
+  const freshInstall = options ? !options.has_identities : false;
 
   return (
     <div className="login-body">
@@ -67,12 +73,12 @@ export function Login() {
         {showOAuth && (
           <>
             <div className="oauth-buttons">
-              {providers!.google && (
+              {oauthProviders.includes("google") && (
                 <button type="button" className="btn oauth-btn" onClick={() => loginWith("google")}>
                   <GoogleIcon /> Continue with Google
                 </button>
               )}
-              {providers!.github && (
+              {oauthProviders.includes("github") && (
                 <button type="button" className="btn oauth-btn" onClick={() => loginWith("github")}>
                   <Github size={16} /> Continue with GitHub
                 </button>
@@ -84,12 +90,20 @@ export function Login() {
 
         <form onSubmit={submit}>
           <div className="field">
-            <label className="lbl">Username</label>
-            <input value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" required />
-          </div>
-          <div className="field">
             <label className="lbl">Password</label>
-            <input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" required />
+            <input
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              autoComplete="current-password"
+              autoFocus
+              required
+            />
+            {freshInstall && (
+              <p className="dim" style={{ marginTop: "0.4rem", fontSize: "0.85rem" }}>
+                Paste the password printed by the installer.
+              </p>
+            )}
           </div>
           <button type="submit" className="btn primary" style={{ width: "100%", justifyContent: "center", padding: "0.7rem" }} disabled={busy}>
             {busy ? <span className="spinner" /> : "Sign in"}

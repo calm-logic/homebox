@@ -1,10 +1,12 @@
 """Integrations API — connections to external systems (GitHub / GitLab /
-Cloudflare). Lists every Integration row, and handles GitHub connect-via-PAT,
+Cloudflare / AWS / GCP). Lists every Integration row, and handles GitHub
+connect-via-PAT, AWS connect-via-access-keys, GCP connect-via-service-account,
 repo sync, and disconnect. GitHub OAuth connect lives in routes/oauth.py;
 Cloudflare connect/disconnect lives in routes/tunnel.py — both write Integration
 rows that show up here.
 """
 
+import json
 from datetime import datetime
 
 import httpx
@@ -19,7 +21,9 @@ from ..crypto import encrypt
 from ..db import get_session
 from ..github import get_org
 from ..integrations_lib import sync_github_projects
-from ..models import Integration, Project
+from ..models import Integration, Project, ServiceTarget
+from ..targets.awslib import AwsClient, AwsError
+from ..targets.gcplib import GcpClient, GcpError
 from ..webhooks_lib import sync_project_webhook
 
 router = APIRouter(prefix="/api/integrations")
@@ -33,7 +37,9 @@ def _serialize(i: Integration, project_count: int = 0) -> dict:
         "account_id": i.account_id,
         "name": i.name,
         "status": i.status,
-        "source": "oauth" if (i.secret_encrypted or "").startswith("oauth:") else "pat"
+        "source": "keys" if i.provider == "aws"
+        else "service-account" if i.provider == "gcp"
+        else "oauth" if (i.secret_encrypted or "").startswith("oauth:") else "pat"
         if i.provider != "cloudflare" else "token",
         # Account-scoped github rows cover the identity's own repos + granted
         # orgs; legacy rows are one org each ("org").
@@ -102,6 +108,95 @@ async def connect_github_pat(
     return _serialize(row)
 
 
+class AwsConnectBody(BaseModel):
+    access_key_id: str
+    secret_access_key: str
+    region: str = "us-east-1"
+
+
+@router.post("/aws/connect")
+async def connect_aws(
+    body: AwsConnectBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    key_id = body.access_key_id.strip()
+    secret = body.secret_access_key.strip()
+    region = (body.region or "").strip() or "us-east-1"
+    if not key_id or not secret:
+        raise HTTPException(400, "Access key ID and secret access key are required")
+
+    try:
+        ident = await AwsClient(key_id, secret, region).sts_get_caller_identity()
+    except AwsError as e:
+        raise HTTPException(400, f"AWS rejected the credentials: {e.message or e}")
+    account = ident.get("account")
+    if not account:
+        raise HTTPException(400, "AWS did not return an account id for these credentials")
+
+    existing = (await session.execute(
+        select(Integration).where(Integration.provider == "aws", Integration.account_login == account)
+    )).scalar_one_or_none()
+    row = existing or Integration(provider="aws", account_login=account)
+    row.secret_encrypted = encrypt(f"{key_id}:{secret}")
+    row.account_id = account
+    row.name = f"AWS {account}"
+    row.config = {"region": region, "arn": ident.get("arn")}
+    row.status = "connected"
+    row.updated_at = datetime.utcnow()
+    if not existing:
+        session.add(row)
+    await session.commit()
+    return _serialize(row)
+
+
+class GcpConnectBody(BaseModel):
+    service_account_json: str
+    region: str = "us-central1"
+
+
+@router.post("/gcp/connect")
+async def connect_gcp(
+    body: GcpConnectBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    raw = body.service_account_json.strip()
+    region = (body.region or "").strip() or "us-central1"
+    if not raw:
+        raise HTTPException(400, "Service-account key JSON is required")
+    try:
+        sa = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "Service-account key is not valid JSON")
+    if not isinstance(sa, dict):
+        raise HTTPException(400, "Service-account key must be a JSON object")
+    missing = [k for k in ("client_email", "private_key", "project_id") if not sa.get(k)]
+    if missing:
+        raise HTTPException(400, f"Service-account key is missing {', '.join(missing)}")
+
+    try:
+        project = await GcpClient(sa).get_project()
+    except GcpError as e:
+        raise HTTPException(400, f"GCP rejected the service account: {e}")
+
+    project_id = sa["project_id"]
+    existing = (await session.execute(
+        select(Integration).where(Integration.provider == "gcp", Integration.account_login == project_id)
+    )).scalar_one_or_none()
+    row = existing or Integration(provider="gcp", account_login=project_id)
+    row.secret_encrypted = encrypt(raw)
+    row.account_id = str(project.get("projectNumber") or "") or None
+    row.name = f"GCP {project_id}"
+    row.config = {"region": region, "client_email": sa["client_email"]}
+    row.status = "connected"
+    row.updated_at = datetime.utcnow()
+    if not existing:
+        session.add(row)
+    await session.commit()
+    return _serialize(row)
+
+
 @router.post("/{integration_id}/sync")
 async def sync_integration(
     integration_id: int,
@@ -130,6 +225,17 @@ async def disconnect_integration(
     integ = await session.get(Integration, integration_id)
     if not integ:
         raise HTTPException(404, "Integration not found")
+
+    # Cloud accounts can't be disconnected while services still deploy through
+    # them — the credentials are needed to tear the cloud resources down.
+    if integ.provider in ("aws", "gcp", "cloudflare"):
+        referenced = (await session.execute(
+            select(ServiceTarget.id).where(ServiceTarget.integration_id == integ.id).limit(1)
+        )).first()
+        if referenced:
+            raise HTTPException(
+                409, "targets still deployed through this account — retarget them to Homebox first"
+            )
 
     # Tear down this integration's managed project stacks (keep volumes) and
     # remove their push webhooks while the token is still usable.
