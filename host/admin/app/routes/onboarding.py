@@ -112,6 +112,11 @@ async def onboarding_state(
                 "done": token_set,
                 "account_name": state.get("account_name"),
                 "synced": await _cloudflare_synced(session, token_set),
+                # Optional deploy-target capabilities the stored token carries
+                # (probed at connect time). Let the wizard show a "Cloudflare
+                # Pages / Workers ready" checklist without re-hitting the CF API.
+                "pages_ok": bool(state.get("pages_ok")) if token_set else False,
+                "workers_ok": bool(state.get("workers_ok")) if token_set else False,
             },
             "tunnel": {"done": tunnel_set, "tunnel_name": state.get("tunnel_name")},
             "admin_domain": {"done": bool(admin_domain), "hostname": admin_domain},

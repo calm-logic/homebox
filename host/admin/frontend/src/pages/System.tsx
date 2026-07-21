@@ -961,6 +961,7 @@ export function System() {
       topology={topology}
       thisNodeId={topology?.this_node_id ?? status?.node_id}
       thisClusterId={status?.cluster_id}
+      linked={linked}
       clustered={!!status?.active}
       clusterLocked={clusterLocked}
       integrations={integrations}

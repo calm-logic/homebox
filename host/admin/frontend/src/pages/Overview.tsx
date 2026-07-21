@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Activity, Boxes, ChevronRight, Globe, Plug, Rocket,
+  Activity, Boxes, ChevronRight, Globe, Plug,
 } from "lucide-react";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Line, LineChart,
@@ -66,16 +66,14 @@ export function Overview() {
       <h1>Overview</h1>
 
       <div className="metric-grid">
-        <Metric label="Projects" value={`${data.managed_count}/${data.project_count}`}
-                sub="managed" icon={<Boxes size={18} />} link="/projects" />
+        <Metric label="Projects" value={data.managed_count}
+                icon={<Boxes size={18} />} link="/projects" />
         <Metric label="Integrations" value={data.integration_count}
                 icon={<Plug size={18} />} link="/integrations" />
         <Metric label="Domains" value={data.domain_count}
                 icon={<Globe size={18} />} link="/domains" />
-        <Metric label="Running" value={activity?.totals.running_envs ?? "—"}
-                sub="environments" icon={<Activity size={18} />} link="/projects" />
-        <Metric label="Deploys" value={activity?.totals.deploys_7d ?? "—"}
-                sub="last 7 days" icon={<Rocket size={18} />} link="/projects" />
+        <Metric label="Environments" value={activity?.totals.running_envs ?? "—"}
+                icon={<Activity size={18} />} link="/projects" />
       </div>
 
       {!onboardingDone && (

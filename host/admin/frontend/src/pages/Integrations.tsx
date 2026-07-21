@@ -271,8 +271,18 @@ function CloudflareConnect({ onDone }: { onDone: () => void }) {
     mutationFn: (body: { token: string; account_id?: string }) =>
       api.post<SetTokenResponse>("/api/tunnel/token", body),
     onSuccess: (resp) => {
-      if (resp.account_id) finish("Cloudflare connected");
-      else { setAccounts(resp.accounts); toast.show("Pick which Cloudflare account to use", "ok"); }
+      if (resp.account_id) {
+        // Surface which OPTIONAL deploy-target scopes the token carries (the
+        // modal closes on success, so fold it into the confirmation toast). A
+        // missing scope is a hint, not an error — the tunnel/DNS core works.
+        const missing = [
+          resp.pages_ok === false && "Cloudflare Pages",
+          resp.workers_ok === false && "Workers",
+        ].filter(Boolean);
+        finish(missing.length
+          ? `Cloudflare connected — re-scope for ${missing.join(" + ")} deploy targets`
+          : "Cloudflare connected");
+      } else { setAccounts(resp.accounts); toast.show("Pick which Cloudflare account to use", "ok"); }
     },
     onError: (e) => toast.show(String(e), "fail"),
   });
@@ -284,8 +294,10 @@ function CloudflareConnect({ onDone }: { onDone: () => void }) {
     else if (token.trim()) submit.mutate({ token: token.trim() });
   }
 
+  // Byte-identical to the copies in Onboarding.tsx (decoded 6-scope list is
+  // documented there) and IntegrationDetail.tsx — keep all three in sync.
   const tokenUrl =
-    "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22argo_tunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22edit%22%7D%5D&name=Homebox+Admin&accountId=*&zoneId=all";
+    "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22argo_tunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%5D&name=Homebox+Admin&accountId=*&zoneId=all";
 
   return (
     <form id="add-cloudflare-form" onSubmit={save}>
@@ -306,7 +318,8 @@ function CloudflareConnect({ onDone }: { onDone: () => void }) {
           <span className="hint">
             {submit.isPending
               ? <span className="row"><span className="spinner" /> Verifying scopes with Cloudflare…</span>
-              : <>Scopes: <code>Cloudflare Tunnel:Edit</code>, <code>DNS:Edit</code>, <code>Zone:Edit</code>, <code>Account Settings:Read</code>. Zone Resources: <strong>All zones</strong>.{" "}
+              : <>Scopes: <code>Cloudflare Tunnel:Edit</code>, <code>DNS:Edit</code>, <code>Zone:Edit</code>, <code>Account Settings:Read</code>. Zone Resources: <strong>All zones</strong>.
+                {" "}Optional (for Cloudflare deploy targets): <code>Cloudflare Pages:Edit</code>, <code>Workers Scripts:Edit</code>.{" "}
                 <a href={tokenUrl} target="_blank" rel="noopener">Generate one <ExternalLink size={11} /></a></>}
           </span>
         </div>

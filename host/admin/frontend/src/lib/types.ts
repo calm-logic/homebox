@@ -308,6 +308,10 @@ export interface SetTokenResponse {
   accounts: CloudflareAccount[];
   account_id: string | null;
   account_name: string | null;
+  /** Optional deploy-target scopes the token carries, probed at connect time.
+   *  null until an account is resolved (multi-account tokens awaiting a pick). */
+  pages_ok: boolean | null;
+  workers_ok: boolean | null;
 }
 
 export interface LoginProviders {
@@ -522,7 +526,13 @@ export interface AccountStatus {
 export interface OnboardingState {
   complete: boolean;
   steps: {
-    cloudflare_token: { done: boolean; account_name: string | null };
+    cloudflare_token: {
+      done: boolean;
+      account_name: string | null;
+      /** Optional Cloudflare deploy-target scopes the stored token carries. */
+      pages_ok?: boolean;
+      workers_ok?: boolean;
+    };
     tunnel: { done: boolean; tunnel_name: string | null };
     admin_domain: { done: boolean; hostname: string | null };
   };

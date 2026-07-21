@@ -1215,6 +1215,19 @@ function EnvVarsEditor({ svc, projectId, rows: stagedRows, setRows: setStagedRow
 }) {
   const qc = useQueryClient();
   const toast = useToast();
+  // Auto-wired values are masked as dots; click one to reveal + copy it, click
+  // again or anywhere outside the panel to hide it.
+  const [revealed, setRevealed] = useState<number | null>(null);
+  const [copied, setCopied] = useState<number | null>(null);
+  const autoRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (revealed == null) return;
+    const onDown = (e: MouseEvent) => {
+      if (autoRef.current && !autoRef.current.contains(e.target as Node)) setRevealed(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [revealed]);
   const auto = svc.env_vars.filter(v => v.source === "auto");
   const serverRows: EnvRow[] = svc.env_vars
     .filter(v => v.source === "user")
@@ -1276,31 +1289,63 @@ function EnvVarsEditor({ svc, projectId, rows: stagedRows, setRows: setStagedRow
       {auto.length > 0 && (
         <>
           <div className="lbl" style={{ marginTop: "0.75rem" }}>Auto-wired</div>
-          <div className="card" style={{ marginTop: "0.3rem" }}>
-            {auto.map(v => (
-              <div key={v.id} className="row" style={{ justifyContent: "space-between", gap: "0.5rem" }}>
-                <code>{v.key}</code>
-                <span className="dim" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{v.value}</span>
-              </div>
-            ))}
+          <div className="card" ref={autoRef} style={{ marginTop: "0.3rem" }}>
+            {auto.map(v => {
+              const shown = revealed === v.id;
+              return (
+                <div key={v.id} className="row" style={{ justifyContent: "space-between", gap: "0.5rem", flexWrap: "nowrap" }}>
+                  <code style={{ flexShrink: 0 }}>{v.key}</code>
+                  <div className="row" style={{ gap: "0.35rem", flex: 1, minWidth: 0, justifyContent: "flex-end" }}>
+                    <span
+                      className="dim"
+                      onClick={() => setRevealed(shown ? null : v.id)}
+                      title={shown ? "Click to hide" : "Click to reveal"}
+                      style={{
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                        cursor: "pointer", minWidth: 0,
+                        fontFamily: shown ? "ui-monospace, SFMono-Regular, Menlo, monospace" : undefined,
+                        letterSpacing: shown ? undefined : "0.12em",
+                      }}
+                    >
+                      {shown ? v.value : "••••••••••••"}
+                    </span>
+                    {shown && (
+                      <button
+                        className="btn small ghost"
+                        style={{ flexShrink: 0 }}
+                        title="Copy value"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(v.value);
+                          setCopied(v.id);
+                          window.setTimeout(() => setCopied(c => (c === v.id ? null : c)), 1200);
+                        }}
+                      >
+                        {copied === v.id ? <Check size={13} /> : <Copy size={13} />}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
       <div className="lbl" style={{ marginTop: "0.75rem" }}>Overrides</div>
       <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem", marginTop: "0.3rem" }}>
         {rows.map((r, i) => (
-          <div key={i} className="row" style={{ gap: "0.4rem" }}>
-            <input placeholder="KEY" value={r.key} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} style={{ flex: "0 0 35%" }} />
+          <div key={i} className="row" style={{ gap: "0.4rem", flexWrap: "nowrap" }}>
+            <input placeholder="KEY" value={r.key} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} style={{ flex: "0 0 30%", minWidth: 0 }} />
             <input
               placeholder={r.is_secret && r.value === SECRET_MASK ? "•••••• (unchanged; type to replace)" : "value"}
               value={r.value === SECRET_MASK ? "" : r.value}
               type={r.is_secret ? "password" : "text"}
               onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, value: e.target.value } : x))}
+              style={{ flex: "1 1 auto", minWidth: 0 }}
             />
-            <label className="row" style={{ gap: "0.3rem", cursor: "pointer" }} title="Secret">
+            <label className="row" style={{ gap: "0.3rem", cursor: "pointer", flexShrink: 0 }} title="Secret">
               <input type="checkbox" checked={r.is_secret} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, is_secret: e.target.checked } : x))} /><Lock size={13} />
             </label>
-            <button className="btn small ghost" onClick={() => setRows(rows.filter((_, j) => j !== i))}>✕</button>
+            <button className="btn small ghost" style={{ flexShrink: 0 }} onClick={() => setRows(rows.filter((_, j) => j !== i))}>✕</button>
           </div>
         ))}
         <div><button className="btn small" onClick={() => setRows([...rows, { key: "", value: "", is_secret: false }])}>+ Add variable</button></div>

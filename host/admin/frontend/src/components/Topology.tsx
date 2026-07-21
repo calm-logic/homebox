@@ -234,12 +234,15 @@ function DropMenu({
 
 export function Topology({
   topology, thisNodeId, thisClusterId, clustered, clusterLocked, integrations, actions = {}, busy,
-  thisClusterExtras, thisNodeHealth,
+  thisClusterExtras, thisNodeHealth, linked,
 }: {
   topology?: AccountTopology;
   /** This node's id — omit (null) on the portal, which has no local node. */
   thisNodeId?: string | null;
   thisClusterId?: string | null;
+  /** Whether a homebox.sh account is linked. Linked → the view is a list of
+   *  clusters ("Your clusters"); unlinked keeps the "Your homebox(es)" wording. */
+  linked?: boolean;
   /** Whether THIS node is currently in a cluster (gates join/invite/create). */
   clustered?: boolean;
   clusterLocked?: boolean;
@@ -463,7 +466,7 @@ export function Topology({
     <div className="card topology">
       <div className="row" style={{ justifyContent: "space-between" }}>
         <h3 style={{ margin: 0, display: "inline-flex", alignItems: "center", gap: "0.4rem" }}>
-          <Boxes size={14} /> Your homebox{totalNodes === 1 ? "" : "es"}
+          <Boxes size={14} /> {linked ? "Your clusters" : `Your homebox${totalNodes === 1 ? "" : "es"}`}
         </h3>
         {topology.account?.plan && <span className="badge plain">{topology.account.plan}</span>}
       </div>
@@ -595,19 +598,23 @@ export function Topology({
         );
       })}
 
-      {standalone.length > 0 && (
-        <div className="cluster-block">
+      {/* Standalone homeboxes render as their own (single-node) clusters — a
+          grey-bordered block laid out like a real cluster, named + ID'd after
+          the node. They register as real clusters on the control plane when a
+          node is first linked or split off. */}
+      {standalone.map(n => (
+        <div key={n.node_id} className="cluster-block solo">
           <div className="cluster-block-head">
             <div className="row" style={{ gap: "0.5rem", minWidth: 0 }}>
-              <strong>Standalone homeboxes</strong>
-              <span className="badge plain">{standalone.length} node{standalone.length === 1 ? "" : "s"}</span>
+              <strong>{n.name || "homebox"}</strong>
+              <span className="dim">{n.node_id}</span>
             </div>
           </div>
           <div className="cluster-block-nodes">
-            {standalone.map(n => nodeRow(null, n))}
+            {nodeRow(null, n)}
           </div>
         </div>
-      )}
+      ))}
 
       {/* Provisions that can't be pinned to a cluster block (no cluster in view). */}
       {activeProvisions.length > 0 && !clusters.some(cl => local && cl.cluster_id === thisClusterId) && (

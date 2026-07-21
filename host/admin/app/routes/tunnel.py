@@ -552,14 +552,28 @@ async def _validate_and_store_token(
         if missing:
             raise HTTPException(400, _missing_scope_hint(missing))
 
-        # Pages scope is OPTIONAL (only the Pages deployment target needs it)
-        # — never block the token on it, just record the capability so the
-        # targets UI can hint "re-scope your token" up front.
+        # Pages + Workers scopes are OPTIONAL (only the Cloudflare deploy
+        # targets need them) — never block the token on them, just record the
+        # capability so the targets UI can hint "re-scope your token" up front.
+        # Both probes are cheap authenticated GETs; a 401/403 means the scope is
+        # absent, anything else (incl. a transient error) leaves the capability
+        # optimistically true so we don't nag over a blip.
         try:
             await cf.list_pages_projects(token, state["account_id"])
             state["pages_ok"] = True
         except cf.CloudflareError as e:
             state["pages_ok"] = not _is_auth(e)
+
+        # Workers Scripts: Edit powers the Cloudflare Containers/Workers target
+        # (`wrangler deploy`). CAVEAT: Containers also push an OCI image to the
+        # account's managed Workers registry, which this scope may not fully
+        # cover — workers_ok green means "can manage Worker scripts", not a full
+        # guarantee an image push succeeds. See cf.list_workers_scripts.
+        try:
+            await cf.list_workers_scripts(token, state["account_id"])
+            state["workers_ok"] = True
+        except cf.CloudflareError as e:
+            state["workers_ok"] = not _is_auth(e)
 
     await cf.save_state(session, state)
 
@@ -568,6 +582,11 @@ async def _validate_and_store_token(
         "accounts": [{"id": a.get("id"), "name": a.get("name")} for a in accounts],
         "account_id": state.get("account_id"),
         "account_name": state.get("account_name"),
+        # Optional deploy-target capabilities the token carries, so the UI can
+        # show a checklist / re-scope hint. Only meaningful once an account is
+        # resolved (multi-account tokens that still need a pick return None).
+        "pages_ok": state.get("pages_ok") if state.get("account_id") else None,
+        "workers_ok": state.get("workers_ok") if state.get("account_id") else None,
     }
 
 

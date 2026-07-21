@@ -59,11 +59,23 @@ interface TunnelConflict {
   message: string;
 }
 
+// CANONICAL Cloudflare "create token" pre-fill. This exact string is duplicated
+// (byte-identical) in Integrations.tsx and IntegrationDetail.tsx — keep all three
+// in sync. The permissionGroupKeys query param is a URL-encoded JSON array of
+// {key,type} pairs. Decoded, it is these SIX permission groups:
+//   {"key":"argo_tunnel","type":"edit"}       Account · Cloudflare Tunnel · Edit  (onboarding: tunnels)
+//   {"key":"account_settings","type":"read"}  Account · Account Settings  · Read  (list accounts)
+//   {"key":"dns","type":"edit"}               Zone    · DNS               · Edit  (onboarding: DNS)
+//   {"key":"zone","type":"edit"}              Zone    · Zone              · Edit  (CREATE zones for new domains)
+//   {"key":"page","type":"edit"}              Account · Cloudflare Pages   · Edit  (OPTIONAL: Pages deploy target)
+//   {"key":"workers_scripts","type":"edit"}   Account · Workers Scripts    · Edit  (OPTIONAL: Containers/Workers target)
+// Tunnel group key is 'argo_tunnel' (Cloudflare's legacy name for the Cloudflare
+// Tunnel permission group); 'cfd_tunnel' is silently dropped. Cloudflare drops
+// any key it doesn't recognize WITHOUT warning, so the last two (deploy-target)
+// scopes are best-effort — the onboarding probes (pages_ok / workers_ok) are the
+// safety net that reports which of them the resulting token actually carries.
 const CF_TOKEN_TEMPLATE_URL =
-  // Same scope template the Tunnel page uses — keep them in sync.
-  // Tunnel group key is 'argo_tunnel' (Cloudflare's legacy name for the
-  // Cloudflare Tunnel permission group); 'cfd_tunnel' was silently dropped.
-  "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22argo_tunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22edit%22%7D%5D&name=Homebox+Admin&accountId=*&zoneId=all";
+  "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22argo_tunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%5D&name=Homebox+Admin&accountId=*&zoneId=all";
 
 export function Onboarding() {
   const qc = useQueryClient();
@@ -264,17 +276,28 @@ function Step1Connect() {
   const [accounts, setAccounts] = useState<CloudflareAccount[]>([]);
   const [accountId, setAccountId] = useState("");
 
-  const onConnected = () => {
+  const onConnected = (resp: SetTokenResponse) => {
     qc.invalidateQueries({ queryKey: ["onboarding"] });
     qc.invalidateQueries({ queryKey: ["tunnel"] });
-    toast.show("Cloudflare connected", "ok");
+    // Note which OPTIONAL Cloudflare deploy-target scopes the token turned out
+    // to carry — a missing one is a hint (re-scope later), never a failure.
+    const missing = [
+      resp.pages_ok === false && "Cloudflare Pages",
+      resp.workers_ok === false && "Workers",
+    ].filter(Boolean);
+    toast.show(
+      missing.length
+        ? `Cloudflare connected — re-scope for ${missing.join(" + ")} deploy targets`
+        : "Cloudflare connected",
+      "ok",
+    );
   };
 
   const submit = useMutation({
     mutationFn: (body: { token: string; account_id?: string }) =>
       api.post<SetTokenResponse>("/api/tunnel/token", body),
     onSuccess: (resp) => {
-      if (resp.account_id) onConnected();
+      if (resp.account_id) onConnected(resp);
       else { setAccounts(resp.accounts); toast.show("Pick which Cloudflare account to use", "ok"); }
     },
     onError: (e) => toast.show(String(e), "fail"),
@@ -331,6 +354,12 @@ function Step1Connect() {
           <li><code>Zone · Zone · Edit</code> <span className="dim">(Edit, not Read, so Homebox can create zones for new domains)</span></li>
           <li><code>Account · Account Settings · Read</code></li>
         </ul>
+        <div className="lbl" style={{ marginTop: "0.6rem" }}>Optional — only for deploying services to Cloudflare</div>
+        <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.1rem", display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "0.85rem" }}>
+          <li><code>Account · Cloudflare Pages · Edit</code> <span className="dim">(deploy to Cloudflare Pages)</span></li>
+          <li><code>Account · Workers Scripts · Edit</code> <span className="dim">(deploy to Cloudflare Containers/Workers)</span></li>
+        </ul>
+        <span className="hint">The two optional scopes are pre-filled in the link. Skip them for onboarding only; add them to deploy services to Cloudflare later. Homebox reports which the token carries after you connect.</span>
         <span className="hint">The link preselects <strong>All accounts</strong> / <strong>All zones</strong>. Leave those as-is so one token manages every domain in the account.</span>
       </div>
       <div className="field">

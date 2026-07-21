@@ -10,8 +10,11 @@ import type { CloudflareAccount, IntegrationItem, SetTokenResponse, TunnelStatus
 
 const CF_TOKEN_TEMPLATE_URL =
   // Pre-fills Cloudflare's "Create Custom Token" with the scopes Homebox needs.
-  // Zone:Edit (not just Read) so Homebox can CREATE zones for brand-new domains.
-  "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22argo_tunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22edit%22%7D%5D&name=Homebox+Admin&accountId=*&zoneId=all";
+  // Zone:Edit (not just Read) so Homebox can CREATE zones for brand-new domains;
+  // the last two (page / workers_scripts) are OPTIONAL deploy-target scopes.
+  // Byte-identical to the copies in Onboarding.tsx (see the decoded 6-scope list
+  // documented there) and Integrations.tsx — keep all three in sync.
+  "https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22argo_tunnel%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22account_settings%22%2C%22type%22%3A%22read%22%7D%2C%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22zone%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22page%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%5D&name=Homebox+Admin&accountId=*&zoneId=all";
 
 /** Full details + actions for one integration (linked from the card list). */
 export function IntegrationDetail() {

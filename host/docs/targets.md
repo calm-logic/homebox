@@ -159,6 +159,17 @@ the instance URL falls back to run.app and reconcile retries. Requires
   `cf_containers` target (`npx wrangler@4`); rebuild nodes to pick it up.
 - Cloudflare token scopes: Pages: Edit, Workers Scripts: Edit, Access: Apps
   and Policies: Edit, Access: Service Tokens: Edit (see e2e plan).
+- Onboarding's pre-filled "create token" link (Onboarding/Integrations/
+  IntegrationDetail.tsx, byte-identical) now requests Pages: Edit + Workers
+  Scripts: Edit as OPTIONAL groups alongside the tunnel/DNS/zone scopes.
+  `_validate_and_store_token` probes them non-blocking (cf.list_pages_projects /
+  cf.list_workers_scripts) and records `pages_ok` / `workers_ok`; the token-
+  connect response + onboarding /state surface both so the UI can hint a re-scope
+  without blocking. CAVEAT: Cloudflare Containers also push an OCI image to the
+  account's managed Workers registry during `wrangler deploy`, which Workers
+  Scripts: Edit may not fully cover — `workers_ok` means "can manage Worker
+  scripts", not a guaranteed image push. (Access: Apps / Service Tokens are the
+  AWS/GCP serverless→Homebox-DB path, deliberately NOT in the pre-fill link.)
 - Deterministic names everywhere: `homebox-<project>-<env>-<service>`
   (idempotent create-or-update = coordinator-handover safe).
 - Tests: `tests/test_targetslib`, `test_target_deploy_engine`,

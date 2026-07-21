@@ -949,6 +949,9 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
   overflow: hidden;
 }
 .cluster-block.current { border-color: var(--accent-2); }
+/* Standalone homeboxes shown as their own single-node clusters — a distinct
+   grey border (vs the green of the active cluster). */
+.cluster-block.solo { border-color: var(--border-strong); }
 .cluster-block-head {
   display: flex; align-items: center; justify-content: space-between;
   gap: 0.75rem; flex-wrap: wrap;

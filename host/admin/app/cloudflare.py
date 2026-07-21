@@ -14,6 +14,13 @@ Token scopes the UI suggests:
   Account · Cloudflare Pages · Edit   (only for the Pages deployment target;
                                        older tokens keep working — Pages
                                        deploys fail with a re-scope hint)
+  Account · Workers Scripts · Edit    (only for the Cloudflare Containers/Workers
+                                       deployment target; optional — older tokens
+                                       keep working, deploys fail with a re-scope
+                                       hint. NB: Containers also push an image to
+                                       the account's managed registry, which this
+                                       scope may not fully cover — see
+                                       list_workers_scripts.)
 """
 
 import base64
@@ -442,6 +449,26 @@ async def list_pages_projects(token: str, account_id: str) -> list[dict[str, Any
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.get(
             f"{API}/accounts/{account_id}/pages/projects", headers=_headers(token)
+        )
+    return _unwrap(r) or []
+
+
+async def list_workers_scripts(token: str, account_id: str) -> list[dict[str, Any]]:
+    """Workers scripts in the account — a cheap GET that doubles as the 'does
+    this token carry Workers Scripts: Edit' capability probe (403/401 without
+    it). Workers Scripts: Edit implicitly grants read, so this list succeeds for
+    any token that can also deploy. Used by the onboarding probe to record
+    `workers_ok` for the Cloudflare Containers/Workers deploy target.
+
+    CAVEAT: Cloudflare Containers additionally push an OCI image to the account's
+    managed Workers registry during `wrangler deploy`. That registry push may
+    require permissions beyond Workers Scripts: Edit (it is not covered by this
+    probe), so a green `workers_ok` means "can manage Worker scripts", not a full
+    guarantee that a container image push will succeed. We deliberately do not
+    try to probe or solve the registry-push scope here."""
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.get(
+            f"{API}/accounts/{account_id}/workers/scripts", headers=_headers(token)
         )
     return _unwrap(r) or []
 
