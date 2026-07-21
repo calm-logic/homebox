@@ -60,7 +60,7 @@ export function RuntimeLogsPanel({ projectId, env }: { projectId: number; env: E
         <span className="spinner" />
       ) : data.containers.length === 0 ? (
         <div className="card" style={{ marginTop: "0.75rem" }}>
-          <span className="dim">No containers for this environment — deploy it first.</span>
+          <span className="dim">No containers for this environment. Deploy it first.</span>
         </div>
       ) : (
         data.containers.map(c => (

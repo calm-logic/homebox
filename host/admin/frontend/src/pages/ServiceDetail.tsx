@@ -284,7 +284,7 @@ function TargetSelector({ svc, env, staged, setStaged, onStatus }: {
       // Staged state resets to server truth; the invalidated query brings it.
       setStaged(undefined);
       qc.invalidateQueries({ queryKey: ["service-targets", svc.id] });
-      toast.show("Target updated — redeploying affected environments", "ok");
+      toast.show("Target updated, redeploying affected environments", "ok");
     },
     onError: (e) => toast.show(String(e), "fail"),
   });
@@ -335,7 +335,7 @@ function TargetSelector({ svc, env, staged, setStaged, onStatus }: {
           <span className="hint">{TARGET_HINTS[displayTarget]}</span>
           {dirty && (
             <span className="hint">
-              Not applied yet — Save applies the new target and redeploys this environment.
+              Not applied yet. Save applies the new target and redeploys this environment.
             </span>
           )}
           {(!effective || effective.inherited) && (
@@ -346,7 +346,7 @@ function TargetSelector({ svc, env, staged, setStaged, onStatus }: {
           )}
           {isForeign && (
             <span className="hint">
-              This service runs on <b>{foreignName}</b> — status shown here is
+              This service runs on <b>{foreignName}</b>; status shown here is
               synced from the owning cluster and read-only.
             </span>
           )}
@@ -389,7 +389,7 @@ function Monitoring({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }) {
       </div>
       {points.length === 0 ? (
         <div className="card" style={{ marginTop: "0.5rem" }}>
-          <span className="dim">No samples yet — metrics appear within a minute of a running deploy.</span>
+          <span className="dim">No samples yet. Metrics appear within a minute of a running deploy.</span>
         </div>
       ) : (
         <div style={{ display: "grid", gap: "1rem", marginTop: "0.5rem" }}>
@@ -676,7 +676,7 @@ function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: Environm
       )}
       {!canEdit && data && data.rows.length > 0 && (
         <div className="dim" style={{ marginTop: "0.35rem", fontSize: 12 }}>
-          This table has no primary key — rows are read-only here.
+          This table has no primary key, so rows are read-only here.
         </div>
       )}
 
@@ -1170,7 +1170,7 @@ function RequestMonitor({ pid, svc, env }: { pid: number; svc: ServiceItem; env:
     <>
       <h3>Requests <span className="dim" style={{ fontWeight: 400 }}>(live, via Traefik access log)</span></h3>
       {data.requests.length === 0 ? (
-        <div className="card"><span className="dim">No requests recorded yet — traffic appears here within seconds.</span></div>
+        <div className="card"><span className="dim">No requests recorded yet. Traffic appears here within seconds.</span></div>
       ) : (
         <div style={{ maxHeight: "50vh", overflow: "auto" }}>
           <table className="data-table" style={{ margin: 0 }}>
@@ -1252,7 +1252,7 @@ function EnvVarsEditor({ svc, projectId, rows: stagedRows, setRows: setStagedRow
       const envs = res?.redeployed ?? [];
       toast.show(
         envs.length
-          ? `Env vars saved — redeploying ${envs.map(e => e.environment).join(", ")}`
+          ? `Env vars saved, redeploying ${envs.map(e => e.environment).join(", ")}`
           : "Env vars saved",
         "ok",
       );
@@ -1292,7 +1292,7 @@ function EnvVarsEditor({ svc, projectId, rows: stagedRows, setRows: setStagedRow
           <div key={i} className="row" style={{ gap: "0.4rem" }}>
             <input placeholder="KEY" value={r.key} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, key: e.target.value } : x))} style={{ flex: "0 0 35%" }} />
             <input
-              placeholder={r.is_secret && r.value === SECRET_MASK ? "•••••• (unchanged — type to replace)" : "value"}
+              placeholder={r.is_secret && r.value === SECRET_MASK ? "•••••• (unchanged; type to replace)" : "value"}
               value={r.value === SECRET_MASK ? "" : r.value}
               type={r.is_secret ? "password" : "text"}
               onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, value: e.target.value } : x))}

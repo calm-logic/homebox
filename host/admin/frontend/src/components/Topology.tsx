@@ -353,7 +353,7 @@ export function Topology({
           onClick: () => actions.setServing!(n.node_id, !serving),
           disabled: busy || hasPending || isLastServing,
           title: isLastServing
-            ? "Can't disable the last serving node — enable another node first so app traffic has somewhere to go"
+            ? "Can't disable the last serving node. Enable another node first so app traffic has somewhere to go"
             : hasPending
               ? "A directive for this node is still pending"
               : serving ? "Drain app traffic from this node" : "Resume app traffic on this node",
@@ -444,7 +444,7 @@ export function Topology({
         {failed ? <span className="badge fail">failed</span> : <span className="spinner" />}
         <span>
           {p.provider === "aws" ? "AWS" : p.provider === "gcp" ? "GCP" : p.provider} node
-          {" "}<strong>{p.name}</strong> in {p.region} — {failed ? (p.error || "provisioning failed") : p.status}
+          {" "}<strong>{p.name}</strong> in {p.region}: {failed ? (p.error || "provisioning failed") : p.status}
           {p.created_at ? ` · started ${timeAgo(p.created_at) ?? ""}` : ""}
         </span>
         {actions.cancelProvision && (
@@ -625,7 +625,7 @@ export function Topology({
 
       {lonely && (
         <p className="dim" style={{ marginTop: "0.6rem", maxWidth: "58ch" }}>
-          This is your only homebox — install Homebox on another machine and link the same
+          This is your only homebox. Install Homebox on another machine and link the same
           account to grow a cluster.
         </p>
       )}
@@ -668,7 +668,7 @@ export function Topology({
       >
         <p>
           <strong>{confirmEvict?.node.name || confirmEvict?.node.node_id}</strong> is removed from its
-          cluster and its replication links are cleaned up. Use this for dead or unreachable nodes —
+          cluster and its replication links are cleaned up. Use this for dead or unreachable nodes;
           prefer Leave on the node itself when it's healthy.
         </p>
       </Modal>
@@ -803,7 +803,7 @@ export function Topology({
             <input value={provRegion} onChange={e => setProvRegion(e.target.value)}
               placeholder={provProvider === "aws" ? "us-east-1" : "us-central1"} />
           </label>
-          <label>Machine type (optional — a small default is used)
+          <label>Machine type (optional; a small default is used)
             <input value={provMachine} onChange={e => setProvMachine(e.target.value)}
               placeholder={provProvider === "aws" ? "t3.small" : "e2-small"} />
           </label>

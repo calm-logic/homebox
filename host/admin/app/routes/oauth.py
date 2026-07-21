@@ -62,10 +62,22 @@ async def _installation_url(request: Request, session: AsyncSession) -> str:
     if isinstance(domain, str) and domain.strip():
         return f"https://{domain.strip().strip('/')}"
 
-    fwd_proto = request.headers.get("x-forwarded-proto", "https")
-    fwd_host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
-    host = fwd_host.split(",")[0].strip()  # X-Forwarded-Host may be a list
-    return f"{fwd_proto}://{host}"
+    # No public admin domain yet (fresh install). A forwarded host means the
+    # request came through the tunnel/proxy, so trust it (https). Otherwise this
+    # is a genuine same-machine hit on the localhost bind: use http so the OAuth
+    # callback lands back on the local admin (https://localhost:7765 would be a
+    # dead address). This lets GitHub/Google sign-in work at localhost before a
+    # public URL is assigned — the proxy accepts http installation URLs.
+    fwd_host = request.headers.get("x-forwarded-host")
+    if fwd_host:
+        fwd_proto = request.headers.get("x-forwarded-proto", "https")
+        return f"{fwd_proto}://{fwd_host.split(',')[0].strip()}"
+
+    host = (request.headers.get("host") or "").strip()
+    hostname = host.split(":")[0]
+    if hostname in ("localhost", "127.0.0.1", "::1"):
+        return f"http://{host}"
+    return f"https://{host}"
 
 
 def _start_url(state: str, provider: str, purpose: str, installation: str) -> str:

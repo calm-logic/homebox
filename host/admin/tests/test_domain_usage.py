@@ -278,6 +278,132 @@ def test_dns_overrides_filtered():
     run(body())
 
 
+# ── 7. system block: admin hostname + tunnel + served_by ─────────────────────
+
+async def _set(session, key, value):
+    from app import clusterlib
+    await clusterlib._set_setting(session, key, value)
+    await session.commit()
+
+
+def test_admin_hostname_belongs_to_this_domain():
+    async def body():
+        session = await make_session()
+        d = Domain(name="x100.dev", is_primary=True, cloudflare_routed=True)
+        other = Domain(name="other.dev", cloudflare_routed=True)
+        session.add_all([d, other])
+        await session.commit()
+        await _set(session, "admin_domain", "admin.x100.dev")
+
+        out = await usage(session, d.id)
+        hosts = out["system"]["hostnames"]
+        assert [h["hostname"] for h in hosts] == ["admin.x100.dev"]
+        assert hosts[0]["kind"] == "admin"
+        assert hosts[0]["label"] == "Homebox admin UI"
+        # unclustered → served locally
+        assert hosts[0]["served_by"] == {"kind": "local", "name": "This Homebox"}
+
+        # the admin hostname does NOT leak onto a different domain
+        out2 = await usage(session, other.id)
+        assert out2["system"]["hostnames"] == []
+    run(body())
+
+
+def test_admin_hostname_equal_to_domain():
+    async def body():
+        session = await make_session()
+        d = Domain(name="admin.x100.dev", cloudflare_routed=True)
+        session.add(d)
+        await session.commit()
+        await _set(session, "admin_domain", "admin.x100.dev")
+        out = await usage(session, d.id)
+        assert [h["hostname"] for h in out["system"]["hostnames"]] == ["admin.x100.dev"]
+    run(body())
+
+
+def test_tunnel_block_local_when_unclustered():
+    async def body():
+        from app import cloudflare as cf
+        session = await make_session()
+        d = Domain(name="x100.dev", is_primary=True, cloudflare_routed=True)
+        session.add(d)
+        await session.commit()
+        await cf.save_state(session, {
+            "account_id": "acc-1",
+            "tunnel_id": "tun-xyz",
+            "tunnel_name": "homebox-home",
+        })
+
+        out = await usage(session, d.id)
+        t = out["system"]["tunnel"]
+        assert t is not None
+        assert t["apex"] == "x100.dev"
+        assert t["wildcard"] == "*.x100.dev"
+        assert t["cname_target"] == "tun-xyz.cfargotunnel.com"
+        assert t["tunnel_id"] == "tun-xyz"
+        assert t["tunnel_name"] == "homebox-home"
+        assert t["served_by"] == {"kind": "local", "name": "This Homebox"}
+    run(body())
+
+
+def test_tunnel_served_by_cluster_name():
+    async def body():
+        from app import cloudflare as cf, clusterlib
+        session = await make_session()
+        d = Domain(name="x100.dev", is_primary=True, cloudflare_routed=True)
+        session.add(d)
+        await session.commit()
+        await cf.save_state(session, {"tunnel_id": "tun-1", "tunnel_name": "t"})
+        await clusterlib.save_cluster(session, {"cluster_id": "c1", "name": "beta"})
+        await session.commit()
+
+        out = await usage(session, d.id)
+        assert out["system"]["tunnel"]["served_by"] == {"kind": "cluster", "name": "beta"}
+    run(body())
+
+
+def test_tunnel_served_by_cluster_default_home():
+    async def body():
+        from app import cloudflare as cf, clusterlib
+        session = await make_session()
+        d = Domain(name="x100.dev", is_primary=True, cloudflare_routed=True)
+        session.add(d)
+        await session.commit()
+        await cf.save_state(session, {"tunnel_id": "tun-1", "tunnel_name": "t"})
+        # clustered but no cluster name set → 'home' default
+        await clusterlib.save_cluster(session, {"cluster_id": "c1"})
+        await session.commit()
+
+        out = await usage(session, d.id)
+        assert out["system"]["tunnel"]["served_by"] == {"kind": "cluster", "name": "home"}
+    run(body())
+
+
+def test_tunnel_null_when_domain_not_routed():
+    async def body():
+        from app import cloudflare as cf
+        session = await make_session()
+        d = Domain(name="x100.dev", is_primary=True, cloudflare_routed=False)
+        session.add(d)
+        await session.commit()
+        await cf.save_state(session, {"tunnel_id": "tun-1", "tunnel_name": "t"})
+        out = await usage(session, d.id)
+        assert out["system"]["tunnel"] is None
+    run(body())
+
+
+def test_system_block_graceful_without_integration_or_admin():
+    async def body():
+        session = await make_session()
+        d = Domain(name="x100.dev", is_primary=True, cloudflare_routed=True)
+        session.add(d)
+        await session.commit()
+        # no cloudflare integration, no admin_domain setting
+        out = await usage(session, d.id)
+        assert out["system"] == {"tunnel": None, "hostnames": []}
+    run(body())
+
+
 # ── 6. 404 ────────────────────────────────────────────────────────────────────
 
 def test_unknown_domain_404():

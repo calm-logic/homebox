@@ -4,12 +4,12 @@
 # =============================================================================
 # Brings up the Homebox admin UI bound to 127.0.0.1 only. All Cloudflare setup
 # (token, tunnel, public URL) happens in the admin's first-run onboarding
-# wizard — this script never touches `cloudflared` or the user's personal
+# wizard; this script never touches `cloudflared` or the user's personal
 # Cloudflare account, so a host that already runs unrelated cloudflared
 # tunnels is safe to install on.
 #
 # Steps:
-#   1. Admin credentials (~/.homebox/secrets.json — bcrypt hash only)
+#   1. Admin credentials (~/.homebox/secrets.json; bcrypt hash only)
 #   2. Generate admin .env, copy source into /opt/homebox/admin
 #   3. Bring up Traefik (base infrastructure) and the admin stack
 #   4. Print local URL + first-run password (user finishes setup in the UI)
@@ -44,7 +44,7 @@ done
 # Step 1: Admin credentials
 # ─────────────────────────────────────────────────────────────────────────────
 load_or_generate_admin_credentials() {
-    step "Step 1/4 — Admin credentials"
+    step "Step 1/4: Admin credentials"
 
     ensure_secrets_dir
     HOMEBOX_ADMIN_USERNAME="$(read_secret '.admin.username')"
@@ -55,7 +55,7 @@ load_or_generate_admin_credentials() {
     fi
 
     if [ "$RESET_PASSWORD" -eq 1 ] && [ -n "$HOMEBOX_ADMIN_PASSWORD_HASH" ]; then
-        warn "Resetting admin password — the old password is being invalidated."
+        warn "Resetting admin password; the old password is being invalidated."
         HOMEBOX_ADMIN_PASSWORD_HASH=""
     fi
 
@@ -91,7 +91,25 @@ prompt_whitelist_email() {
         [ -n "$e" ] && WHITELIST_EMAILS+=("$e")
     done < <(read_identities)
 
-    has_tty || return 0  # non-interactive install: skip the prompt entirely
+    # Non-interactive path: HOMEBOX_ADMIN_EMAIL seeds a whitelisted identity so a
+    # piped `curl | bash` install can offer GitHub/Google sign-in as the first
+    # login (no console password needed). Works without a cloud account.
+    local env_email
+    env_email="$(echo "${HOMEBOX_ADMIN_EMAIL:-}" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ -n "$env_email" ]; then
+        if [[ "$env_email" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
+            local seen=""
+            for e in "${WHITELIST_EMAILS[@]:-}"; do [ "$e" = "$env_email" ] && seen=1; done
+            if [ -z "$seen" ]; then
+                WHITELIST_EMAILS+=("$env_email")
+                info "Whitelisted $env_email for sign-in (HOMEBOX_ADMIN_EMAIL)."
+            fi
+        else
+            warn "HOMEBOX_ADMIN_EMAIL='$env_email' doesn't look like an email; ignoring."
+        fi
+    fi
+
+    has_tty || return 0  # non-interactive install: nothing more to prompt for
 
     local answer
     answer="$(prompt_value "Add a whitelisted email for passwordless access? (leave blank to skip)" "")"
@@ -99,7 +117,7 @@ prompt_whitelist_email() {
     [ -z "$answer" ] && return 0
 
     if ! [[ "$answer" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then
-        warn "'$answer' doesn't look like an email — skipping."
+        warn "'$answer' doesn't look like an email; skipping."
         return 0
     fi
 
@@ -139,7 +157,7 @@ EOF
 # Step 2: Admin .env + source deploy
 # ─────────────────────────────────────────────────────────────────────────────
 generate_admin_env() {
-    step "Step 2/4 — Admin app environment"
+    step "Step 2/4: Admin app environment"
 
     mkdir -p "$ADMIN_DEPLOY_DIR"
 
@@ -165,10 +183,10 @@ generate_admin_env() {
 
     secrets_dir="$(homebox_secrets_dir)"
 
-    # No ADMIN_DOMAIN / HOMEBOX_DOMAIN baked in — those come from the admin UI's
+    # No ADMIN_DOMAIN / HOMEBOX_DOMAIN baked in; those come from the admin UI's
     # onboarding flow once the user picks them.
     cat > "$env_file" <<EOF
-# Homebox admin — generated $(date -u +%Y-%m-%dT%H:%M:%SZ). Do not commit.
+# Homebox admin; generated $(date -u +%Y-%m-%dT%H:%M:%SZ). Do not commit.
 HOMEBOX_ADMIN_PORT=${ADMIN_PORT}
 HOMEBOX_ADMIN_USERNAME=${HOMEBOX_ADMIN_USERNAME}
 HOMEBOX_SECRETS_DIR=${secrets_dir}
@@ -183,7 +201,7 @@ EOF
 }
 
 deploy_admin_source() {
-    step "Step 3/4 — Deploying admin source"
+    step "Step 3/4: Deploying admin source"
 
     if [ ! -d "$ADMIN_SRC_DIR" ]; then
         fail "Admin source not found at $ADMIN_SRC_DIR"
@@ -216,7 +234,7 @@ deploy_admin_source() {
 # Step 4: Bring up Traefik + admin
 # ─────────────────────────────────────────────────────────────────────────────
 start_stacks() {
-    step "Step 4/4 — Starting Traefik + admin"
+    step "Step 4/4: Starting Traefik + admin"
 
     if ! docker network inspect traefik-net >/dev/null 2>&1; then
         docker network create traefik-net
@@ -233,7 +251,7 @@ start_stacks() {
         info "Refreshed base infrastructure from source."
     fi
 
-    # Base infrastructure (Traefik). Cloudflared is *not* started here — the
+    # Base infrastructure (Traefik). Cloudflared is *not* started here; the
     # admin app launches it after the user completes onboarding.
     if [ -f "$HOMEBOX_INFRA_DIR/docker-compose.yml" ]; then
         local base_env="$HOMEBOX_INFRA_DIR/.env"
@@ -251,7 +269,7 @@ EOF
         local dyn="$HOMEBOX_TRAEFIK_DIR/dynamic_conf.yml"
         if [ ! -f "$dyn" ]; then
             cat > "$dyn" <<'EOF'
-# Managed by Homebox admin — onboarding wizard rewrites this once the
+# Managed by Homebox admin; onboarding wizard rewrites this once the
 # admin's public hostname is chosen.
 http:
   routers: {}
@@ -263,7 +281,7 @@ EOF
         info "Bringing up Traefik (cloudflared will be started by the admin after onboarding)."
         (cd "$HOMEBOX_INFRA_DIR" && docker compose --env-file .env up -d)
     else
-        warn "Base infrastructure not found at $HOMEBOX_INFRA_DIR — skipping Traefik."
+        warn "Base infrastructure not found at $HOMEBOX_INFRA_DIR; skipping Traefik."
     fi
 
     # Admin image: pull-first, build-from-source fallback (G2). The compose
@@ -272,15 +290,15 @@ EOF
     local admin_image up_build_flag="" pull_log="${TMPDIR:-/tmp}/homebox-admin-pull.log"
     admin_image="$(homebox_admin_image)"
     if [ "${HOMEBOX_BUILD_FROM_SOURCE:-0}" = "1" ]; then
-        info "Admin image: HOMEBOX_BUILD_FROM_SOURCE=1 — building from source."
+        info "Admin image: HOMEBOX_BUILD_FROM_SOURCE=1; building from source."
         up_build_flag="--build"
     else
         info "Admin image: pulling prebuilt ${admin_image} (log: $pull_log)..."
         if (cd "$ADMIN_DEPLOY_DIR" && run_with_timeout "${HOMEBOX_PULL_TIMEOUT:-600}" \
                 docker compose --env-file .env pull app) >"$pull_log" 2>&1; then
-            info "Admin image: pulled prebuilt image — skipping the source build."
+            info "Admin image: pulled prebuilt image; skipping the source build."
         else
-            warn "Admin image: pull failed (offline or image not published — see $pull_log)."
+            warn "Admin image: pull failed (offline or image not published; see $pull_log)."
             info "Admin image: falling back to building from source (slower)."
             up_build_flag="--build"
         fi
@@ -304,7 +322,7 @@ print_summary_and_open() {
     info "Username   : $HOMEBOX_ADMIN_USERNAME"
     if [ -n "$HOMEBOX_FIRST_RUN_PASSWORD" ]; then
         echo ""
-        printf "${BOLD}${GREEN}First-run password (write this down — it will not be shown again):${NC}\n"
+        printf "${BOLD}${GREEN}First-run password (write this down; it will not be shown again):${NC}\n"
         printf "${BOLD}    %s${NC}\n" "$HOMEBOX_FIRST_RUN_PASSWORD"
         echo ""
         info "Only the bcrypt hash is persisted in $(homebox_secrets_file)."
@@ -317,7 +335,7 @@ print_summary_and_open() {
     info "or via SSH tunnel from another machine:"
     info "    ssh -L ${ADMIN_PORT}:localhost:${ADMIN_PORT} <this-host>"
     echo ""
-    info "First login starts the onboarding wizard — it'll walk you through"
+    info "First login starts the onboarding wizard; it'll walk you through"
     info "connecting Cloudflare and assigning a public URL for the admin."
     echo ""
 
@@ -345,7 +363,7 @@ print_summary_and_open() {
 # ─────────────────────────────────────────────────────────────────────────────
 main() {
     banner
-    info "Homebox configure — admin bootstrap (localhost-only; Cloudflare set up in the UI)"
+    info "Homebox configure; admin bootstrap (localhost-only; Cloudflare set up in the UI)"
     info "Base directory: $HOMEBOX_BASE_DIR"
     echo ""
 

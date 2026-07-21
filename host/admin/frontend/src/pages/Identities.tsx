@@ -61,7 +61,7 @@ export function Identities() {
         <PageHelp title="About identities">
           <p>
             Identities are the whitelist for signing in to this admin. An email listed and
-            enabled here can log in with Google or GitHub — no password involved. Anyone
+            enabled here can log in with Google or GitHub, no password involved. Anyone
             else is denied, so the list is the entire access-control story.
           </p>
           <p>
@@ -123,7 +123,7 @@ export function Identities() {
       ) : identities ? (
         <div className="empty-state">
           <h3>No identities yet</h3>
-          <p>Add an email to let it sign in with Google or GitHub — no password required.</p>
+          <p>Add an email to let it sign in with Google or GitHub, no password required.</p>
           <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add</button>
         </div>
       ) : <span className="spinner" />}

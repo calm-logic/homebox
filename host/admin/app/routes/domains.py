@@ -354,6 +354,71 @@ def _location_for(resolved, locations: list[dict]) -> dict:
             "name": local["name"] if local else "This Homebox"}
 
 
+async def _local_served_by(session: AsyncSession) -> dict:
+    """Who serves this homebox's own system routes (admin UI, the apex/wildcard
+    tunnel): always THIS install. Named as the cluster when clustered
+    (cluster_display_name, 'home' default), else the local pseudo-node."""
+    from .. import clusterlib
+    try:
+        state = await clusterlib.load_cluster(session)
+    except Exception:
+        state = None
+    if state and state.get("cluster_id"):
+        return {"kind": "cluster",
+                "name": clusterlib.cluster_display_name(state.get("name"))}
+    return {"kind": "local", "name": "This Homebox"}
+
+
+async def _system_block(session: AsyncSession, d: Domain) -> dict:
+    """The homebox/cluster's own presence on this domain, distinct from the
+    app services in `connections`:
+      - tunnel: the apex + wildcard CNAMEs this managed domain points at the
+        Cloudflare tunnel (from the connected Cloudflare integration), and who
+        serves it. null when there is no tunnel or the domain isn't routed.
+      - hostnames: system subdomains that belong to this domain — today just
+        the admin UI (the stored admin_domain, a plain FQDN string), when it
+        equals or is a subdomain of this domain. Structured to grow more
+        `kind`s later. Fully defensive: any missing piece is omitted, never
+        raised.
+    """
+    from .. import clusterlib
+    served_by = await _local_served_by(session)
+    name = d.name.lower()
+
+    tunnel = None
+    try:
+        state = await cf.load_state(session)
+        tunnel_id = state.get("tunnel_id")
+        if tunnel_id and d.cloudflare_routed:
+            tunnel = {
+                "apex": d.name,
+                "wildcard": f"*.{d.name}",
+                "cname_target": cf.tunnel_target(tunnel_id),
+                "tunnel_id": tunnel_id,
+                "tunnel_name": state.get("tunnel_name"),
+                "served_by": served_by,
+            }
+    except Exception:
+        tunnel = None
+
+    hostnames: list[dict] = []
+    try:
+        admin = await clusterlib._get_setting(session, clusterlib.ADMIN_DOMAIN_KEY)
+        if isinstance(admin, str) and admin.strip():
+            host = admin.strip().strip("/").lower()
+            if host == name or host.endswith("." + name):
+                hostnames.append({
+                    "hostname": host,
+                    "kind": "admin",
+                    "label": "Homebox admin UI",
+                    "served_by": served_by,
+                })
+    except Exception:
+        pass
+
+    return {"tunnel": tunnel, "hostnames": hostnames}
+
+
 @router.get("/{domain_id}")
 async def domain_usage(
     domain_id: int,
@@ -451,8 +516,10 @@ async def domain_usage(
         or host.lower().endswith(suffix)
     ]
 
+    system = await _system_block(session, d)
+
     return {**_serialize(d), "connections": connections,
-            "dns_overrides": own_overrides}
+            "dns_overrides": own_overrides, "system": system}
 
 
 class PatchDomainBody(BaseModel):

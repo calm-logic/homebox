@@ -97,7 +97,7 @@ if [ "$PLATFORM" = "linux" ] && ! docker info 2>/dev/null | grep -qi "desktop"; 
         printf '{\n  "default-address-pools": [{"base": "10.201.0.0/16", "size": 24}]\n}\n' > "$DAEMON_JSON"
         systemctl restart docker 2>/dev/null || service docker restart 2>/dev/null || true
     elif ! grep -q "default-address-pools" "$DAEMON_JSON"; then
-        warn "$DAEMON_JSON exists without default-address-pools — docker may auto-allocate"
+        warn "$DAEMON_JSON exists without default-address-pools; docker may auto-allocate"
         warn "networks in 192.168.0.0/16 that shadow your LAN. Consider adding:"
         warn '  "default-address-pools": [{"base": "10.201.0.0/16", "size": 24}]'
     fi
@@ -108,7 +108,7 @@ if docker compose version >/dev/null 2>&1; then
     info "Docker Compose: $(docker compose version --short)"
 else
     if [ "$PLATFORM" = "linux" ]; then
-        warn "Docker Compose plugin not found — installing..."
+        warn "Docker Compose plugin not found. Installing..."
         apt-get update -qq && apt-get install -y -qq docker-compose-plugin
         info "Docker Compose installed: $(docker compose version --short)"
     else

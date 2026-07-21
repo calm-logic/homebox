@@ -45,6 +45,32 @@ interface DomainOverride {
   created_at: string | null;
 }
 
+interface SystemServedBy {
+  kind: "cluster" | "node" | "local";
+  name: string;
+}
+
+interface SystemTunnel {
+  apex: string;
+  wildcard: string;
+  cname_target: string;
+  tunnel_id: string;
+  tunnel_name: string | null;
+  served_by: SystemServedBy;
+}
+
+interface SystemHostname {
+  hostname: string;
+  kind: string;
+  label: string;
+  served_by: SystemServedBy;
+}
+
+interface SystemBlock {
+  tunnel: SystemTunnel | null;
+  hostnames: SystemHostname[];
+}
+
 interface DomainUsage {
   id: number;
   name: string;
@@ -54,6 +80,7 @@ interface DomainUsage {
   name_servers: string[];
   connections: DomainConnection[];
   dns_overrides: DomainOverride[];
+  system?: SystemBlock;
 }
 
 function statusBadge(c: DomainConnection) {
@@ -71,6 +98,10 @@ function locationBadge(loc: DomainLocation) {
   if (loc.kind === "cloud") return <span className="badge info plain">{loc.name}</span>;
   if (loc.kind === "local") return <span className="badge plain">{loc.name}</span>;
   return <span className="badge plain" title={loc.id ?? undefined}>{loc.name}</span>;
+}
+
+function servedByBadge(s: SystemServedBy) {
+  return <span className="badge plain">{s.name}</span>;
 }
 
 export function DomainDetail() {
@@ -109,12 +140,51 @@ export function DomainDetail() {
         <div className="card" style={{ marginTop: "1rem" }}>
           <div className="row">
             <span className="dim">
-              Waiting on registrar nameservers — set these at your registrar and routing
+              Waiting on registrar nameservers. Set these at your registrar and routing
               finishes automatically:
             </span>
             {d.name_servers.map(ns => <code key={ns}>{ns}</code>)}
           </div>
         </div>
+      )}
+
+      {d.system && (d.system.tunnel || d.system.hostnames.length > 0) && (
+        <>
+          <h2 style={{ marginTop: "1.5rem" }}>Homebox routing</h2>
+          <table className="data-table">
+            <thead>
+              <tr><th>Route</th><th>Serves</th><th>Runs on</th></tr>
+            </thead>
+            <tbody>
+              {d.system.tunnel && (
+                <tr>
+                  <td>
+                    <strong>{d.system.tunnel.apex}</strong>
+                    {" "}and{" "}
+                    <strong>{d.system.tunnel.wildcard}</strong>
+                    <div className="dim">→ <code>{d.system.tunnel.cname_target}</code></div>
+                  </td>
+                  <td>
+                    Cloudflare Tunnel
+                    {d.system.tunnel.tunnel_name && <> <code>{d.system.tunnel.tunnel_name}</code></>}
+                  </td>
+                  <td>{servedByBadge(d.system.tunnel.served_by)}</td>
+                </tr>
+              )}
+              {d.system.hostnames.map(h => (
+                <tr key={h.hostname}>
+                  <td>
+                    <a href={`https://${h.hostname}`} target="_blank" rel="noopener">
+                      <strong>{h.hostname}</strong>
+                    </a>
+                  </td>
+                  <td>{h.label}</td>
+                  <td>{servedByBadge(h.served_by)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
 
       <h2 style={{ marginTop: "1.5rem" }}>Served on this domain</h2>

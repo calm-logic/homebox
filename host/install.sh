@@ -21,8 +21,11 @@
 #
 # Environment:
 #   HOMEBOX_NO_BROWSER=1   skip the automatic browser open at the end
+#   HOMEBOX_ADMIN_EMAIL    whitelist this email as an identity so you can sign in
+#                          with GitHub/Google OAuth instead of the console
+#                          password (works without a cloud account)
 #   HOMEBOX_BASE_DIR       override the base dir (default /opt/homebox on
-#                          Linux/WSL, ~/homebox on macOS) — honored by both
+#                          Linux/WSL, ~/homebox on macOS); honored by both
 #                          install and uninstall
 #
 # This script:
@@ -84,9 +87,9 @@ echo "     \\/             \\/     \\/    \\/            \\/"
 
 printf "${NC}\n"
 if [ "$UNINSTALL" = "1" ]; then
-    echo "  Self-hosted Internal PaaS — Uninstaller"
+    echo "  Self-hosted Internal PaaS: Uninstaller"
 else
-    echo "  Self-hosted Internal PaaS — Installer"
+    echo "  Self-hosted Internal PaaS: Installer"
 fi
 echo ""
 
@@ -108,12 +111,12 @@ fi
 # =============================================================================
 # Uninstall
 # =============================================================================
-# Self-contained on purpose: no repo clone, no lib.sh — it must work on a box
+# Self-contained on purpose: no repo clone, no lib.sh; it must work on a box
 # where only the installed artifacts remain. Mirrors what setup_host.sh /
 # configure.sh create (see host/host-provisioner/ in the repo).
 
 # A controlling terminal may still exist when stdin is piped (curl | bash).
-# Permission bits on /dev/tty are not enough — actually try to open it.
+# Permission bits on /dev/tty are not enough; actually try to open it.
 tty_usable() {
     ( : </dev/tty && : >/dev/tty ) 2>/dev/null
 }
@@ -143,18 +146,18 @@ ujson_secret() {
 
 # Best-effort cloud deregistration: if the admin is still running locally AND
 # we can log in, ask it to leave its cluster so the node doesn't linger in the
-# account's god view. Never fatal — every failure just prints a note.
+# account's god view. Never fatal; every failure just prints a note.
 uninstall_cloud_dereg() {
     local secrets_file="$1"
     local port="${HOMEBOX_ADMIN_PORT:-7765}"
     local base="http://127.0.0.1:${port}"
 
     if ! command -v curl >/dev/null 2>&1; then
-        warn "curl not found — skipping cluster deregistration."
+        warn "curl not found; skipping cluster deregistration."
         return 0
     fi
     if ! curl -fsS -m 4 -o /dev/null "$base/api/auth/login-options" 2>/dev/null; then
-        info "Admin API not reachable on $base — skipping cluster deregistration."
+        info "Admin API not reachable on $base; skipping cluster deregistration."
         return 0
     fi
 
@@ -171,7 +174,7 @@ uninstall_cloud_dereg() {
         plain="$(cat "$(dirname "$secrets_file")/mirror-admin-password" 2>/dev/null || true)"
     fi
     if [ -z "$plain" ]; then
-        warn "No admin password available (secrets.json stores only a bcrypt hash) —"
+        warn "No admin password available (secrets.json stores only a bcrypt hash)"
         warn "cannot log in to the admin API for automatic cluster deregistration."
         warn "Re-run with HOMEBOX_ADMIN_PASSWORD=<password> for automatic dereg, or"
         warn "evict this node from the portal or another node's Cluster page."
@@ -189,7 +192,7 @@ uninstall_cloud_dereg() {
         -H 'Content-Type: application/json' -d "$body" \
         "$base/api/auth/login" 2>/dev/null || echo 000)"
     if [ "$code" != "200" ]; then
-        warn "Admin API login failed (HTTP $code) — skipping cluster deregistration."
+        warn "Admin API login failed (HTTP $code); skipping cluster deregistration."
         rm -f "$jar"
         return 0
     fi
@@ -200,8 +203,8 @@ uninstall_cloud_dereg() {
         "$base/api/cluster/leave" 2>/dev/null || echo 000)"
     case "$code" in
         200) info "Cluster deregistration: this node left its cluster." ;;
-        404) info "Cluster deregistration: node was not part of a cluster — nothing to do." ;;
-        *)   warn "Cluster deregistration returned HTTP $code — continuing anyway."
+        404) info "Cluster deregistration: node was not part of a cluster; nothing to do." ;;
+        *)   warn "Cluster deregistration returned HTTP $code; continuing anyway."
              warn "If the node lingers in your account, evict it from the portal." ;;
     esac
 
@@ -242,7 +245,7 @@ run_uninstall() {
     echo "  - the systemd boot unit (if installed)"
     echo "  - the base directory: $base_dir"
     if [ "$PURGE" = "1" ]; then
-        echo "  - [--purge] named docker volumes — INCLUDING ALL DATABASES"
+        echo "  - [--purge] named docker volumes: INCLUDING ALL DATABASES"
         echo "  - [--purge] $secrets_dir (admin password hash, encryption secrets)"
         echo "  - [--purge] Homebox docker images"
     else
@@ -267,7 +270,7 @@ run_uninstall() {
         fi
         case "$(echo "$answer" | tr '[:upper:]' '[:lower:]')" in
             y|yes) ;;
-            *) info "Uninstall cancelled — nothing was changed."; exit 0 ;;
+            *) info "Uninstall cancelled; nothing was changed."; exit 0 ;;
         esac
     fi
     echo ""
@@ -314,7 +317,7 @@ EOF
             selected="$(echo "$selected" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
         else
             # Fallback (label enumeration failed / nothing labeled): only the
-            # well-known project names — verified by their signature containers.
+            # well-known project names; verified by their signature containers.
             if $DOCKER ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'homebox-admin'; then
                 selected="$selected admin"
             fi
@@ -326,7 +329,7 @@ EOF
         if [ -n "$(echo "$selected" | tr -d ' ')" ]; then
             for proj in $selected; do
                 info "Removing compose stack: $proj"
-                # compose v2 reconstructs the stack from labels — no compose
+                # compose v2 reconstructs the stack from labels; no compose
                 # file needed.
                 $DOCKER compose -p "$proj" down $down_flags >/dev/null 2>&1 \
                     || warn "  'docker compose -p $proj down' had errors (continuing)."
@@ -358,7 +361,7 @@ EOF
             if $DOCKER network rm traefik-net >/dev/null 2>&1; then
                 info "Removed docker network: traefik-net"
             else
-                warn "Could not remove network traefik-net (still in use?) — continuing."
+                warn "Could not remove network traefik-net (still in use?); continuing."
             fi
         else
             info "Docker network traefik-net not present."
@@ -396,7 +399,7 @@ $($DOCKER images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null \
 EOF
         fi
     else
-        warn "Docker is not available/running — skipping container, network, volume,"
+        warn "Docker is not available/running; skipping container, network, volume,"
         warn "and image cleanup. Re-run with Docker up to finish those, or remove them manually."
     fi
 
@@ -411,14 +414,14 @@ EOF
                 maybe_sudo systemctl daemon-reload >/dev/null 2>&1 || true
                 info "Removed boot unit: homebox.service"
             else
-                info "Boot unit not installed — nothing to remove."
+                info "Boot unit not installed; nothing to remove."
             fi
         elif [ -f "$unit" ]; then
             # Unit file exists but systemd isn't PID 1 (e.g. WSL without systemd).
             maybe_sudo rm -f "$unit" || warn "Could not remove $unit."
             info "Removed boot unit file (systemd not running): $unit"
         else
-            info "No systemd / no boot unit — skipping."
+            info "No systemd / no boot unit; skipping."
         fi
     fi
 
@@ -435,7 +438,7 @@ EOF
         if maybe_sudo rm -rf "$base_dir"; then
             info "Removed base directory: $base_dir"
         else
-            warn "Could not fully remove $base_dir — remove it manually."
+            warn "Could not fully remove $base_dir; remove it manually."
         fi
         if [ -n "$kept_env" ]; then
             maybe_sudo mkdir -p "$base_dir/admin"
@@ -454,7 +457,7 @@ EOF
         if [ -d "$secrets_dir" ]; then
             rm -rf "$secrets_dir" 2>/dev/null || maybe_sudo rm -rf "$secrets_dir" || true
             if [ -d "$secrets_dir" ]; then
-                warn "Could not remove $secrets_dir — remove it manually."
+                warn "Could not remove $secrets_dir; remove it manually."
             else
                 info "Removed secrets: $secrets_dir"
             fi
@@ -573,9 +576,11 @@ if [ "$IS_WSL" = "1" ]; then
 fi
 
 if [ "$PLATFORM" = "linux" ]; then
-    sudo HOMEBOX_SUPPRESS_BANNER=1 HOMEBOX_NO_BROWSER="$PROVISIONER_NO_BROWSER" bash "$PROVISIONER"
+    sudo HOMEBOX_SUPPRESS_BANNER=1 HOMEBOX_NO_BROWSER="$PROVISIONER_NO_BROWSER" \
+        HOMEBOX_ADMIN_EMAIL="${HOMEBOX_ADMIN_EMAIL:-}" bash "$PROVISIONER"
 else
-    HOMEBOX_SUPPRESS_BANNER=1 HOMEBOX_NO_BROWSER="$PROVISIONER_NO_BROWSER" bash "$PROVISIONER"
+    HOMEBOX_SUPPRESS_BANNER=1 HOMEBOX_NO_BROWSER="$PROVISIONER_NO_BROWSER" \
+        HOMEBOX_ADMIN_EMAIL="${HOMEBOX_ADMIN_EMAIL:-}" bash "$PROVISIONER"
 fi
 
 if [ "$IS_WSL" = "1" ] && [ "$NO_BROWSER" != "1" ]; then

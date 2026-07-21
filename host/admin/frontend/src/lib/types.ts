@@ -15,6 +15,22 @@ export interface MetricsSummary {
   };
 }
 
+export interface ActivityBucket {
+  ts: string;
+  cpu_pct: number | null;
+  mem_used: number | null;
+  succeeded: number;
+  failed: number;
+}
+
+export interface ActivitySummary {
+  window: string;
+  buckets: ActivityBucket[];
+  status_breakdown: { running: number; failed: number; building: number; idle: number };
+  top_projects: { name: string; deploys: number }[];
+  totals: { deploys_7d: number; running_envs: number };
+}
+
 export interface DomainItem {
   id: number;
   name: string;

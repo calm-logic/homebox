@@ -92,8 +92,8 @@ export function DomainsPage() {
             manage DNS yourself.
           </p>
           <p>
-            A monitor re-checks DNS hourly. If records drift — for example a record ends up
-            pointing at a different tunnel — a banner appears here with a one-click Repair
+            A monitor re-checks DNS hourly. If records drift (for example, a record ends up
+            pointing at a different tunnel), a banner appears here with a one-click Repair
             that rewrites the records to this host's tunnel.
           </p>
           <p>
@@ -127,7 +127,7 @@ export function DomainsPage() {
             <div className="grow">
               <div className="row">
                 <span className="badge fail">DNS out of sync</span>
-                <span className="dim">Some records point at the wrong tunnel — affected hosts return errors.</span>
+                <span className="dim">Some records point at the wrong tunnel; affected hosts return errors.</span>
               </div>
               <div className="dim" style={{ marginTop: "0.4rem" }}>
                 {dns.issues.slice(0, 3).map(i => <div key={i}><code>{i}</code></div>)}
@@ -271,7 +271,7 @@ function DomainRow({ d, onMakePrimary, onRemove, makingPrimary, removing }: {
         <tr>
           <td colSpan={4} style={{ background: "var(--tint)" }}>
             <div className="row" style={{ gap: "0.75rem", flexWrap: "wrap" }}>
-              <span className="dim">Set these nameservers at your registrar — routing finishes automatically once they take effect:</span>
+              <span className="dim">Set these nameservers at your registrar. Routing finishes automatically once they take effect:</span>
               {d.name_servers!.map(ns => (
                 <button key={ns} className="btn small" title="Copy"
                   onClick={() => { navigator.clipboard.writeText(ns); toast.show(`Copied ${ns}`, "ok"); }}>
@@ -313,7 +313,7 @@ function AddDomainModal({ open, onClose, cfReady }: { open: boolean; onClose: ()
       qc.invalidateQueries({ queryKey: ["tunnel"] });
       if (r.pending) {
         setPendingNs(r.name_servers ?? []);
-        toast.show("Zone created — set the nameservers at your registrar", "ok");
+        toast.show("Zone created. Set the nameservers at your registrar", "ok");
       } else {
         toast.show("Domain added and routed", "ok");
         close();
@@ -351,7 +351,7 @@ function AddDomainModal({ open, onClose, cfReady }: { open: boolean; onClose: ()
           </div>
           <p className="dim">
             Nameserver changes take minutes to hours. Homebox checks every few minutes and
-            finishes DNS + routing automatically — the domain shows <strong>Pending nameservers</strong> until then.
+            finishes DNS + routing automatically. The domain shows <strong>Pending nameservers</strong> until then.
           </p>
         </>
       ) : (
@@ -362,7 +362,7 @@ function AddDomainModal({ open, onClose, cfReady }: { open: boolean; onClose: ()
             <span className="hint">
               {managed && cfReady
                 ? "Existing Cloudflare zones connect instantly; new domains are created in Cloudflare and you'll get nameservers to set."
-                : "DNS is up to you — point the domain at your tunnel manually."}
+                : "DNS is up to you; point the domain at your tunnel manually."}
             </span>
           </div>
           <label className="row" style={{ cursor: "pointer", gap: "0.5rem", marginBottom: "0.6rem" }}>

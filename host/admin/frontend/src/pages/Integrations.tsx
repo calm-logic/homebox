@@ -50,8 +50,8 @@ export function Integrations() {
             GCE instead of this box.
           </p>
           <p>
-            Credentials — GitHub tokens, the Cloudflare API token, AWS keys, GCP
-            service-account JSON — are verified against the provider when you save them and
+            Credentials (GitHub tokens, the Cloudflare API token, AWS keys, GCP
+            service-account JSON) are verified against the provider when you save them and
             stored encrypted at rest. GitHub can also connect via OAuth instead of a token.
           </p>
           <p>
@@ -226,7 +226,7 @@ function GithubConnect({ onDone }: { onDone: () => void }) {
             <Github size={14} /> Connect with GitHub
           </button>
           <p className="dim" style={{ margin: "0.5rem 0 0", fontSize: "0.78rem" }}>
-            Connects your GitHub account — your own repositories plus any
+            Connects your GitHub account: your own repositories plus any
             organizations you grant on the consent screen.
           </p>
           <div className="login-divider"><span>or use an org token</span></div>
@@ -306,7 +306,7 @@ function CloudflareConnect({ onDone }: { onDone: () => void }) {
           <span className="hint">
             {submit.isPending
               ? <span className="row"><span className="spinner" /> Verifying scopes with Cloudflare…</span>
-              : <>Scopes: <code>Cloudflare Tunnel:Edit</code>, <code>DNS:Edit</code>, <code>Zone:Edit</code>, <code>Account Settings:Read</code> — Zone Resources: <strong>All zones</strong>.{" "}
+              : <>Scopes: <code>Cloudflare Tunnel:Edit</code>, <code>DNS:Edit</code>, <code>Zone:Edit</code>, <code>Account Settings:Read</code>. Zone Resources: <strong>All zones</strong>.{" "}
                 <a href={tokenUrl} target="_blank" rel="noopener">Generate one <ExternalLink size={11} /></a></>}
           </span>
         </div>
@@ -349,7 +349,7 @@ function AwsConnect({ onDone }: { onDone: () => void }) {
         <span className="hint">
           {connect.isPending
             ? <span className="row"><span className="spinner" /> Verifying with AWS…</span>
-            : <>Keys for an IAM user with deploy permissions — verified via STS, then encrypted at rest.</>}
+            : <>Keys for an IAM user with deploy permissions, verified via STS, then encrypted at rest.</>}
         </span>
       </div>
       <div className="field">

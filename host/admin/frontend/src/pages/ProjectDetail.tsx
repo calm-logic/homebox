@@ -379,7 +379,7 @@ function EnvironmentCard({ projectId, repoFullName, env, onChange }: {
         <Link
           to={`/projects/${projectId}/logs?env=${env.id}`}
           style={{ textDecoration: "none", display: "inline-flex" }}
-          title="See what's actually running — live container state and logs"
+          title="See what's actually running: live container state and logs"
         >
           {depBadge(dep?.status, envUnreachable(env))}
         </Link>
@@ -408,7 +408,7 @@ function EnvironmentCard({ projectId, repoFullName, env, onChange }: {
                 </div>
               );
             })
-          : <span className="dim">No public URLs yet — deploy to create them.</span>}
+          : <span className="dim">No public URLs yet. Deploy to create them.</span>}
       </div>
       {dep?.status === "failed" && dep.error && (
         <pre className="dim" style={{ marginTop: "0.5rem", whiteSpace: "pre-wrap", fontSize: "0.72rem", maxHeight: 120, overflow: "auto" }}>{dep.error}</pre>
@@ -656,7 +656,7 @@ function SettingsPanel({ project, onSaved, onStatus }: {
         }
       }
     },
-    onSuccess: () => { toast.show("Saved — redeploy to apply hostname changes", "ok"); onSaved(); },
+    onSuccess: () => { toast.show("Saved. Redeploy to apply hostname changes", "ok"); onSaved(); },
     onError: (e) => toast.show(String(e), "fail"),
   });
 
@@ -666,7 +666,7 @@ function SettingsPanel({ project, onSaved, onStatus }: {
     mutationFn: () => api.post(`/api/projects/${project.id}/release`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["projects"] });
-      toast.show(`Removed ${project.name} — Homebox resources torn down`, "ok");
+      toast.show(`Removed ${project.name}. Homebox resources torn down`, "ok");
       nav("/projects", { replace: true });
     },
     onError: (e) => toast.show(String(e), "fail"),
@@ -859,7 +859,7 @@ function SettingsPanel({ project, onSaved, onStatus }: {
         Tears down every environment's containers and networks for <strong>{project.name}</strong>.
       </p>
       <p className="dim">
-        The GitHub repository ({project.repo_full_name}) is not deleted or modified — you can
+        The GitHub repository ({project.repo_full_name}) is not deleted or modified, so you can
         add this project again later. Data volumes are kept.
       </p>
     </Modal>

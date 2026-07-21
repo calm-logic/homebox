@@ -96,7 +96,7 @@ export function Onboarding() {
   function onLinked() {
     setAuthModalOpen(false);
     qc.invalidateQueries({ queryKey: ["onboarding"] });
-    toast.show("Account linked — pulling your saved setup…", "ok");
+    toast.show("Account linked, pulling your saved setup…", "ok");
   }
 
   const linkSilent = useMutation({
@@ -121,7 +121,7 @@ export function Onboarding() {
       qc.invalidateQueries({ queryKey: ["tunnel"] });
       if (!resp.already) toast.show("Tunnel created with your synced Cloudflare credentials", "ok");
     },
-    onError: (e) => toast.show(`Automatic tunnel setup failed — create it below. ${String(e)}`, "fail"),
+    onError: (e) => toast.show(`Automatic tunnel setup failed. Create it below. ${String(e)}`, "fail"),
   });
   useEffect(() => {
     if (!state || autoTunnelFired.current) return;
@@ -144,7 +144,7 @@ export function Onboarding() {
       <header className="onboarding-header">
         <div className="brand"><Logo size={48} /><span style={{ fontSize: "1.4rem", fontWeight: 600 }}>Homebox</span></div>
         <p className="dim" style={{ marginTop: "0.5rem", marginBottom: 0 }}>
-          Welcome — connect this host to Cloudflare to reach it from the internet.
+          Welcome. Connect this host to Cloudflare to reach it from the internet.
         </p>
       </header>
 
@@ -156,8 +156,8 @@ export function Onboarding() {
           active={!linked && !state?.complete}
           subtitle={linked
             ? (syncingAccount
-              ? <><span className="spinner" /> Linked — syncing your saved setup from your account…</>
-              : <>Linked — your saved setup synced from your account.</>)
+              ? <><span className="spinner" /> Linked, syncing your saved setup from your account…</>
+              : <>Linked. Your saved setup synced from your account.</>)
             : <>Link your homebox.sh account to pull your saved integrations, domains and projects.</>}
         >
           {!linked && !state?.complete && (
@@ -181,7 +181,7 @@ export function Onboarding() {
           active={activeStep === 1}
           subtitle={state?.steps.cloudflare_token.done && cfSynced
             ? <>Synced from your account{state.steps.cloudflare_token.account_name
-              ? <> — connected to <strong>{state.steps.cloudflare_token.account_name}</strong></> : null}</>
+              ? <>, connected to <strong>{state.steps.cloudflare_token.account_name}</strong></> : null}</>
             : state?.steps.cloudflare_token.account_name
               ? <>Connected to <strong>{state.steps.cloudflare_token.account_name}</strong></>
               : <>Connect your Cloudflare account so this host can route traffic.</>}
@@ -324,21 +324,21 @@ function Step1Connect() {
         <span className="dim">opens the Create Token page</span>
       </div>
       <div className="field">
-        <div className="lbl">Required permissions — confirm all four before creating the token</div>
+        <div className="lbl">Required permissions: confirm all four before creating the token</div>
         <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.1rem", display: "flex", flexDirection: "column", gap: "0.3rem", fontSize: "0.85rem" }}>
-          <li><code>Account · Cloudflare Tunnel · Edit</code> <span className="dim">— the pre-fill often drops this one, add it manually</span></li>
+          <li><code>Account · Cloudflare Tunnel · Edit</code> <span className="dim">(the pre-fill often drops this one, add it manually)</span></li>
           <li><code>Zone · DNS · Edit</code></li>
-          <li><code>Zone · Zone · Edit</code> <span className="dim">— Edit (not Read) so Homebox can create zones for new domains</span></li>
+          <li><code>Zone · Zone · Edit</code> <span className="dim">(Edit, not Read, so Homebox can create zones for new domains)</span></li>
           <li><code>Account · Account Settings · Read</code></li>
         </ul>
-        <span className="hint">The link preselects <strong>All accounts</strong> / <strong>All zones</strong> — leave those as-is so one token manages every domain in the account.</span>
+        <span className="hint">The link preselects <strong>All accounts</strong> / <strong>All zones</strong>. Leave those as-is so one token manages every domain in the account.</span>
       </div>
       <div className="field">
         <label className="lbl">Cloudflare API token</label>
         <input
           type="password" value={token} autoFocus
           onChange={e => setToken(e.target.value)} onPaste={onPaste}
-          placeholder="Paste your scoped token — it connects and verifies automatically"
+          placeholder="Paste your scoped token; it connects and verifies automatically"
           disabled={submit.isPending}
         />
         <span className="hint">

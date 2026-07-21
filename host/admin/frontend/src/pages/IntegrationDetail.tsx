@@ -142,7 +142,7 @@ export function IntegrationDetail() {
           Removes the connection and <strong>stops all of its managed project containers</strong>.
         </p>
         <p className="dim">
-          Data volumes are kept — reconnecting and redeploying restores each project with its data.
+          Data volumes are kept; reconnecting and redeploying restores each project with its data.
         </p>
       </Modal>
     </>
@@ -204,7 +204,7 @@ function CloudflareManagement() {
             {data.tunnel_id
               ? <code>{data.tunnel_id}</code>
               : tokenSet
-                ? "No tunnel yet — create one to route domains through Cloudflare."
+                ? "No tunnel yet. Create one to route domains through Cloudflare."
                 : "Connect a token below first."}
           </div>
         </div>
@@ -216,7 +216,7 @@ function CloudflareManagement() {
           )}
           {tunnelConnected && (
             <>
-              <button className="btn" onClick={() => restart.mutate()} disabled={restart.isPending || !data.exists} title="Rarely needed — the monitor self-heals a downed connector">
+              <button className="btn" onClick={() => restart.mutate()} disabled={restart.isPending || !data.exists} title="Rarely needed; the monitor self-heals a downed connector">
                 {restart.isPending ? <span className="spinner" /> : <RefreshCw size={14} />} Restart
               </button>
               <button className="btn danger" onClick={() => setConfirmDisconnect(true)} disabled={disconnect.isPending}>
@@ -263,7 +263,7 @@ function CloudflareManagement() {
         </>}
       >
         <p style={{ margin: 0 }}>
-          Deletes the tunnel from Cloudflare — every domain routed through it goes offline
+          Deletes the tunnel from Cloudflare. Every domain routed through it goes offline
           until a new tunnel is connected.
         </p>
       </Modal>
@@ -348,7 +348,7 @@ function ConnectTokenModal({ open, onClose }: { open: boolean; onClose: () => vo
             />
             <span className="hint">
               {submit.isPending ? "Verifying scopes with Cloudflare…"
-                : <>Scopes: <code>Cloudflare Tunnel:Edit</code>, <code>DNS:Edit</code>, <code>Zone:Edit</code>, <code>Account Settings:Read</code> — with Zone Resources set to <strong>All zones</strong> so one integration manages every domain in the account.</>}
+                : <>Scopes: <code>Cloudflare Tunnel:Edit</code>, <code>DNS:Edit</code>, <code>Zone:Edit</code>, <code>Account Settings:Read</code>, with Zone Resources set to <strong>All zones</strong> so one integration manages every domain in the account.</>}
             </span>
           </div>
           <div className="row" style={{ marginTop: "0.5rem" }}>

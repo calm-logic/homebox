@@ -60,7 +60,7 @@ fi
 compose_up() {
     local dir="$1" label="$2"
     if [ ! -f "$dir/docker-compose.yml" ]; then
-        log "WARN: no compose file at $dir — skipping $label."
+        log "WARN: no compose file at $dir; skipping $label."
         return 0
     fi
     local env_args=()

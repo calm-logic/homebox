@@ -331,7 +331,7 @@ prepull_images_bg() {
     command -v docker >/dev/null 2>&1 || return 0
 
     local log="${TMPDIR:-/tmp}/homebox-prepull.log"
-    info "Warming image cache in the background ($label) — log: $log"
+    info "Warming image cache in the background ($label). Log: $log"
     (
         for img in "$@"; do
             docker pull "$img" >>"$log" 2>&1 || true
@@ -351,13 +351,13 @@ install_boot_unit() {
         return 0
     fi
     if ! command -v systemctl >/dev/null 2>&1 || [ "$(ps -p 1 -o comm= 2>/dev/null)" != "systemd" ]; then
-        warn "Boot unit: systemd is not PID 1 — skipping auto-start install."
+        warn "Boot unit: systemd is not PID 1; skipping auto-start install."
         warn "  Homebox will still rely on container restart policies; for reliable"
         warn "  boot, enable systemd in WSL (/etc/wsl.conf: [boot] systemd=true)."
         return 0
     fi
     if [ "$(id -u)" -ne 0 ]; then
-        warn "Boot unit: needs root to install — re-run with sudo (or 'make enable-boot')."
+        warn "Boot unit: needs root to install. Re-run with sudo (or 'make enable-boot')."
         return 0
     fi
 

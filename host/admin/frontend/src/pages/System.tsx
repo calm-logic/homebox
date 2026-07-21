@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useEffect, useState } from "react";
+import { CSSProperties, FormEvent, ReactNode, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import {
@@ -28,6 +28,47 @@ function GoogleIcon({ size = 16 }: { size?: number }) {
       <path fill="#FBBC05" d="M3.98 10.72a5.4 5.4 0 0 1 0-3.44V4.94H.96a9 9 0 0 0 0 8.12l3.02-2.34z" />
       <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.46 3.44 1.35l2.58-2.58A9 9 0 0 0 .96 4.94l3.02 2.34C4.68 5.16 6.66 3.58 9 3.58z" />
     </svg>
+  );
+}
+
+/** Shimmer placeholder block. The caller supplies the dimensions; the shimmer
+ *  animation and its reduced-motion fallback live in index.css (.skeleton). */
+function Skeleton({ w, h, r, style }: {
+  w?: number | string; h?: number | string; r?: number | string; style?: CSSProperties;
+}) {
+  return <span className="skeleton" aria-hidden style={{ width: w, height: h, borderRadius: r, ...style }} />;
+}
+
+/** Loading placeholder for the whole System page. Shown until we know whether
+ *  the account is linked and (when linked) the cluster/topology has loaded, so
+ *  the page never flashes the unlinked hero before snapping to the linked view
+ *  (or the reverse). Approximates the topology card: a header row plus a couple
+ *  of cluster blocks with node rows. */
+function SystemSkeleton() {
+  return (
+    <div className="card topology" aria-busy="true" aria-label="Loading system status">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <Skeleton w={170} h={16} />
+        <Skeleton w={48} h={18} r={999} />
+      </div>
+      {[0, 1].map((c) => (
+        <div key={c} className="cluster-block" style={{ marginTop: "0.6rem" }}>
+          <div className="cluster-block-head">
+            <Skeleton w={c === 0 ? 130 : 150} h={14} />
+            <Skeleton w={92} h={22} r={999} />
+          </div>
+          <div className="cluster-block-nodes">
+            {(c === 0 ? [0, 1] : [0]).map((n) => (
+              <div key={n} className="registry-node">
+                <Skeleton w={150} h={14} />
+                <span className="spacer" />
+                <Skeleton w={64} h={18} r={999} />
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -296,7 +337,7 @@ function NodeHealthDetail({ isSelf }: { isSelf: boolean }) {
       )}
       {data && data.components.every((c) => c.sample_count === 0) && (
         <div className="dim" style={{ marginTop: "0.6rem" }}>
-          No samples yet — the monitor records one per component every 30 seconds.
+          No samples yet. The monitor records one per component every 30 seconds.
         </div>
       )}
     </div>
@@ -379,7 +420,7 @@ export function System() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [params] = useSearchParams();
 
-  const { data: status } = useQuery<ClusterStatus>({
+  const statusQ = useQuery<ClusterStatus>({
     queryKey: ["cluster"],
     queryFn: () => api.get<ClusterStatus>("/api/cluster"),
     // Poll faster while a mirror provision/teardown is in flight so the UI
@@ -392,15 +433,17 @@ export function System() {
     },
     retry: true,
   });
-  const { data: account } = useQuery<AccountStatus>({
+  const status = statusQ.data;
+  const accountQ = useQuery<AccountStatus>({
     queryKey: ["cluster-account"],
     queryFn: () => api.get<AccountStatus>("/api/cluster/account"),
     refetchInterval: 20000,
     retry: true,
   });
+  const account = accountQ.data;
   // The fleet god view — every cluster and node on the account, plus pending
   // directives/provisions. 412 = not linked (the query is gated off then).
-  const { data: topology } = useQuery<AccountTopology>({
+  const topologyQ = useQuery<AccountTopology>({
     queryKey: ["account-topology"],
     queryFn: () => api.get<AccountTopology>("/api/cluster/account/topology"),
     enabled: !!account?.linked,
@@ -408,6 +451,7 @@ export function System() {
     retry: (count, err) =>
       !(err instanceof ApiError && (err.status === 412 || err.status === 402)) && count < 2,
   });
+  const topology = topologyQ.data;
   // Linked integrations, for the "Add node on AWS/GCP" provider picker.
   const { data: integrations } = useQuery<IntegrationItem[]>({
     queryKey: ["integrations"],
@@ -437,7 +481,7 @@ export function System() {
     }),
     onSuccess: () => {
       invalidate();
-      toast.show("Signed in — this node is now linked", "ok");
+      toast.show("Signed in. This node is now linked", "ok");
       setAccountToken("");
       setConnectModalOpen(false);
     },
@@ -451,7 +495,7 @@ export function System() {
       api.post("/api/cluster/account/link-silent", provider ? { provider } : {}),
     onSuccess: () => {
       invalidate();
-      toast.show("Account linked — syncing this box from your cloud vault", "ok");
+      toast.show("Account linked, syncing this box from your cloud vault", "ok");
     },
     onError: (e) => {
       // Nothing stored to re-auth silently — hand off to the provider modal
@@ -476,22 +520,22 @@ export function System() {
   });
   const createCluster = useMutation({
     mutationFn: (name: string) => api.post("/api/cluster/account/create-cluster", { name }),
-    onSuccess: () => { invalidate(); toast.show("Cluster created — this node is the seed", "ok"); },
+    onSuccess: () => { invalidate(); toast.show("Cluster created. This node is the seed", "ok"); },
     onError: onErrOrUpgrade,
   });
   const joinCluster = useMutation({
     mutationFn: (cluster_id: string) => api.post("/api/cluster/account/join", { cluster_id }),
-    onSuccess: () => { setJoining(true); toast.show("Joining — restarting onto the cluster keys…", "ok"); },
+    onSuccess: () => { setJoining(true); toast.show("Joining, restarting onto the cluster keys…", "ok"); },
     onError: onErrOrUpgrade,
   });
   const inviteNode = useMutation({
     mutationFn: (node_id: string) => api.post("/api/cluster/account/invite", { node_id }),
-    onSuccess: (_d, node_id) => toast.show(`Invited ${node_id} — it joins automatically within a minute`, "ok"),
+    onSuccess: (_d, node_id) => toast.show(`Invited ${node_id}. It joins automatically within a minute`, "ok"),
     onError: onErrOrUpgrade,
   });
   const evict = useMutation({
     mutationFn: (node_id: string) => api.post("/api/cluster/evict", { node_id }),
-    onSuccess: () => { invalidate(); toast.show("Node evicted — replication links are being cleaned up", "ok"); },
+    onSuccess: () => { invalidate(); toast.show("Node evicted. Replication links are being cleaned up", "ok"); },
     onError: onErr,
   });
   const setServing = useMutation({
@@ -511,7 +555,7 @@ export function System() {
     },
     onSuccess: (_d, v) => {
       toast.show(
-        v.serving ? "Node enabled — resuming app traffic" : "Node disabled — app traffic draining to peers",
+        v.serving ? "Node enabled, resuming app traffic" : "Node disabled, app traffic draining to peers",
         "ok",
       );
     },
@@ -526,7 +570,7 @@ export function System() {
       join_token: joinToken, peer_url: peerUrl, node_name: nodeName,
       control_plane_url: cpUrl.trim() || null,
     }),
-    onSuccess: () => { setJoining(true); toast.show("Joined — restarting onto the cluster keys…", "ok"); },
+    onSuccess: () => { setJoining(true); toast.show("Joined, restarting onto the cluster keys…", "ok"); },
     onError: onErrOrUpgrade,
   });
   const mint = useMutation({
@@ -550,7 +594,7 @@ export function System() {
     onSuccess: (d) => {
       setConfirmSplit(false);
       invalidate();
-      toast.show(`Split off — this node now founds the "${d.name}" cluster`, "ok");
+      toast.show(`Split off. This node now founds the "${d.name}" cluster`, "ok");
     },
     onError: (e) => {
       // Plan-limit 402s surface in the upgrade banner behind the modal — close
@@ -566,12 +610,12 @@ export function System() {
   });
   const mirrorEnable = useMutation({
     mutationFn: () => api.post("/api/cluster/mirror"),
-    onSuccess: () => { invalidate(); toast.show("Cloud mirror requested — provisioning…", "ok"); },
+    onSuccess: () => { invalidate(); toast.show("Cloud mirror requested, provisioning…", "ok"); },
     onError: onErrOrUpgrade,
   });
   const mirrorDisable = useMutation({
     mutationFn: () => api.del("/api/cluster/mirror"),
-    onSuccess: () => { invalidate(); setConfirmDisableMirror(false); toast.show("Cloud mirror disabled — tearing down the standby", "ok"); },
+    onSuccess: () => { invalidate(); setConfirmDisableMirror(false); toast.show("Cloud mirror disabled, tearing down the standby", "ok"); },
     onError: onErr,
   });
   // Remote node ops from the god view ride the control plane's directive
@@ -581,7 +625,7 @@ export function System() {
       api.post("/api/cluster/account/directives", { node_id: v.node_id, type: v.type, payload: v.payload ?? {} }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["account-topology"] });
-      toast.show("Queued — the node applies it within a minute", "ok");
+      toast.show("Queued. The node applies it within a minute", "ok");
     },
     onError: onErrOrUpgrade,
   });
@@ -592,7 +636,7 @@ export function System() {
       api.post("/api/cluster/account/nodes/provision", v),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["account-topology"] });
-      toast.show("Provisioning a cloud node — it joins automatically when ready", "ok");
+      toast.show("Provisioning a cloud node, it joins automatically when ready", "ok");
     },
     onError: onErrOrUpgrade,
   });
@@ -676,6 +720,20 @@ export function System() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Gate the whole page on a loading skeleton until the true state is known, so
+  // it never renders the unlinked hero first and then snaps to linked (or the
+  // reverse). We rely on react-query status flags, not the truthiness of
+  // possibly-undefined data:
+  //  - account has no initialData/placeholderData, so accountQ.isSuccess means
+  //    we genuinely know `linked` (not a default false).
+  //  - when linked, also wait for the cluster status (statusQ.isSuccess) and for
+  //    the fleet topology to have run once. topology only enables when linked,
+  //    and can settle as an error (402/plan), so isFetched (settled either way)
+  //    is the right signal rather than isSuccess, which a plan error never sets.
+  const linked = !!account?.linked;
+  const resolved =
+    accountQ.isSuccess && (!linked || (statusQ.isSuccess && topologyQ.isFetched));
+
   const license = status?.license;
   const clusterLocked = clusterIsLocked(license);
   const mirrorLocked = mirrorIsLocked(license);
@@ -697,14 +755,14 @@ export function System() {
   // one set of mutations.
   const licenseBanner = license?.expired ? (
     <div className="banner danger">
-      <span>Premium features paused — existing services keep running. Manage your plan to restore clustering.</span>
+      <span>Premium features paused. Existing services keep running. Manage your plan to restore clustering.</span>
       <button className="btn primary small" onClick={() => upgrade.mutate()} disabled={upgrade.isPending}>
         {upgrade.isPending ? <span className="spinner" /> : <>Manage plan at homebox.sh</>}
       </button>
     </div>
   ) : license?.in_grace ? (
     <div className="banner warn">
-      <span>License expired — running in a 14-day grace period. Manage your plan soon to keep clustering.</span>
+      <span>License expired. Running in a 14-day grace period. Manage your plan soon to keep clustering.</span>
       <button className="btn primary small" onClick={() => upgrade.mutate()} disabled={upgrade.isPending}>
         {upgrade.isPending ? <span className="spinner" /> : <>Manage plan at homebox.sh</>}
       </button>
@@ -773,7 +831,7 @@ export function System() {
     return (
       <div className="row" style={{ marginTop: "0.6rem", gap: "0.5rem" }}>
         <span className={`badge ${synced ? "ok" : "plain"}`}>{synced ? "synced" : "pending"}</span>
-        <span className="dim">{synced ? `Synced to cloud ${synced}` : "Cloud sync pending — first push happens within a minute"}</span>
+        <span className="dim">{synced ? `Synced to cloud ${synced}` : "Cloud sync pending. First push happens within a minute"}</span>
       </div>
     );
   })();
@@ -810,7 +868,7 @@ export function System() {
       <p className="dim" style={{ marginTop: 0 }}>
         Linking backs up and restores this node from your encrypted cloud vault, keeps every
         homebox on your account in sync, unlocks clustering, and gives you one view of your
-        whole fleet — from anywhere.
+        whole fleet, from anywhere.
       </p>
       {account.suggested ? (
         // The control plane recognized the admin's login identity — one-click
@@ -950,7 +1008,7 @@ export function System() {
           <PageHelp title="System">
             <p>
               This page is the health and topology view of your Homebox setup. With a homebox.sh
-              account linked, it shows every cluster and standalone node on your account — the
+              account linked, it shows every cluster and standalone node on your account. The
               node you are connected to is marked "you are here". Without an account it shows
               this homebox and, if you joined a cluster with a token, its full roster.
             </p>
@@ -965,29 +1023,35 @@ export function System() {
               Click a cluster's name to rename it. The "this cluster" pill opens cluster
               actions: trigger an immediate sync, mint a join token for adding a node manually,
               add a cloud node on AWS/GCP, split the cluster, or leave it. Each node's status
-              pill opens node actions — drain or resume app traffic, split a node off into its
+              pill opens node actions: drain or resume app traffic, split a node off into its
               own cluster, or evict a dead node. The last serving node can't be drained unless
               a standby mirror is online, so app traffic always has somewhere to go.
             </p>
             <p>
               Expand the row of the node you're connected to for its live infrastructure
-              health — public URL, tunnel, router, and DNS checks with uptime and latency,
+              health: public URL, tunnel, router, and DNS checks with uptime and latency,
               sampled every 30 seconds.
             </p>
           </PageHelp>
         </div>
-        {account && (
-          <button type="button"
-            className={`badge ${account.linked ? "success" : "plain"} account-pill`}
-            title={account.linked ? "homebox.sh account details" : "Link your homebox.sh account"}
-            onClick={() => setAccountModalOpen(true)}>
-            {account.linked ? "Linked" : "Unlinked"}
-          </button>
+        {resolved ? (
+          account && (
+            <button type="button"
+              className={`badge ${account.linked ? "success" : "plain"} account-pill`}
+              title={account.linked ? "homebox.sh account details" : "Link your homebox.sh account"}
+              onClick={() => setAccountModalOpen(true)}>
+              {account.linked ? "Linked" : "Unlinked"}
+            </button>
+          )
+        ) : (
+          <Skeleton w={62} h={22} r={999} />
         )}
       </div>
 
+      {!resolved ? <SystemSkeleton /> : (<>
+
       {joining && (
-        <div className="card"><span className="spinner" /> Restarting onto the cluster keys — hang tight…</div>
+        <div className="card"><span className="spinner" /> Restarting onto the cluster keys, hang tight…</div>
       )}
 
       {upgradeNotice && (
@@ -1070,10 +1134,10 @@ export function System() {
                   <>
                     <button className="btn ghost"
                       title={isLastServing
-                        ? "Can't disable the last serving node — enable another node first so app traffic has somewhere to go"
+                        ? "Can't disable the last serving node. Enable another node first so app traffic has somewhere to go"
                         : serving
                           ? (isSelf
-                              ? "Drain app traffic from this node. The control plane stays connected — re-enable from this admin on the LAN."
+                              ? "Drain app traffic from this node. The control plane stays connected. Re-enable from this admin on the LAN."
                               : "Drain app traffic from this node so the shared tunnel routes to healthy peers. Control plane stays connected.")
                           : "Resume app traffic on this node"}
                       onClick={() => setServing.mutate({ node_id: n.node_id, serving: !serving })}
@@ -1081,7 +1145,7 @@ export function System() {
                       {serving ? <><PowerOff size={14} /> Disable</> : <><Power size={14} /> Enable</>}
                     </button>
                     {!isSelf && (
-                      <button className="btn ghost danger" title="Remove this node from the cluster (for dead/unreachable nodes — use Leave on the node itself when possible)"
+                      <button className="btn ghost danger" title="Remove this node from the cluster (for dead/unreachable nodes; use Leave on the node itself when possible)"
                         onClick={() => evict.mutate(n.node_id)} disabled={evict.isPending}>
                         <UserMinus size={14} /> Evict
                       </button>
@@ -1145,7 +1209,7 @@ export function System() {
       {account?.linked && !status?.active && (
         <div className="card">
           <div className="row" style={{ justifyContent: "space-between" }}>
-            <h3 style={{ margin: 0 }}>Advanced — manual join (token fallback)</h3>
+            <h3 style={{ margin: 0 }}>Advanced: manual join (token fallback)</h3>
             <button className="btn ghost" onClick={() => setShowManualJoin(s => !s)}>
               {showManualJoin ? "Hide" : "Show"}
             </button>
@@ -1227,7 +1291,7 @@ export function System() {
           <li>Projects and data on this node are kept.</li>
           <li>Other nodes are unaffected and keep serving.</li>
           {(status?.roster ?? []).length > 1 && (
-            <li>This node disconnects from the shared tunnel — you may need to reconnect a tunnel
+            <li>This node disconnects from the shared tunnel. You may need to reconnect a tunnel
                 for public routing.</li>
           )}
         </ul>
@@ -1248,7 +1312,7 @@ export function System() {
           </>
         }
       >
-        <p>The cloud standby is torn down — local nodes are unaffected and keep serving traffic as usual.</p>
+        <p>The cloud standby is torn down. Local nodes are unaffected and keep serving traffic as usual.</p>
       </Modal>
 
       <Modal
@@ -1268,6 +1332,7 @@ export function System() {
           toast.show("Account connected", "ok");
         }}
       />
+      </>)}
     </>
   );
 }

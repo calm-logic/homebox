@@ -74,7 +74,7 @@ export function AccountAuthModal({ open, onClose, onLinked }: Props) {
     onSuccess: (d) => {
       const w = window.open(d.url, "homebox-account", "width=560,height=720");
       if (!w) {
-        setError("Popup blocked — allow popups for this site and try again");
+        setError("Popup blocked. Allow popups for this site and try again");
         return;
       }
       w.focus();
@@ -148,7 +148,7 @@ export function AccountAuthModal({ open, onClose, onLinked }: Props) {
   return (
     <Modal open={open} title="Link your homebox.sh account" onClose={onClose}>
       <p className="dim">
-        Sign in with the provider your homebox.sh account uses — the link happens right here,
+        Sign in with the provider your homebox.sh account uses. The link happens right here,
         and your encrypted cloud vault syncs this box automatically afterwards.
       </p>
 

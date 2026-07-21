@@ -260,7 +260,33 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .metric:hover { border-color: var(--border-strong); background: var(--panel-2); transform: translateY(-1px); }
 .metric:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 2px; }
 .metric .label { font-size: 0.8rem; color: var(--muted); }
-.metric .value { font-size: 1.7rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem; }
+.metric .value { font-size: 1.7rem; font-weight: 600; display: flex; align-items: center; gap: 0.5rem; line-height: 1.1; }
+.metric-top { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.metric-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 9px;
+  color: var(--accent); background: var(--accent-glow);
+  transition: transform 0.15s ease;
+}
+.metric:hover .metric-icon { transform: scale(1.08); }
+.metric-sub { font-size: 0.74rem; color: var(--muted); }
+
+/* Overview activity charts */
+.chart-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1rem; margin-bottom: 1rem;
+}
+.chart-card { margin-bottom: 1rem; }
+.chart-grid .chart-card { margin-bottom: 0; }
+.chart-card-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 0.5rem; margin-bottom: 0.6rem;
+}
+.chart-card-head h3 { margin: 0; font-size: 0.95rem; }
+.chart-empty {
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  min-height: 140px; padding: 0 1rem; font-size: 0.85rem;
+}
 
 /* Badges — borderless tonal pills */
 .badge {
@@ -984,6 +1010,26 @@ button.account-pill:hover { filter: brightness(1.15); }
   padding: 0.4rem 0;
 }
 .registry-node + .registry-node { border-top: 1px solid var(--border); }
+
+/* Loading skeleton — shimmer placeholders shown on the System page until the
+   linked/cluster/topology state is known, so it never flashes the unlinked
+   view before snapping to the linked one. Theme-aware via the tint/btn vars. */
+.skeleton {
+  display: inline-block;
+  border-radius: var(--radius-sm);
+  background-color: var(--tint);
+  background-image: linear-gradient(90deg, var(--tint) 0%, var(--btn-bg-hover) 50%, var(--tint) 100%);
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; background-image: none; background-color: var(--tint); }
+}
 
 /* "or" between joining an existing cluster and starting a new one */
 .section-divider {

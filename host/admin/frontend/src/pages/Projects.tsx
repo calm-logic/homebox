@@ -56,7 +56,7 @@ export function Projects() {
           </p>
           <p>
             Repositories you own get a push webhook, so pushing to a branch deploys its
-            environment automatically. Public repos you don't own can't receive webhooks —
+            environment automatically. Public repos you don't own can't receive webhooks, so
             those deploy manually.
           </p>
           <p>
@@ -165,7 +165,7 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
     mutationFn: (p: ProjectItem) => api.post<{ note?: string; webhook_note?: string }>(`/api/projects/${p.id}/adopt`, {}),
     onSuccess: (r, p) => {
       qc.invalidateQueries({ queryKey: ["projects"] });
-      toast.show(`Added ${p.name} — dissecting services`, "ok");
+      toast.show(`Added ${p.name}, dissecting services`, "ok");
       if (r.note) toast.show(r.note, "info");
       onClose();
       nav(`/projects/${p.id}`);
@@ -204,7 +204,7 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
     },
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["projects"] });
-      toast.show("Added public repo — dissecting services", "ok");
+      toast.show("Added public repo, dissecting services", "ok");
       if (r.note) toast.show(r.note, "info");
       setTerm("");
       onClose();
@@ -231,9 +231,9 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
         <p className="dim" style={{ margin: 0 }}>
           {q
             ? (pubLoading ? "Searching…" : pub?.rate_limited
-                ? "GitHub search is rate-limited right now — try again in a minute."
+                ? "GitHub search is rate-limited right now. Try again in a minute."
                 : "No matches in your repositories or public GitHub.")
-            : <>No repositories available to add — every synced repository is already a project,
+            : <>No repositories available to add. Every synced repository is already a project,
                or none have been fetched yet. Repositories re-sync automatically when this
                dialog opens; you can also search public GitHub above.</>}
         </p>
@@ -268,7 +268,7 @@ function AddProjectModal({ open, onClose }: { open: boolean; onClose: () => void
                 disabled={adopt.isPending || addPublic.isPending}
                 onClick={() => addPublic.mutate(r.full_name)}
                 style={{ width: "100%", textAlign: "left", cursor: "pointer", font: "inherit" }}
-                title="Public repo — no push webhooks on repos you don't own; deploys are manual."
+                title="Public repo: no push webhooks on repos you don't own, so deploys are manual."
               >
                 <span style={{ minWidth: 0 }}>
                   <div className="provider-title">{r.full_name}</div>
