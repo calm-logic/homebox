@@ -9,6 +9,7 @@ import { api } from "./lib/api";
 import { Login } from "./pages/Login";
 import { Overview } from "./pages/Overview";
 import { DomainsPage } from "./pages/DomainsPage";
+import { DomainDetail } from "./pages/DomainDetail";
 import { System } from "./pages/System";
 import { Projects } from "./pages/Projects";
 import { ProjectDetail } from "./pages/ProjectDetail";
@@ -62,6 +63,7 @@ export function App() {
             <Route element={<RequireAuth><RequireOnboarded><Layout /></RequireOnboarded></RequireAuth>}>
               <Route path="/" element={<Overview />} />
               <Route path="/domains" element={<DomainsPage />} />
+              <Route path="/domains/:domainId" element={<DomainDetail />} />
               <Route path="/system" element={<System />} />
               <Route path="/integrations" element={<Integrations />} />
               <Route path="/integrations/:integrationId" element={<IntegrationDetail />} />

@@ -1,11 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
-import { ArrowLeft, ExternalLink, RefreshCw } from "lucide-react";
+import {
+  ArrowLeft, ArrowRight, Braces, Check, ChevronDown, ChevronUp, Copy,
+  ExternalLink, Filter as FilterIcon, Key, Lock, X,
+} from "lucide-react";
 import { api } from "../lib/api";
+import { formatColumnName } from "../lib/format";
+import { HeaderSave, HeaderSaveButton, useHeaderSave } from "../lib/headerSave";
 import { useToast } from "../lib/toast";
 import { Modal } from "../components/Modal";
 import { ServiceIcon } from "../components/ServiceIcon";
@@ -51,6 +56,9 @@ interface RequestEntry {
   status: number; duration_ms: number; client: string;
 }
 
+/** One user-editable env-var row, as staged locally and sent to the API. */
+interface EnvRow { key: string; value: string; is_secret: boolean }
+
 export function ServicePanel({ projectId, svc, env }: {
   projectId: number;
   svc: ServiceItem;
@@ -62,6 +70,32 @@ export function ServicePanel({ projectId, svc, env }: {
   const tabsRef = useRef<HTMLDivElement>(null);
   useTabIndicator(tabsRef, ".tab.active", [tab]);
   const instance = env?.instances.find(i => i.service_name === svc.name);
+
+  // Staged-but-unsaved edits live up here (not inside the tab components) so
+  // switching tabs keeps them; the single header Save acts on whichever tab
+  // is active and only renders while that tab is dirty.
+  const [headerSave, setHeaderSave] = useState<HeaderSave | null>(null);
+  const [stagedTargets, setStagedTargets] = useState<Record<number, string>>({});
+  const [envRows, setEnvRows] = useState<EnvRow[] | null>(null);
+  const [envBaseline, setEnvBaseline] = useState<string | null>(null);
+
+  // A different service is a different edit context — drop staged edits.
+  useEffect(() => {
+    setStagedTargets({});
+    setEnvRows(null);
+    setEnvBaseline(null);
+  }, [svc.id]);
+
+  const stagedTarget = env ? stagedTargets[env.id] : undefined;
+  const setStagedTarget = (v: string | undefined) => {
+    if (!env) return;
+    setStagedTargets(prev => {
+      const next = { ...prev };
+      if (v === undefined) delete next[env.id];
+      else next[env.id] = v;
+      return next;
+    });
+  };
 
   return (
     <>
@@ -79,6 +113,7 @@ export function ServicePanel({ projectId, svc, env }: {
             ) : <span className="badge ok">Public</span>
           ) : <span className="badge muted plain">Internal</span>}
         </span>
+        <HeaderSaveButton state={headerSave} />
       </div>
       <div className="tabs service-detail-tabs" role="tablist" ref={tabsRef}>
         <span className="tab-indicator" aria-hidden />
@@ -96,8 +131,13 @@ export function ServicePanel({ projectId, svc, env }: {
         <div className="card"><span className="dim">This internal service has no browsable data endpoint.</span></div>
       )}
       {tab === "monitoring" && env && <Monitoring svc={svc} env={env} />}
-      {tab === "deployment" && env && <TargetSelector svc={svc} env={env} />}
-      {tab === "environment" && <EnvVarsEditor svc={svc} projectId={pid} />}
+      {tab === "deployment" && env && (
+        <TargetSelector svc={svc} env={env} staged={stagedTarget} setStaged={setStagedTarget} onStatus={setHeaderSave} />
+      )}
+      {tab === "environment" && (
+        <EnvVarsEditor svc={svc} projectId={pid} rows={envRows} setRows={setEnvRows}
+          baseline={envBaseline} setBaseline={setEnvBaseline} onStatus={setHeaderSave} />
+      )}
     </>
   );
 }
@@ -161,7 +201,12 @@ const decodeTarget = (v: string): { target: string; config: Record<string, unkno
 const locationValue = (loc: TargetLocation): string =>
   loc.kind === "local" || loc.id === null ? "homebox" : `homebox:${loc.kind}:${loc.id}`;
 
-function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }) {
+function TargetSelector({ svc, env, staged, setStaged, onStatus }: {
+  svc: ServiceItem; env: EnvironmentInfo;
+  staged: string | undefined;
+  setStaged: (v: string | undefined) => void;
+  onStatus: (s: HeaderSave | null) => void;
+}) {
   const qc = useQueryClient();
   const toast = useToast();
   const { data } = useQuery<TargetsResponse>({
@@ -181,6 +226,13 @@ function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }
   const effectiveValue = encodeTarget(baseTarget, effective?.config);
   const current = !effective || effective.inherited ? "default" : effectiveValue;
   const options: TargetOption[] = data?.options ?? [{ value: "homebox" }];
+
+  // Picking in the select only stages the choice; the header Save applies it.
+  // The 10s poll refreshes `current`/badges freely but never touches `staged`,
+  // so a background refetch can't clobber an unsaved pick — and dirtiness
+  // compares against server truth, so re-picking the saved value un-dirties.
+  const displayValue = staged ?? current;
+  const dirty = staged !== undefined && staged !== current;
 
   // "Homebox" group: This Homebox (absent location) + every cluster /
   // standalone node the linked account knows about.
@@ -229,11 +281,21 @@ function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }
       });
     },
     onSuccess: () => {
+      // Staged state resets to server truth; the invalidated query brings it.
+      setStaged(undefined);
       qc.invalidateQueries({ queryKey: ["service-targets", svc.id] });
       toast.show("Target updated — redeploying affected environments", "ok");
     },
     onError: (e) => toast.show(String(e), "fail"),
   });
+
+  useHeaderSave(onStatus, dirty, save.isPending, () => {
+    if (staged !== undefined) save.mutate(staged);
+  });
+
+  // Badges/status above stay on SERVER state; only the select and its hint
+  // preview the staged choice.
+  const displayTarget = displayValue === "default" ? baseTarget : decodeTarget(displayValue).target;
 
   return (
     <>
@@ -251,9 +313,9 @@ function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }
         <div className="field">
           <span className="lbl">Where <b>{svc.name}</b> deploys for <b>{env.name}</b></span>
           <select
-            value={current}
+            value={displayValue}
             disabled={save.isPending}
-            onChange={(e) => save.mutate(e.target.value)}
+            onChange={(e) => setStaged(e.target.value === current ? undefined : e.target.value)}
           >
             <option value="default">Default ({TARGET_LABELS[baseTarget] ?? baseTarget})</option>
             <optgroup label="Homebox">
@@ -270,7 +332,12 @@ function TargetSelector({ svc, env }: { svc: ServiceItem; env: EnvironmentInfo }
               <option key={o.value} value={o.value}>{TARGET_LABELS[o.value] ?? o.label ?? o.value}</option>
             ))}
           </select>
-          <span className="hint">{TARGET_HINTS[baseTarget]}</span>
+          <span className="hint">{TARGET_HINTS[displayTarget]}</span>
+          {dirty && (
+            <span className="hint">
+              Not applied yet — Save applies the new target and redeploys this environment.
+            </span>
+          )}
           {(!effective || effective.inherited) && (
             <span className="hint">Inherited from the project deployment target.</span>
           )}
@@ -443,6 +510,10 @@ function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: Environm
     enabled: !!table,
   });
 
+  // The pager lives inside the table view; if a page empties out (rows
+  // deleted, total shrank) snap back to the first page so it stays reachable.
+  useEffect(() => { if (data && data.rows.length === 0 && offset > 0) setOffset(0); }, [data]);
+
   const colMeta = (name: string): ColumnMeta | undefined => schema?.columns.find(c => c.name === name);
   const pkCols = schema?.primary_key ?? [];
   const canEdit = pkCols.length > 0;
@@ -498,18 +569,10 @@ function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: Environm
         <select value={table} onChange={e => { setTable(e.target.value); resetView(); }} style={{ width: "auto" }}>
           {tables.map(t => <option key={t} value={t}>{t}</option>)}
         </select>
+        <FilterControl columns={schema?.columns ?? []} filters={filters} setFilters={(f) => { setFilters(f); setOffset(0); }} />
         {isFetching && <span className="spinner" />}
         <div className="spacer" />
-        {data && (
-          <span className="dim">
-            {data.total === 0 ? "0 rows" : `${offset + 1}–${Math.min(offset + data.limit, data.total)} of ${data.total}`}
-          </span>
-        )}
-        <button className="btn small" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>‹ Prev</button>
-        <button className="btn small" disabled={!data || offset + data.limit >= data.total} onClick={() => setOffset(offset + 50)}>Next ›</button>
       </div>
-
-      <FilterBar columns={schema?.columns ?? []} filters={filters} setFilters={(f) => { setFilters(f); setOffset(0); }} />
 
       {selected.size > 0 && (
         <div className="bulk-bar">
@@ -526,78 +589,88 @@ function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: Environm
             <span className="dim">{filters.length ? "No rows match the filters." : "Table is empty."}</span>
           </div>
         ) : (
-          <div className="data-scroll">
-            <table className="data-table editor">
-              <thead>
-                <tr>
-                  <th className="sel-col">
-                    <input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="Select all" />
-                  </th>
-                  {data.columns.map(c => {
-                    const m = colMeta(c);
-                    const sorted = orderBy === c;
-                    return (
-                      <th key={c} onClick={() => { if (orderBy === c) setDir(d => d === "asc" ? "desc" : "asc"); else { setOrderBy(c); setDir("asc"); } setOffset(0); }} className="sortable">
-                        <div className="th-inner">
-                          <span className="th-name">
-                            {m?.pk && <span className="pk-dot" title="Primary key">🔑</span>}
-                            {c}
-                            {sorted && <span className="sort-ind">{dir === "asc" ? "▲" : "▼"}</span>}
-                          </span>
-                          <span className="th-type">{m ? shortType(m) : ""}{m?.fk ? ` → ${m.fk.table}` : ""}</span>
-                        </div>
-                      </th>
-                    );
-                  })}
-                </tr>
-              </thead>
-              <tbody>
-                {data.rows.map((r, i) => (
-                  <tr key={i} className={selected.has(i) ? "row-selected" : ""}>
-                    <td className="sel-col">
-                      <input type="checkbox" checked={selected.has(i)} onChange={() => toggleRow(i)} aria-label="Select row" />
-                    </td>
-                    {data.columns.map(c => {
+          <div className="data-wrap">
+            <div className="data-scroll">
+              <table className="data-table editor">
+                <thead>
+                  <tr>
+                    <th className="sel-col">
+                      <input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="Select all" />
+                    </th>
+                    {data.columns.map((c, ci) => {
                       const m = colMeta(c);
-                      const isEditing = editing?.row === i && editing?.col === c;
-                      if (isEditing) {
-                        return (
-                          <td key={c} className="editing-cell">
-                            {m && isBool(m) ? (
-                              <select autoFocus value={editValue} onChange={e => setEditValue(e.target.value)}
-                                onBlur={() => commitEdit(r, c)}
-                                onKeyDown={e => { if (e.key === "Enter") commitEdit(r, c); if (e.key === "Escape") setEditing(null); }}>
-                                <option value="true">true</option>
-                                <option value="false">false</option>
-                                {m.nullable && <option value="">∅ null</option>}
-                              </select>
-                            ) : (
-                              <input autoFocus value={editValue}
-                                type={m && isNumeric(m) ? "text" : "text"}
-                                onChange={e => setEditValue(e.target.value)}
-                                onBlur={() => commitEdit(r, c)}
-                                onKeyDown={e => { if (e.key === "Enter") commitEdit(r, c); if (e.key === "Escape") setEditing(null); }} />
-                            )}
-                          </td>
-                        );
-                      }
-                      const raw = r[c];
-                      const display = fmtCell(raw);
+                      const sorted = orderBy === c;
                       return (
-                        <td key={c} className={`data-cell${raw === null ? " null-cell" : ""}`}
-                          onDoubleClick={() => startEdit(i, c, raw)} title={display}>
-                          <span className="cell-val">{display}</span>
-                          {m?.fk && raw !== null && raw !== undefined && (
-                            <button className="fk-arrow" title={`Open ${m.fk.table}`}
-                              onClick={(e) => { e.stopPropagation(); setRelated({ table: m.fk!.table, column: m.fk!.column, value: String(raw) }); }}>→</button>
-                          )}
-                        </td>
+                        <th key={c} onClick={() => { if (orderBy === c) setDir(d => d === "asc" ? "desc" : "asc"); else { setOrderBy(c); setDir("asc"); } setOffset(0); }}
+                          className={`sortable${ci === 0 ? " pin-col" : ""}`}>
+                          <div className="th-inner">
+                            <span className="th-name">
+                              {m?.pk && <span className="pk-dot" title="Primary key"><Key size={11} /></span>}
+                              {formatColumnName(c)}
+                              {sorted && <span className="sort-ind">{dir === "asc" ? <ChevronUp size={11} /> : <ChevronDown size={11} />}</span>}
+                            </span>
+                            <span className="th-type">{m ? shortType(m) : ""}{m?.fk ? ` → ${m.fk.table}` : ""}</span>
+                          </div>
+                        </th>
                       );
                     })}
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.rows.map((r, i) => (
+                    <tr key={i} className={selected.has(i) ? "row-selected" : ""}>
+                      <td className="sel-col">
+                        <input type="checkbox" checked={selected.has(i)} onChange={() => toggleRow(i)} aria-label="Select row" />
+                      </td>
+                      {data.columns.map((c, ci) => {
+                        const m = colMeta(c);
+                        const pin = ci === 0 ? " pin-col" : "";
+                        const isEditing = editing?.row === i && editing?.col === c;
+                        if (isEditing) {
+                          return (
+                            <td key={c} className={`editing-cell${pin}`}>
+                              {m && isBool(m) ? (
+                                <select autoFocus value={editValue} onChange={e => setEditValue(e.target.value)}
+                                  onBlur={() => commitEdit(r, c)}
+                                  onKeyDown={e => { if (e.key === "Enter") commitEdit(r, c); if (e.key === "Escape") setEditing(null); }}>
+                                  <option value="true">true</option>
+                                  <option value="false">false</option>
+                                  {m.nullable && <option value="">∅ null</option>}
+                                </select>
+                              ) : (
+                                <input autoFocus value={editValue}
+                                  type={m && isNumeric(m) ? "text" : "text"}
+                                  onChange={e => setEditValue(e.target.value)}
+                                  onBlur={() => commitEdit(r, c)}
+                                  onKeyDown={e => { if (e.key === "Enter") commitEdit(r, c); if (e.key === "Escape") setEditing(null); }} />
+                              )}
+                            </td>
+                          );
+                        }
+                        const raw = r[c];
+                        const display = fmtCell(raw);
+                        return (
+                          <td key={c} className={`data-cell${raw === null ? " null-cell" : ""}${pin}`}
+                            onDoubleClick={() => startEdit(i, c, raw)} title={display}>
+                            <span className="cell-val">{display}</span>
+                            <FkGoto meta={m} raw={raw} onGoto={setRelated} />
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="data-pager">
+              <div className="data-pager-inner">
+                <button className="btn small" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))}>‹ Prev</button>
+                <span className="dim pager-count">
+                  {data.total === 0 ? "0 rows" : `${offset + 1}–${Math.min(offset + data.limit, data.total)} of ${data.total}`}
+                </span>
+                <button className="btn small" disabled={offset + data.limit >= data.total} onClick={() => setOffset(offset + 50)}>Next ›</button>
+              </div>
+            </div>
           </div>
         )
       )}
@@ -608,7 +681,7 @@ function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: Environm
       )}
 
       {related && (
-        <RelatedRowModal svc={svc} env={env} target={related} onClose={() => setRelated(null)} />
+        <RelatedRowModal svc={svc} env={env} target={related} onNavigate={setRelated} onClose={() => setRelated(null)} />
       )}
 
       <Modal open={confirmDelete} title={`Delete ${selected.size} row${selected.size === 1 ? "" : "s"}?`}
@@ -623,61 +696,144 @@ function PostgresBrowser({ svc, env, tables }: { svc: ServiceItem; env: Environm
   );
 }
 
-function FilterBar({ columns, filters, setFilters }: { columns: ColumnMeta[]; filters: Filter[]; setFilters: (f: Filter[]) => void }) {
-  const [col, setCol] = useState("");
-  const [op, setOp] = useState("contains");
-  const [val, setVal] = useState("");
-  useEffect(() => { if (!col && columns.length) setCol(columns[0].name); }, [columns]);
-  const opMeta = FILTER_OPS.find(o => o.op === op);
-  const add = () => {
-    if (!col) return;
-    setFilters([...filters, { col, op, val: opMeta?.needsVal ? val : "" }]);
-    setVal("");
-  };
+/** A "go to related row" jump target — where a foreign key points. */
+interface RelTarget { table: string; column: string; value: string }
+
+/**
+ * Shared relation affordance: renders the goto-related-row button next to a
+ * value when (and only when) the column has a detected foreign key and the
+ * value is non-null. Used by both the table cells and the detail row modal so
+ * the detection logic and navigation behavior stay identical.
+ */
+function FkGoto({ meta, raw, onGoto }: { meta: ColumnMeta | undefined; raw: unknown; onGoto: (t: RelTarget) => void }) {
+  if (!meta?.fk || raw === null || raw === undefined) return null;
+  const fk = meta.fk;
   return (
-    <div className="filter-bar">
-      {filters.map((f, i) => (
-        <span key={i} className="filter-chip">
-          {f.col} {FILTER_OPS.find(o => o.op === f.op)?.label ?? f.op}{f.op !== "is_null" && f.op !== "not_null" ? ` ${f.val}` : ""}
-          <button onClick={() => setFilters(filters.filter((_, j) => j !== i))}>✕</button>
-        </span>
-      ))}
-      <select value={col} onChange={e => setCol(e.target.value)} style={{ width: "auto" }}>
-        {columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
-      </select>
-      <select value={op} onChange={e => setOp(e.target.value)} style={{ width: "auto" }}>
-        {FILTER_OPS.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
-      </select>
-      {opMeta?.needsVal && (
-        <input value={val} onChange={e => setVal(e.target.value)} placeholder="value" style={{ maxWidth: 160 }}
-          onKeyDown={e => { if (e.key === "Enter") add(); }} />
-      )}
-      <button className="btn small" onClick={add}>+ Filter</button>
-    </div>
+    <button className="fk-arrow" title={`Open ${fk.table}`}
+      onClick={(e) => { e.stopPropagation(); onGoto({ table: fk.table, column: fk.column, value: String(raw) }); }}>
+      <ArrowRight size={12} />
+    </button>
   );
 }
 
-function RelatedRowModal({ svc, env, target, onClose }: {
-  svc: ServiceItem; env: EnvironmentInfo; target: { table: string; column: string; value: string }; onClose: () => void;
+/**
+ * Filter icon + anchored popover + removable chips, all living inline in the
+ * table toolbar row. Clicking a chip reopens the popover with that filter
+ * loaded for editing.
+ */
+function FilterControl({ columns, filters, setFilters }: { columns: ColumnMeta[]; filters: Filter[]; setFilters: (f: Filter[]) => void }) {
+  const [open, setOpen] = useState(false);
+  const [editIdx, setEditIdx] = useState<number | null>(null);
+  const [col, setCol] = useState("");
+  const [op, setOp] = useState("contains");
+  const [val, setVal] = useState("");
+  const anchorRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => { if (!col && columns.length) setCol(columns[0].name); }, [columns]);
+
+  // Close on outside click / Escape while the popover is open.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (anchorRef.current && !anchorRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+
+  const opMeta = FILTER_OPS.find(o => o.op === op);
+  const openBlank = () => { setEditIdx(null); setVal(""); setOpen(true); };
+  const openEdit = (i: number) => {
+    const f = filters[i];
+    setEditIdx(i); setCol(f.col); setOp(f.op); setVal(f.val); setOpen(true);
+  };
+  const apply = () => {
+    if (!col) return;
+    const f: Filter = { col, op, val: opMeta?.needsVal ? val : "" };
+    setFilters(editIdx === null ? [...filters, f] : filters.map((x, i) => (i === editIdx ? f : x)));
+    setVal(""); setEditIdx(null); setOpen(false);
+  };
+
+  return (
+    <>
+      <div className="filter-anchor" ref={anchorRef}>
+        <button type="button" className={`icon-btn filter-btn${filters.length ? " active" : ""}`}
+          title="Filters" aria-label="Filters" aria-expanded={open}
+          onClick={() => (open ? setOpen(false) : openBlank())}>
+          <FilterIcon size={14} />
+          {filters.length > 0 && <span className="filter-count">{filters.length}</span>}
+        </button>
+        {open && (
+          <div className="filter-pop">
+            <div className="filter-pop-row">
+              <select value={col} onChange={e => setCol(e.target.value)}>
+                {columns.map(c => <option key={c.name} value={c.name}>{formatColumnName(c.name)}</option>)}
+              </select>
+              <select value={op} onChange={e => setOp(e.target.value)}>
+                {FILTER_OPS.map(o => <option key={o.op} value={o.op}>{o.label}</option>)}
+              </select>
+            </div>
+            {opMeta?.needsVal && (
+              <input autoFocus value={val} onChange={e => setVal(e.target.value)} placeholder="value"
+                onKeyDown={e => { if (e.key === "Enter") apply(); }} />
+            )}
+            <div className="filter-pop-actions">
+              <button className="btn small ghost" onClick={() => setOpen(false)}>Cancel</button>
+              <button className="btn small" onClick={apply}>{editIdx === null ? "Add filter" : "Update filter"}</button>
+            </div>
+          </div>
+        )}
+      </div>
+      {filters.map((f, i) => (
+        <span key={i} className="filter-chip editable" onClick={() => openEdit(i)} title="Edit filter">
+          {formatColumnName(f.col)} {FILTER_OPS.find(o => o.op === f.op)?.label ?? f.op}
+          {f.op !== "is_null" && f.op !== "not_null" ? ` ${f.val}` : ""}
+          <button aria-label="Remove filter"
+            onClick={(e) => { e.stopPropagation(); setFilters(filters.filter((_, j) => j !== i)); }}>
+            <X size={11} />
+          </button>
+        </span>
+      ))}
+    </>
+  );
+}
+
+function RelatedRowModal({ svc, env, target, onNavigate, onClose }: {
+  svc: ServiceItem; env: EnvironmentInfo; target: RelTarget;
+  onNavigate: (t: RelTarget) => void; onClose: () => void;
 }) {
   const { data } = useQuery<{ table: string; columns: ColumnMeta[]; row: Record<string, unknown> | null }>({
     queryKey: ["svc-related", svc.id, env.id, target.table, target.column, target.value],
     queryFn: () => api.get(`/api/services/${svc.id}/data/related?environment_id=${env.id}&table=${encodeURIComponent(target.table)}&column=${encodeURIComponent(target.column)}&value=${encodeURIComponent(target.value)}`),
   });
   return (
-    <Modal open title={`${target.table} · ${target.column} = ${target.value}`} onClose={onClose}>
+    <Modal open title={`${target.table} · ${formatColumnName(target.column)} = ${target.value}`} onClose={onClose}>
       {!data ? <span className="spinner" /> : !data.row ? (
         <span className="dim">No matching row.</span>
       ) : (
         <div className="related-grid">
-          {data.columns.map(c => (
-            <div key={c.name} className="related-field">
-              <div className="related-key">
-                {c.pk && "🔑 "}{c.name} <span className="dim">{shortType(c)}</span>
+          {data.columns.map(c => {
+            const raw = data.row![c.name];
+            const json = jsonValueOf(c, raw);
+            return (
+              <div key={c.name} className="related-field">
+                <div className="related-key">
+                  {c.pk && <span className="pk-dot" title="Primary key"><Key size={11} /></span>}
+                  {formatColumnName(c.name)} <span className="dim">{shortType(c)}</span>
+                </div>
+                <div className="related-val">
+                  {json !== undefined ? <JsonValue value={json} /> : (
+                    <>
+                      {fmtCell(raw)}
+                      <FkGoto meta={c} raw={raw} onGoto={onNavigate} />
+                    </>
+                  )}
+                </div>
               </div>
-              <div className="related-val">{fmtCell(data.row![c.name])}</div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Modal>
@@ -688,6 +844,115 @@ function fmtCell(v: unknown): string {
   if (v === null || v === undefined) return "∅";
   if (typeof v === "object") return JSON.stringify(v);
   return String(v);
+}
+
+/**
+ * Returns the structured (object/array) form of a JSON-ish field value for
+ * the detail view, or undefined when the value should render as plain text.
+ */
+function jsonValueOf(c: ColumnMeta, raw: unknown): unknown {
+  if (raw !== null && typeof raw === "object") return raw;
+  if (isJson(c) && typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed !== null && typeof parsed === "object") return parsed;
+    } catch { /* not valid JSON — fall through to plain rendering */ }
+  }
+  return undefined;
+}
+
+// ─── Simplified-YAML rendering for JSON fields in the detail view ───────────
+//
+// {"x": "y"} renders as `x: y`; nested objects/arrays indent one step per
+// level, each nested line prefixed with a depth marker instead of plain
+// spaces: ▸ (depth 1), • (depth 2), · (depth 3), cycling deeper. A toggle
+// shows the raw pretty-printed JSON, and a copy button preserves access to
+// the exact original payload.
+
+const YAML_BULLETS = ["▸", "•", "·"] as const;
+const yamlBullet = (depth: number) => YAML_BULLETS[Math.max(0, depth - 1) % YAML_BULLETS.length];
+const isScalar = (v: unknown) => v === null || typeof v !== "object";
+const scalarText = (v: unknown): string => {
+  if (v === null) return "null";
+  if (typeof v === "string") return v === "" ? '""' : v;
+  return JSON.stringify(v);
+};
+
+function YamlLine({ depth, bullet, yamlKey, value, muted }: {
+  depth: number; bullet?: string; yamlKey?: string; value?: string; muted?: boolean;
+}) {
+  return (
+    <div className="yaml-line" style={{ paddingLeft: depth * 16 }}>
+      {bullet && <span className="yaml-bullet">{bullet}</span>}
+      {yamlKey !== undefined && <span className="yaml-key">{yamlKey}:</span>}
+      {value !== undefined && <span className={`yaml-val${muted ? " dim" : ""}`}>{value}</span>}
+    </div>
+  );
+}
+
+function YamlLines({ value, depth }: { value: unknown; depth: number }) {
+  if (isScalar(value)) return <YamlLine depth={depth} bullet={depth > 0 ? yamlBullet(depth) : undefined} value={scalarText(value)} />;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <YamlLine depth={depth} bullet={depth > 0 ? yamlBullet(depth) : undefined} value="[]" muted />;
+    return (
+      <>
+        {value.map((item, i) => isScalar(item) ? (
+          <YamlLine key={i} depth={depth} bullet={yamlBullet(Math.max(depth, 1))} value={scalarText(item)} />
+        ) : (
+          <Fragment key={i}>
+            <YamlLine depth={depth} bullet={yamlBullet(Math.max(depth, 1))} value={`#${i + 1}`} muted />
+            <YamlLines value={item} depth={depth + 1} />
+          </Fragment>
+        ))}
+      </>
+    );
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length === 0) return <YamlLine depth={depth} bullet={depth > 0 ? yamlBullet(depth) : undefined} value="{}" muted />;
+  return (
+    <>
+      {entries.map(([k, v]) => isScalar(v) ? (
+        <YamlLine key={k} depth={depth} bullet={depth > 0 ? yamlBullet(depth) : undefined} yamlKey={k} value={scalarText(v)} />
+      ) : (
+        <Fragment key={k}>
+          <YamlLine depth={depth} bullet={depth > 0 ? yamlBullet(depth) : undefined} yamlKey={k} />
+          <YamlLines value={v} depth={depth + 1} />
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
+/** JSON field in the detail view: simplified-YAML by default, raw toggle + copy. */
+function JsonValue({ value }: { value: unknown }) {
+  const [showRaw, setShowRaw] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const rawText = JSON.stringify(value, null, 2);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(rawText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    } catch { /* clipboard unavailable (e.g. plain http) — button is best-effort */ }
+  };
+  return (
+    <div className="json-view">
+      <div className="json-tools">
+        <button type="button" className={`json-tool${showRaw ? " active" : ""}`}
+          title={showRaw ? "Show simplified view" : "Show raw JSON"}
+          aria-label={showRaw ? "Show simplified view" : "Show raw JSON"}
+          onClick={() => setShowRaw(s => !s)}>
+          <Braces size={11} />
+        </button>
+        <button type="button" className="json-tool" title="Copy raw JSON" aria-label="Copy raw JSON" onClick={copy}>
+          {copied ? <Check size={11} /> : <Copy size={11} />}
+        </button>
+      </div>
+      {showRaw
+        ? <pre className="json-raw">{rawText}</pre>
+        : <div className="yaml-view"><YamlLines value={value} depth={0} /></div>}
+    </div>
+  );
 }
 
 interface KeyValue {
@@ -767,7 +1032,7 @@ function RedisBrowser({ svc, env, dbs }: { svc: ServiceItem; env: EnvironmentInf
             <table className="data-table editor">
               <thead><tr>
                 <th className="sel-col"><input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="Select all" /></th>
-                <th><div className="th-inner"><span className="th-name">Key</span></div></th>
+                <th className="pin-col"><div className="th-inner"><span className="th-name">Key</span></div></th>
                 <th><div className="th-inner"><span className="th-name">Type</span></div></th>
                 <th><div className="th-inner"><span className="th-name">TTL</span></div></th>
               </tr></thead>
@@ -775,7 +1040,7 @@ function RedisBrowser({ svc, env, dbs }: { svc: ServiceItem; env: EnvironmentInf
                 {keys.map(k => (
                   <tr key={k.key} className={selected.has(k.key) ? "row-selected" : ""}>
                     <td className="sel-col"><input type="checkbox" checked={selected.has(k.key)} onChange={() => toggleKey(k.key)} aria-label="Select key" /></td>
-                    <td className="data-cell" style={{ cursor: "pointer" }} onClick={() => setViewKey(k.key)} title={k.key}>
+                    <td className="data-cell pin-col" style={{ cursor: "pointer" }} onClick={() => setViewKey(k.key)} title={k.key}>
                       <code>{k.key}</code>
                     </td>
                     <td><span className={`badge ${REDIS_TYPE_COLOR[k.type] ?? "plain"}`}>{k.type}</span></td>
@@ -936,18 +1201,54 @@ function statusBadge(status: number) {
 
 // ─── Env vars ────────────────────────────────────────────────────────────────
 
-function EnvVarsEditor({ svc, projectId }: { svc: ServiceItem; projectId: number }) {
+/** Dirty/compare form: empty-key rows are placeholders, not real changes. */
+const serializeEnvRows = (rows: EnvRow[]): string =>
+  JSON.stringify(rows.filter(r => r.key.trim()).map(r => [r.key, r.value, r.is_secret]));
+
+function EnvVarsEditor({ svc, projectId, rows: stagedRows, setRows: setStagedRows, baseline, setBaseline, onStatus }: {
+  svc: ServiceItem; projectId: number;
+  rows: EnvRow[] | null;
+  setRows: (r: EnvRow[] | null) => void;
+  baseline: string | null;
+  setBaseline: (b: string | null) => void;
+  onStatus: (s: HeaderSave | null) => void;
+}) {
   const qc = useQueryClient();
   const toast = useToast();
   const auto = svc.env_vars.filter(v => v.source === "auto");
-  const [rows, setRows] = useState(
-    svc.env_vars.filter(v => v.source === "user").map(v => ({ key: v.key, value: v.value, is_secret: v.is_secret }))
-  );
+  const serverRows: EnvRow[] = svc.env_vars
+    .filter(v => v.source === "user")
+    .map(v => ({ key: v.key, value: v.value, is_secret: v.is_secret }));
+  const serverSer = serializeEnvRows(serverRows);
+
+  // stagedRows === null → no local edits, the editor mirrors server truth.
+  const rows = stagedRows ?? serverRows;
+  const setRows = (next: EnvRow[]) => setStagedRows(next);
+
+  // Dirty = staged content differs from the last-known saved truth. Right
+  // after a save the project query lags one refetch behind, so the just-saved
+  // serialization (baseline) stands in for the server until it catches up.
+  const dirty = serializeEnvRows(rows) !== (baseline ?? serverSer);
+
+  // Background refetch brought new server truth: adopt it only when nothing
+  // is unsaved — staged edits are never clobbered by polling.
+  useEffect(() => {
+    if (!dirty) {
+      setStagedRows(null);
+      setBaseline(null);
+    }
+    // Deps are server truth only: an edit flipping `dirty` must not reseed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverSer]);
 
   const save = useMutation({
-    mutationFn: () => api.put<{ redeployed?: { environment: string }[] }>(
-      `/api/services/${svc.id}/env-vars`, { vars: rows.filter(r => r.key.trim()) }),
-    onSuccess: (res) => {
+    mutationFn: async () => {
+      const sent = rows.filter(r => r.key.trim());
+      const res = await api.put<{ redeployed?: { environment: string }[] }>(
+        `/api/services/${svc.id}/env-vars`, { vars: sent });
+      return { res, sent };
+    },
+    onSuccess: ({ res, sent }) => {
       const envs = res?.redeployed ?? [];
       toast.show(
         envs.length
@@ -956,18 +1257,21 @@ function EnvVarsEditor({ svc, projectId }: { svc: ServiceItem; projectId: number
         "ok",
       );
       qc.invalidateQueries({ queryKey: ["project", projectId] });
+      // The server echoes secrets masked — mirror that locally so the saved
+      // state compares clean, unless the user kept editing while in flight.
+      const normalized = sent.map(r => (r.is_secret ? { ...r, value: SECRET_MASK } : r));
+      setBaseline(serializeEnvRows(normalized));
+      if (serializeEnvRows(rows) === serializeEnvRows(sent)) setStagedRows(normalized);
     },
     onError: (e) => toast.show(String(e), "fail"),
   });
+
+  useHeaderSave(onStatus, dirty, save.isPending, () => save.mutate());
 
   return (
     <>
       <div className="row" style={{ marginTop: "1.75rem" }}>
         <h2 style={{ margin: 0 }}>Environment</h2>
-        <div className="spacer" />
-        <button className="btn primary" disabled={save.isPending} onClick={() => save.mutate()}>
-          {save.isPending ? <span className="spinner" /> : <><RefreshCw size={14} /> Save</>}
-        </button>
       </div>
       {auto.length > 0 && (
         <>
@@ -994,7 +1298,7 @@ function EnvVarsEditor({ svc, projectId }: { svc: ServiceItem; projectId: number
               onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, value: e.target.value } : x))}
             />
             <label className="row" style={{ gap: "0.3rem", cursor: "pointer" }} title="Secret">
-              <input type="checkbox" checked={r.is_secret} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, is_secret: e.target.checked } : x))} />🔒
+              <input type="checkbox" checked={r.is_secret} onChange={e => setRows(rows.map((x, j) => j === i ? { ...x, is_secret: e.target.checked } : x))} /><Lock size={13} />
             </label>
             <button className="btn small ghost" onClick={() => setRows(rows.filter((_, j) => j !== i))}>✕</button>
           </div>

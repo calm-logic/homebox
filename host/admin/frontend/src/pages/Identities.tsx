@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, Github } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
+import PageHelp from "../components/PageHelp";
 import { useToast } from "../lib/toast";
 import type { Identity } from "../lib/types";
 
@@ -57,12 +58,27 @@ export function Identities() {
     <>
       <div className="row">
         <h1 style={{ margin: 0 }}>Identities</h1>
+        <PageHelp title="About identities">
+          <p>
+            Identities are the whitelist for signing in to this admin. An email listed and
+            enabled here can log in with Google or GitHub — no password involved. Anyone
+            else is denied, so the list is the entire access-control story.
+          </p>
+          <p>
+            The email must match the verified email of the Google or GitHub account used at
+            login. Disabling an identity blocks sign-in without deleting its login history;
+            removing it deletes the row, and you can re-add it later.
+          </p>
+          <p>
+            Identities don't only come from the Add button: linking this host to a Homebox
+            account automatically adds (or re-enables) the account's verified email so you
+            can't lock yourself out, and when linked, identities sync to your other nodes
+            through the encrypted account vault.
+          </p>
+        </PageHelp>
         <div className="spacer" />
         <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add</button>
       </div>
-      <p className="lede" style={{ marginTop: "0.5rem" }}>
-        Emails allowed to sign in via Google or GitHub. Anyone else is denied.
-      </p>
 
       {identities && identities.length > 0 ? (
         <table className="data-table">

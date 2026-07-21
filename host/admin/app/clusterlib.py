@@ -148,6 +148,14 @@ async def apply_app_serving(session: AsyncSession, serving: bool) -> dict[str, A
     return {"serving": True, "connector": "started" if ok else f"start failed: {msg}"}
 
 
+def cluster_display_name(name: Any) -> str:
+    """Coalesce a missing/empty cluster name to the default "home". The control
+    plane already does this at every emission point; this is the node-side
+    defensive twin for older CPs (and for a local state blob saved before the
+    default existed)."""
+    return (str(name).strip() if name else "") or "home"
+
+
 def roster_role(entry: dict[str, Any]) -> str:
     """This roster entry's cluster role, defaulting to 'peer' for pre-role
     control planes / older nodes that never advertised one."""

@@ -5,15 +5,15 @@ drift between host/admin/app/vaultlib.py and cloud/control-plane/main.py:
 payload shapes, auth, 404/409 handling, Fernet/b64 formats, and proves
 encryption at rest (plaintext secrets never appear in the CP database).
 
-Runs inside the normal host/admin suite; the control plane is imported from
-cloud/control-plane with its own throwaway sqlite file.
+Runs inside the normal host/admin suite. The control plane now stores its state
+in Postgres, so this test needs one: it defaults to a local `homebox_cp_e2e_test`
+database (override with CP_E2E_DATABASE_URL) and SKIPS if none is reachable.
 """
 from __future__ import annotations
 
 import importlib.util
 import os
 import sys
-import tempfile
 from datetime import timedelta
 from pathlib import Path
 
@@ -26,16 +26,53 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CP_MAIN = REPO_ROOT / "cloud" / "control-plane" / "main.py"
 
-# Control-plane env must be pinned before the module executes (it opens its
-# DB and derives its signing/master keys at import time).
-os.environ["CONTROL_PLANE_DB"] = tempfile.mktemp(suffix=".sqlite3")
+# Control-plane env must be pinned before the module executes (it opens its DB
+# and derives its signing/master keys at import time).
 os.environ.setdefault("ACCOUNTS_MODE", "open")
-for _k in ("GCS_BUCKET", "STRIPE_SECRET_KEY", "VAULT_MASTER_KEY"):
+for _k in ("STRIPE_SECRET_KEY", "VAULT_MASTER_KEY"):
     os.environ.pop(_k, None)
 
-_spec = importlib.util.spec_from_file_location("cp_main_e2e", CP_MAIN)
-cp = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cp)
+_CP_DB_URL = os.environ.get("CP_E2E_DATABASE_URL", "postgresql:///homebox_cp_e2e_test")
+
+
+def _prepare_cp_db(url: str) -> None:
+    """Create the e2e database if missing and drop any existing tables so the
+    control plane's _init_db() rebuilds a clean schema on import."""
+    import psycopg
+    from psycopg import conninfo
+    try:
+        conn = psycopg.connect(url, connect_timeout=5)
+    except psycopg.OperationalError as e:
+        if "does not exist" not in str(e):
+            raise
+        info = conninfo.conninfo_to_dict(url)
+        dbname = info.get("dbname", "postgres")
+        with psycopg.connect(**{**info, "dbname": "postgres"}, autocommit=True, connect_timeout=5) as c:
+            c.execute(f'CREATE DATABASE "{dbname}"')
+        conn = psycopg.connect(url, connect_timeout=5)
+    with conn:
+        conn.autocommit = True
+        for (t,) in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname='public'").fetchall():
+            conn.execute(f'DROP TABLE IF EXISTS "{t}" CASCADE')
+    conn.close()
+
+
+try:
+    _prepare_cp_db(_CP_DB_URL)
+    # Point ONLY the control plane here (CONTROL_PLANE_DATABASE_URL wins in
+    # cp.main); the admin app under test keeps its own DATABASE_URL/sqlite.
+    os.environ["CONTROL_PLANE_DATABASE_URL"] = _CP_DB_URL
+    _spec = importlib.util.spec_from_file_location("cp_main_e2e", CP_MAIN)
+    cp = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(cp)
+    _PG_OK = True
+except Exception as _e:  # noqa: BLE001 — no Postgres available → skip the module
+    cp = None
+    _PG_OK = False
+    _PG_SKIP_REASON = f"control-plane e2e needs Postgres (set CP_E2E_DATABASE_URL): {_e}"
+
+pytestmark = pytest.mark.skipif(not _PG_OK, reason="control-plane e2e needs a reachable Postgres")
 
 from app import clusterlib, crypto, vaultlib  # noqa: E402
 from app.models import Integration, Project  # noqa: E402
@@ -75,7 +112,16 @@ def real_cp(monkeypatch):
 
 
 def _cp_db_bytes() -> bytes:
-    return Path(os.environ["CONTROL_PLANE_DB"]).read_bytes()
+    """Dump every row of every CP table as text — the encryption-at-rest check
+    asserts no plaintext secret appears anywhere in the store."""
+    parts: list[str] = []
+    with cp.db() as conn:
+        tables = [r["tablename"] for r in conn.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname='public'").fetchall()]
+        for t in tables:
+            for row in conn.execute(f"SELECT * FROM {t}").fetchall():
+                parts.append(repr(dict(row)))
+    return "\n".join(parts).encode()
 
 
 def test_two_clusters_converge_through_real_control_plane():

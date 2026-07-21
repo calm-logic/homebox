@@ -324,6 +324,137 @@ async def add_cloudflare_domain(
     return {**_serialize(result), "pending": True}
 
 
+# ───── Domain usage drilldown ─────────────────────────────────────────────────
+
+
+_TARGET_LABELS = {"aws": "AWS", "gcp": "Google Cloud", "cloudflare": "Cloudflare"}
+
+
+def _location_for(resolved, locations: list[dict]) -> dict:
+    """Where a resolved service target runs, as {kind, id, name} for the UI.
+    Cloud targets name the provider; homebox targets name the cluster/node
+    from the account overview (falling back to the raw id), or the local
+    install when no location is pinned."""
+    if resolved.target != "homebox":
+        return {"kind": "cloud", "id": resolved.target,
+                "name": _TARGET_LABELS.get(resolved.target, resolved.target)}
+    loc = resolved.location or {}
+    if loc.get("cluster_id"):
+        name = next((l["name"] for l in locations
+                     if l["kind"] == "cluster" and l["id"] == loc["cluster_id"]),
+                    loc["cluster_id"])
+        return {"kind": "cluster", "id": loc["cluster_id"], "name": name}
+    if loc.get("node_id"):
+        name = next((l["name"] for l in locations
+                     if l["kind"] == "node" and l["id"] == loc["node_id"]),
+                    loc["node_id"])
+        return {"kind": "node", "id": loc["node_id"], "name": name}
+    local = next((l for l in locations if l.get("local")), None)
+    return {"kind": "local", "id": local["id"] if local else None,
+            "name": local["name"] if local else "This Homebox"}
+
+
+@router.get("/{domain_id}")
+async def domain_usage(
+    domain_id: int,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """The domain plus everything served under it: one connection per
+    (public service, environment) whose effective domain resolves here
+    (env override → project domain → primary fallback), with the canonical
+    hostname derived exactly like deploys derive it (app/urls.py), where the
+    service runs (local/cluster/node/cloud) and its latest instance status.
+    Also lists per-host DNS override records this install wrote on the
+    domain (targetslib.load_dns_overrides)."""
+    from .. import targetslib, urls
+    from ..models import Deployment, Environment, Project, Service, ServiceInstance
+    from .services import _account_locations
+
+    d = await session.get(Domain, domain_id)
+    if not d:
+        raise HTTPException(404, "Domain not found")
+
+    primary = (await session.execute(
+        select(Domain).where(Domain.is_primary == True)  # noqa: E712
+    )).scalars().first()
+    locations, _linked = await _account_locations(session)
+
+    projects = (await session.execute(
+        select(Project).where(Project.managed == True)  # noqa: E712
+    )).scalars().all()
+
+    connections: list[dict] = []
+    for project in projects:
+        base = project.domain_mode == "base"
+        envs = (await session.execute(
+            select(Environment).where(Environment.project_id == project.id)
+        )).scalars().all()
+        public = [s for s in (await session.execute(
+            select(Service).where(Service.project_id == project.id)
+        )).scalars().all() if s.is_public]
+        if not public:
+            continue
+        for env in envs:
+            effective = env.domain_id or project.domain_id \
+                or (primary.id if primary else None)
+            if effective != d.id:
+                continue
+            targets_map = await targetslib.effective_targets(session, project, env)
+            latest = (await session.execute(
+                select(Deployment).where(Deployment.environment_id == env.id)
+                .order_by(Deployment.created_at.desc()).limit(1)
+            )).scalars().first()
+            instances: dict[str, ServiceInstance] = {}
+            if latest:
+                instances = {i.service_name: i for i in (await session.execute(
+                    select(ServiceInstance)
+                    .where(ServiceInstance.deployment_id == latest.id)
+                )).scalars().all()}
+            for svc in public:
+                label = svc.subdomain_label or ""
+                host = urls.full_host(
+                    project.name, "" if base else label,
+                    env.slug_suffix or "", d.name, base=base)
+                path = f"/{label}" if base and label else None
+                resolved = targetslib.resolve_for(targets_map, svc.name)
+                inst = instances.get(svc.name)
+                status = (resolved.state.get("status") if resolved.cloud
+                          else (inst.status if inst else None))
+                connections.append({
+                    "hostname": host,
+                    "path": path,
+                    "url": f"https://{host}{path or ''}",
+                    "project_id": project.id,
+                    "project_name": project.name,
+                    "project_icon": project.icon,
+                    "environment_id": env.id,
+                    "environment_name": env.name,
+                    "service_id": svc.id,
+                    "service_name": svc.name,
+                    "service_kind": svc.kind,
+                    "target": resolved.target,
+                    "location": _location_for(resolved, locations),
+                    "status": status,
+                    "deploy_status": latest.status if latest else None,
+                })
+
+    connections.sort(key=lambda c: (c["hostname"], c["path"] or ""))
+
+    overrides = await targetslib.load_dns_overrides(session)
+    suffix = f".{d.name.lower()}"
+    own_overrides = [
+        {"hostname": host, **{k: meta.get(k) for k in
+         ("cname_target", "project", "env", "service", "created_at")}}
+        for host, meta in sorted(overrides.items())
+        if (meta.get("domain") or "").lower() == d.name.lower()
+        or host.lower().endswith(suffix)
+    ]
+
+    return {**_serialize(d), "connections": connections,
+            "dns_overrides": own_overrides}
+
+
 class PatchDomainBody(BaseModel):
     primary: bool | None = None
 

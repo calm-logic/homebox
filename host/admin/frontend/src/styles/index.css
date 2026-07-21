@@ -931,6 +931,54 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
   border-bottom: 1px solid var(--border);
 }
 .cluster-block-nodes { padding: 0.15rem 0.9rem 0.3rem; }
+/* Status rows folded into this node's cluster block (license banners, minted
+   join token, heartbeat/sync freshness) when the legacy roster card is hidden. */
+.cluster-block-extras {
+  display: grid; gap: 0.55rem;
+  padding: 0.6rem 0.9rem 0.35rem;
+  border-bottom: 1px solid var(--border);
+}
+.cluster-block-extras .banner { margin-top: 0; }
+
+/* Click-to-edit cluster name — the title swaps to a same-sized input, with a
+   pencil affordance that only shows on hover/focus. */
+button.cluster-name {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  background: none; border: 0; padding: 0; margin: 0;
+  color: inherit; font: inherit; cursor: text; min-width: 0;
+}
+.cluster-name-pencil { color: var(--text-dim); opacity: 0; transition: opacity 120ms; flex-shrink: 0; }
+button.cluster-name:hover .cluster-name-pencil,
+button.cluster-name:focus-visible .cluster-name-pencil { opacity: 0.75; }
+input.cluster-name-input {
+  font: inherit; font-weight: 600; color: inherit;
+  background: transparent; border: 0; border-bottom: 1px dashed var(--accent-2);
+  border-radius: 0; outline: none; padding: 0; margin: 0;
+  min-width: 4ch; max-width: 100%; height: auto;
+}
+
+/* This node's row expands in place to its local health panel. */
+.registry-node.expandable { cursor: pointer; }
+.registry-node-detail { padding: 0.1rem 0 0.75rem 1.5rem; cursor: default; }
+
+/* Status pill that doubles as the node-actions dropdown trigger. */
+button.pill-menu { border: 0; cursor: pointer; font-family: inherit; line-height: inherit; }
+button.pill-menu:hover { filter: brightness(1.15); }
+/* Dropdown menus render in a document.body portal (cluster blocks clip with
+   overflow:hidden) — fixed, anchored via inline top/left, flipping upward
+   near the viewport bottom. right:auto cancels .menu's anchored right edge. */
+.menu.menu-portal { position: fixed; right: auto; }
+.menu-item.danger { color: var(--danger); }
+.menu-item.danger:hover:not(:disabled) { background: rgba(239, 111, 108, 0.12); }
+
+/* Page title row with the account state pill flush right. */
+.page-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 0.75rem; margin: 0 0 0.5rem;
+}
+.page-head h1 { margin: 0; }
+button.account-pill { border: 0; cursor: pointer; font-family: inherit; line-height: inherit; }
+button.account-pill:hover { filter: brightness(1.15); }
 .registry-node {
   display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
   padding: 0.4rem 0;
@@ -990,3 +1038,162 @@ input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline
 .node-picker { display: grid; gap: 0.45rem; margin-top: 0.7rem; }
 .node-picker label { cursor: pointer; }
 .node-picker input[type="checkbox"] { width: auto; }
+
+/* ── Data viewer polish (sticky columns, filter popover, overlay pager,
+      lucide markers, YAML view for JSON fields) ─────────────────────────── */
+
+/* Sticky checkbox + first data column while scrolling horizontally. The
+   scroll container clips at the rounded border, so pinned cells need their
+   own opaque background for content to slide under cleanly. */
+.data-table.editor .sel-col {
+  position: sticky; left: 0; z-index: 1;
+  background: var(--panel);
+}
+.data-table.editor th.sel-col { z-index: 3; background: var(--panel-2); }
+.data-table.editor .pin-col {
+  position: sticky; left: 34px; z-index: 1;
+  background: var(--panel);
+  border-right: 1px solid var(--border-strong);
+  box-shadow: 6px 0 10px -6px rgba(0, 0, 0, 0.45);
+}
+.data-table.editor th.pin-col { z-index: 3; background: var(--panel-2); }
+:root[data-theme="light"] .data-table.editor .pin-col {
+  box-shadow: 6px 0 10px -6px rgba(20, 30, 50, 0.16);
+}
+/* Selected-row tint is translucent; pinned cells composite it over an opaque
+   base so scrolled content never bleeds through. */
+.data-table.editor tr.row-selected td.sel-col,
+.data-table.editor tr.row-selected td.pin-col {
+  background: linear-gradient(var(--accent-glow), var(--accent-glow)) var(--panel);
+}
+/* Hover must beat the selected-pin rule too, matching unpinned cells. */
+.data-table.editor tbody tr:hover td.sel-col,
+.data-table.editor tbody tr:hover td.pin-col { background: var(--panel-2); }
+.data-table.editor th.sortable.pin-col:hover {
+  background: linear-gradient(var(--tint), var(--tint)) var(--panel-2);
+}
+
+/* Lucide markers sized to the table's text metrics. */
+.data-table.editor .pk-dot,
+.related-key .pk-dot { display: inline-flex; align-items: center; color: var(--warn); }
+.related-key .pk-dot { vertical-align: -1.5px; margin-right: 4px; }
+.data-table.editor .sort-ind { display: inline-flex; align-items: center; }
+.fk-arrow { display: inline-flex; align-items: center; vertical-align: middle; }
+.filter-chip button { display: inline-flex; align-items: center; }
+.related-val .fk-arrow { opacity: 1; margin-left: 8px; }
+
+/* Filter icon + anchored popover + chips in the table toolbar. */
+.filter-anchor { position: relative; display: inline-flex; }
+.icon-btn.filter-btn {
+  position: relative;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  width: 30px; height: 30px;
+}
+.icon-btn.filter-btn:hover { color: var(--text); background: var(--panel-2); }
+.icon-btn.filter-btn.active {
+  color: var(--accent);
+  border-color: var(--accent-2);
+  background: linear-gradient(var(--accent-glow), var(--accent-glow)) var(--panel);
+}
+.filter-count {
+  position: absolute; top: -6px; right: -6px;
+  min-width: 15px; height: 15px; padding: 0 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent); color: #06140e;
+  border-radius: 999px; font-size: 0.62rem; font-weight: 700; line-height: 1;
+}
+.filter-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
+  display: flex; flex-direction: column; gap: 0.45rem;
+  min-width: 270px; padding: 0.6rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+.filter-pop-row { display: flex; gap: 0.4rem; }
+.filter-pop-row select { flex: 1; min-width: 0; }
+.filter-pop-actions { display: flex; justify-content: flex-end; gap: 0.4rem; }
+.filter-chip.editable { cursor: pointer; transition: border-color 0.12s; }
+.filter-chip.editable:hover { border-color: var(--accent-2); }
+
+/* Pagination overlay pinned to the bottom of the table container. The bar
+   itself ignores pointer events so horizontal scrolling stays usable; only
+   the pill is interactive. */
+.data-wrap { position: relative; margin-top: 0.5rem; }
+.data-wrap .data-scroll {
+  margin-top: 0;
+  padding-bottom: 52px;              /* keep the last row clear of the pager */
+  background: var(--panel);          /* padded strip matches the table body */
+}
+.data-pager {
+  position: absolute; left: 0; right: 0; bottom: 10px;
+  display: flex; justify-content: center;
+  pointer-events: none;
+  z-index: 5;                        /* above sticky header/column cells */
+}
+.data-pager-inner {
+  pointer-events: auto;
+  display: inline-flex; align-items: center; gap: 0.5rem;
+  padding: 0.28rem 0.5rem;
+  background: var(--bg-elev);
+  background: color-mix(in srgb, var(--bg-elev) 78%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  box-shadow: 0 8px 24px -14px rgba(0, 0, 0, 0.55);
+}
+:root[data-theme="light"] .data-pager-inner {
+  box-shadow: 0 8px 24px -14px rgba(20, 30, 50, 0.3);
+}
+.data-pager-inner .pager-count { font-size: 0.78rem; white-space: nowrap; }
+
+/* JSON fields in the detail view: simplified YAML + raw toggle/copy. */
+.json-view { display: flex; flex-direction: column; gap: 4px; }
+.json-tools { display: flex; justify-content: flex-end; gap: 4px; }
+.json-tool {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 20px;
+  border: 1px solid var(--border); border-radius: 5px;
+  background: transparent; color: var(--muted);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.json-tool:hover { color: var(--text); border-color: var(--border-strong); }
+.json-tool.active { color: var(--accent); border-color: var(--accent-2); }
+.yaml-view {
+  font-family: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem; line-height: 1.6;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.65rem;
+  max-height: 40vh; overflow: auto;
+}
+.yaml-line { word-break: break-word; }
+.yaml-bullet { color: var(--muted); margin-right: 6px; }
+.yaml-key { color: var(--text-dim); font-weight: 600; margin-right: 6px; }
+.yaml-val { color: var(--text); white-space: pre-wrap; }
+.json-raw {
+  margin: 0; max-height: 40vh; overflow: auto;
+  font-size: 0.75rem; white-space: pre-wrap; word-break: break-word;
+}
+
+/* Page-help (?) button + modal body (PageHelp component) */
+.page-help-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.5rem; height: 1.5rem;
+  border-radius: 50%;
+  background: transparent; border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  vertical-align: middle;
+  transition: color 120ms, background 120ms;
+}
+.page-help-btn:hover { color: var(--text); background: var(--btn-bg); }
+.page-help-body { font-size: 0.88rem; line-height: 1.55; color: var(--text-dim); }
+.page-help-body p { margin: 0 0 0.75rem; }
+.page-help-body p:last-child { margin-bottom: 0; }

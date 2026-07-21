@@ -99,7 +99,7 @@ async def cluster_status(
         "active": True,
         "node_id": node_id,
         "cluster_id": state["cluster_id"],
-        "name": state.get("name"),
+        "name": clusterlib.cluster_display_name(state.get("name")),
         "node_name": state.get("node_name"),
         "node_role": settings.node_role,
         "peer_url": state.get("peer_url"),
@@ -684,6 +684,45 @@ async def account_invite(
     return {"ok": True, "invited": body.node_id, "cluster_id": cluster_id}
 
 
+class RenameClusterBody(BaseModel):
+    name: str
+
+
+@router.patch("/account/clusters/{cluster_id}/name")
+async def account_rename_cluster(
+    cluster_id: str,
+    body: RenameClusterBody,
+    user: str = Depends(require_session_api),
+    session: AsyncSession = Depends(get_session),
+):
+    """Rename one of the account's clusters via the control plane (duplicates
+    allowed; CP trims + validates and 404s clusters the account doesn't own).
+    When it's THIS node's own cluster, the local state blob's name is updated
+    too — heartbeats only refresh roster/license, never the name, so nothing
+    else would pick the rename up locally."""
+    acct = await clusterlib.load_account(session)
+    if not acct:
+        raise HTTPException(412, "Link your homebox.sh account first.")
+    from .. import crypto
+    try:
+        resp = await clusterlib._cp(
+            "PATCH", acct["control_plane_url"], f"/v1/clusters/{cluster_id}",
+            token=crypto.decrypt(acct["token_encrypted"]),
+            body={"name": body.name})
+    except clusterlib.ControlPlaneError as e:
+        # Pass CP 4xx (400 validation, 404 not-yours/unknown, …) through.
+        if e.status_code and 400 <= e.status_code < 500:
+            raise HTTPException(e.status_code, e.detail)
+        raise HTTPException(502, str(e))
+    name = resp.get("name") or body.name.strip()
+    state = await clusterlib.load_cluster(session)
+    if state and state.get("cluster_id") == cluster_id:
+        state["name"] = name
+        await clusterlib.save_cluster(session, state)
+        await session.commit()
+    return {"ok": True, "name": name}
+
+
 # ───── fleet god view: topology + remote-op directives ────────────────────────
 
 
@@ -705,6 +744,11 @@ async def account_topology(
             token=crypto.decrypt(acct["token_encrypted"]))
     except clusterlib.ControlPlaneError as e:
         raise _cp_http(e)
+    # Defensive: the CP coalesces empty cluster names to "home" already, but an
+    # older CP may not — never surface an empty name to the UI.
+    for c in topo.get("clusters") or []:
+        if isinstance(c, dict):
+            c["name"] = clusterlib.cluster_display_name(c.get("name"))
     topo["this_node_id"] = await clusterlib.get_node_id(session)
     provisions = await clusterlib._get_setting(session, "node_provisions")
     topo["provisions"] = provisions if isinstance(provisions, list) else []

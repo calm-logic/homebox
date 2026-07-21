@@ -1,9 +1,11 @@
-import { FormEvent, useState } from "react";
-import { Link } from "react-router-dom";
+import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, Cloud, Wrench, Copy, Star } from "lucide-react";
+import { Plus, Trash2, Cloud, Wrench, Copy, Star, MoreVertical } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
+import PageHelp from "../components/PageHelp";
 import { useToast } from "../lib/toast";
 import type { DomainItem, IntegrationItem, TunnelStatus } from "../lib/types";
 
@@ -74,12 +76,34 @@ export function DomainsPage() {
     <>
       <div className="row">
         <h1 style={{ margin: 0 }}>Domains</h1>
+        <PageHelp title="About domains">
+          <p>
+            Domains here are routed to this host through your Cloudflare Tunnel. The one
+            marked <strong>Primary</strong> is where project environments get their default
+            subdomains.
+          </p>
+          <p>
+            Adding a Cloudflare-managed domain creates (or connects) the zone in your
+            Cloudflare account and points the apex and a <code>*.domain</code> wildcard at
+            the tunnel, so any subdomain reaches this host without per-app DNS records.
+            Brand-new domains sit at <strong>Pending nameservers</strong> until the
+            nameservers you set at your registrar take effect; Homebox checks in the
+            background and finishes routing automatically. You can also add a domain and
+            manage DNS yourself.
+          </p>
+          <p>
+            A monitor re-checks DNS hourly. If records drift — for example a record ends up
+            pointing at a different tunnel — a banner appears here with a one-click Repair
+            that rewrites the records to this host's tunnel.
+          </p>
+          <p>
+            When this host is linked to a Homebox account, domains sync to your other nodes
+            through the encrypted account vault.
+          </p>
+        </PageHelp>
         <div className="spacer" />
         <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add</button>
       </div>
-      <p className="lede" style={{ marginTop: "0.5rem" }}>
-        Domains routed to this host through your Cloudflare Tunnel.
-      </p>
 
       {tunnel && !tokenSet && (
         <div className="card" style={{ marginBottom: "1rem" }}>
@@ -144,14 +168,91 @@ export function DomainsPage() {
   );
 }
 
+/** Kebab dropdown for a domain row. Portaled to document.body (fixed,
+ *  measured placement, flips upward near the viewport bottom) so the table's
+ *  overflow never clips it — same pattern as Topology's DropMenu. */
+function DomainRowMenu({ d, onMakePrimary, onRemove, makingPrimary, removing }: {
+  d: DomainItem; onMakePrimary: () => void; onRemove: () => void; makingPrimary: boolean; removing: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open) { setPos(null); return; }
+    const place = () => {
+      const anchor = wrapRef.current?.getBoundingClientRect();
+      const menu = menuRef.current;
+      if (!anchor || !menu) return;
+      const gap = 4;
+      const mh = menu.offsetHeight;
+      const mw = menu.offsetWidth;
+      const fitsBelow = anchor.bottom + gap + mh <= window.innerHeight - gap;
+      const top = fitsBelow ? anchor.bottom + gap : Math.max(gap, anchor.top - gap - mh);
+      const left = Math.max(gap, Math.min(anchor.right - mw, window.innerWidth - mw - gap));
+      setPos({ top, left });
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!wrapRef.current?.contains(t) && !menuRef.current?.contains(t)) setOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+
+  return (
+    <div className="menu-wrap" ref={wrapRef} onClick={e => e.stopPropagation()}>
+      <button className="icon-btn" type="button" aria-label={`Actions for ${d.name}`}
+        aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(o => !o)}>
+        <MoreVertical size={15} />
+      </button>
+      {open && createPortal(
+        <div className="menu menu-portal" role="menu" ref={menuRef}
+          style={pos ? { top: pos.top, left: pos.left } : { top: -9999, left: -9999, visibility: "hidden" }}
+          onClick={e => e.stopPropagation()}>
+          {!d.is_primary && (
+            <button className="menu-item" role="menuitem" disabled={makingPrimary}
+              onClick={() => { setOpen(false); onMakePrimary(); }}>
+              <Star size={13} /> Set as primary
+            </button>
+          )}
+          <button className="menu-item danger" role="menuitem" disabled={removing}
+            onClick={() => { setOpen(false); onRemove(); }}>
+            <Trash2 size={13} /> Remove
+          </button>
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
 function DomainRow({ d, onMakePrimary, onRemove, makingPrimary, removing }: {
   d: DomainItem; onMakePrimary: () => void; onRemove: () => void; makingPrimary: boolean; removing: boolean;
 }) {
   const toast = useToast();
+  const nav = useNavigate();
   const pending = d.zone_status === "pending";
   return (
     <>
-      <tr>
+      <tr className="clickable" onClick={() => nav(`/domains/${d.id}`)}>
         <td><strong>{d.name}</strong></td>
         <td>
           {pending
@@ -162,18 +263,8 @@ function DomainRow({ d, onMakePrimary, onRemove, makingPrimary, removing }: {
         </td>
         <td>{d.is_primary && <span className="badge ok plain">Primary</span>}</td>
         <td className="actions">
-          {!d.is_primary && (
-            <>
-              <button className="btn small ghost" aria-label={`Make ${d.name} primary`} title="Make primary"
-                disabled={makingPrimary} onClick={onMakePrimary}>
-                <Star size={12} />
-              </button>{" "}
-            </>
-          )}
-          <button className="btn small danger" aria-label={`Remove ${d.name}`} title="Remove"
-            disabled={removing} onClick={onRemove}>
-            <Trash2 size={12} />
-          </button>
+          <DomainRowMenu d={d} onMakePrimary={onMakePrimary} onRemove={onRemove}
+            makingPrimary={makingPrimary} removing={removing} />
         </td>
       </tr>
       {pending && (d.name_servers?.length ?? 0) > 0 && (

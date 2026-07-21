@@ -161,18 +161,20 @@ uninstall_cloud_dereg() {
     local username plain
     username="$(ujson_secret '.admin.username' "$secrets_file")"
     [ -n "$username" ] || username="homebox"
-    # configure.sh persists ONLY a bcrypt hash (.admin.password_hash) — a
-    # plaintext .admin.password normally doesn't exist. Cloud-mirror installs
-    # do keep the plaintext next door (mirror-admin-password), so try both.
-    plain="$(ujson_secret '.admin.password' "$secrets_file")"
+    # Password sources, in order: HOMEBOX_ADMIN_PASSWORD env (normal installs
+    # store only a bcrypt hash, so pass the admin password explicitly for a
+    # fully automatic dereg), plaintext .admin.password (rare), or the
+    # cloud-mirror sidecar file.
+    plain="${HOMEBOX_ADMIN_PASSWORD:-}"
+    [ -n "$plain" ] || plain="$(ujson_secret '.admin.password' "$secrets_file")"
     if [ -z "$plain" ] && [ -f "$(dirname "$secrets_file")/mirror-admin-password" ]; then
         plain="$(cat "$(dirname "$secrets_file")/mirror-admin-password" 2>/dev/null || true)"
     fi
     if [ -z "$plain" ]; then
-        warn "secrets.json stores only a bcrypt password hash (no plaintext) —"
+        warn "No admin password available (secrets.json stores only a bcrypt hash) —"
         warn "cannot log in to the admin API for automatic cluster deregistration."
-        warn "If this node was in a cluster it may linger in your account's node"
-        warn "list — evict it from the portal or another node's Cluster page."
+        warn "Re-run with HOMEBOX_ADMIN_PASSWORD=<password> for automatic dereg, or"
+        warn "evict this node from the portal or another node's Cluster page."
         return 0
     fi
 
@@ -196,12 +198,21 @@ uninstall_cloud_dereg() {
         -H 'Content-Type: application/json' \
         -d '{"stop_tunnel": true, "teardown_stacks": false}' \
         "$base/api/cluster/leave" 2>/dev/null || echo 000)"
-    rm -f "$jar"
     case "$code" in
         200) info "Cluster deregistration: this node left its cluster." ;;
         404) info "Cluster deregistration: node was not part of a cluster — nothing to do." ;;
         *)   warn "Cluster deregistration returned HTTP $code — continuing anyway."
              warn "If the node lingers in your account, evict it from the portal." ;;
+    esac
+
+    # Also unlink this node from the homebox.sh account (deregisters it at the
+    # control plane, so it doesn't linger as a ghost in the account god view).
+    code="$(curl -sS -m 20 -o /dev/null -w '%{http_code}' -b "$jar" -X DELETE \
+        "$base/api/cluster/account" 2>/dev/null || echo 000)"
+    rm -f "$jar"
+    case "$code" in
+        200) info "Account: node unlinked from your homebox.sh account." ;;
+        *)   info "Account unlink returned HTTP $code (fine if never linked)." ;;
     esac
 }
 

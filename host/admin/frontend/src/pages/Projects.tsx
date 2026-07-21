@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ChevronRight, Plus } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
+import PageHelp from "../components/PageHelp";
 import { ProjectIconPicker } from "../components/ProjectIconPicker";
 import { useToast } from "../lib/toast";
 import type { DeploymentStatus, EnvironmentInfo, IntegrationItem, ProjectItem } from "../lib/types";
@@ -46,14 +47,30 @@ export function Projects() {
     <>
       <div className="row">
         <h1 style={{ margin: 0 }}>Projects</h1>
+        <PageHelp title="About projects">
+          <p>
+            Projects are GitHub repositories you've added to Homebox. Add searches both the
+            repositories of your connected GitHub accounts and public GitHub. Adding a repo
+            adopts it: Homebox clones it, dissects the code into services (web frontends,
+            APIs, databases, workers), and sets up environments to deploy them into.
+          </p>
+          <p>
+            Repositories you own get a push webhook, so pushing to a branch deploys its
+            environment automatically. Public repos you don't own can't receive webhooks —
+            those deploy manually.
+          </p>
+          <p>
+            The environment badges on each row show live deploy state; click one to jump
+            straight to that environment, or click the row for the project's services,
+            domains, and deploy history. When this host is linked to a Homebox account,
+            projects sync to your other nodes through the encrypted account vault.
+          </p>
+        </PageHelp>
         <div className="spacer" />
         {hasGithub && (
           <button className="btn primary" onClick={() => setAddOpen(true)}><Plus size={14} /> Add</button>
         )}
       </div>
-      <p className="lede" style={{ marginTop: "0.5rem" }}>
-        Projects added from GitHub, each dissected into services and deployed per environment.
-      </p>
 
       {!hasGithub ? (
         <div className="empty-state">

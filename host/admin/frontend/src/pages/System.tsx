@@ -8,6 +8,7 @@ import {
 import { api, ApiError } from "../lib/api";
 import { AccountAuthModal } from "../components/AccountAuthModal";
 import { Modal } from "../components/Modal";
+import PageHelp from "../components/PageHelp";
 import { Topology } from "../components/Topology";
 import { useToast } from "../lib/toast";
 import { timeAgo } from "../lib/time";
@@ -365,6 +366,8 @@ export function System() {
   // buttons + a manual account-token paste.
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  // Account modal behind the one-word Linked/Unlinked pill in the page header.
+  const [accountModalOpen, setAccountModalOpen] = useState(false);
   // account link form
   const [accountToken, setAccountToken] = useState("");
   const [nodeName, setNodeName] = useState("");
@@ -451,7 +454,13 @@ export function System() {
       toast.show("Account linked — syncing this box from your cloud vault", "ok");
     },
     onError: (e) => {
-      if (e instanceof ApiError && e.status === 412) { setConnectModalOpen(true); return; }
+      // Nothing stored to re-auth silently — hand off to the provider modal
+      // (and close the account modal so the two don't stack).
+      if (e instanceof ApiError && e.status === 412) {
+        setAccountModalOpen(false);
+        setConnectModalOpen(true);
+        return;
+      }
       onErr(e);
     },
   });
@@ -536,8 +545,8 @@ export function System() {
     onError: onErr,
   });
   const split = useMutation({
-    mutationFn: () =>
-      api.post<{ ok: boolean; cluster_id: string; name: string }>("/api/cluster/split", { name: splitName.trim() }),
+    mutationFn: (name: string) =>
+      api.post<{ ok: boolean; cluster_id: string; name: string }>("/api/cluster/split", { name: name.trim() }),
     onSuccess: (d) => {
       setConfirmSplit(false);
       invalidate();
@@ -595,6 +604,33 @@ export function System() {
     },
     onError: onErr,
   });
+  // Inline cluster rename (click the name in the god view). Optimistic: the
+  // topology cache is patched immediately so the title never flickers, then
+  // reverted with a toast if the control plane rejects it.
+  const renameCluster = useMutation({
+    mutationFn: (v: { cluster_id: string; name: string }) =>
+      api.patch<{ ok: boolean; name: string }>(
+        `/api/cluster/account/clusters/${encodeURIComponent(v.cluster_id)}/name`,
+        { name: v.name },
+      ),
+    onMutate: async (v) => {
+      await qc.cancelQueries({ queryKey: ["account-topology"] });
+      const prev = qc.getQueryData<AccountTopology>(["account-topology"]);
+      qc.setQueryData<AccountTopology>(["account-topology"], (old) =>
+        old
+          ? { ...old, clusters: (old.clusters ?? []).map(c => c.cluster_id === v.cluster_id ? { ...c, name: v.name } : c) }
+          : old,
+      );
+      return { prev };
+    },
+    onError: (e, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(["account-topology"], ctx.prev);
+      onErr(e);
+    },
+    // Reconcile with the server-trimmed name, and refresh this node's own
+    // cluster status (its name mirrors there).
+    onSettled: () => invalidate(),
+  });
 
   // The OAuth popup posts a message here right before it closes itself (see
   // the mount effect below) so we refetch immediately instead of waiting for
@@ -646,6 +682,73 @@ export function System() {
   const mirror = status?.mirror ?? undefined;
   const mirrorServingRoster = (status?.roster ?? []).find(n => n.role === "mirror" && n.serving !== false);
 
+  // When the account is linked and the topology god view is up AND shows this
+  // node's cluster, Topology is the single cluster surface — the legacy roster
+  // card would repeat the same cluster/license/nodes, so it hides and its
+  // header actions/banners fold into the cluster block instead. Unlinked (or
+  // topology still loading / 412ing / lagging behind a fresh cluster), the
+  // legacy card renders exactly as before so token-joined setups lose nothing.
+  const clusterInTopology =
+    !!status?.active && (topology?.clusters ?? []).some(c => c.cluster_id === status.cluster_id);
+  const showLegacyClusterCard = !!status?.active && !(account?.linked && clusterInTopology);
+
+  // Shared fragments — rendered by the legacy card when it's visible, or
+  // passed into Topology's this-cluster block when it isn't. One JSX source,
+  // one set of mutations.
+  const licenseBanner = license?.expired ? (
+    <div className="banner danger">
+      <span>Premium features paused — existing services keep running. Manage your plan to restore clustering.</span>
+      <button className="btn primary small" onClick={() => upgrade.mutate()} disabled={upgrade.isPending}>
+        {upgrade.isPending ? <span className="spinner" /> : <>Manage plan at homebox.sh</>}
+      </button>
+    </div>
+  ) : license?.in_grace ? (
+    <div className="banner warn">
+      <span>License expired — running in a 14-day grace period. Manage your plan soon to keep clustering.</span>
+      <button className="btn primary small" onClick={() => upgrade.mutate()} disabled={upgrade.isPending}>
+        {upgrade.isPending ? <span className="spinner" /> : <>Manage plan at homebox.sh</>}
+      </button>
+    </div>
+  ) : null;
+  const mirrorServingBanner = mirrorServingRoster ? (
+    <div className="banner info">
+      <span><Cloud size={14} style={{ verticalAlign: "-2px", marginRight: "0.35rem" }} />
+        Cloud mirror is serving your traffic
+      </span>
+    </div>
+  ) : null;
+  const mintedTokenRow = mintedToken ? (
+    <div className="card-row">
+      <code style={{ wordBreak: "break-all", userSelect: "all" }}>{mintedToken}</code>
+      <button className="btn ghost"
+        onClick={() => { navigator.clipboard.writeText(mintedToken); toast.show("Copied", "ok"); }}>
+        <Copy size={14} /> Copy
+      </button>
+    </div>
+  ) : null;
+
+  // What the hidden legacy card contributed, re-homed inside Topology's
+  // this-cluster block: license/mirror banners, a freshly minted join token,
+  // and heartbeat/sync freshness (initial-sync pending included).
+  const freshnessLine = status?.active &&
+    (!status.initial_sync_done || status.last_heartbeat || status.last_sync_at) ? (
+    <div className="row" style={{ gap: "0.75rem", flexWrap: "wrap" }}>
+      {!status.initial_sync_done && <span className="badge warn">initial sync pending…</span>}
+      {status.last_heartbeat && <span className="dim">heartbeat {timeAgo(status.last_heartbeat)}</span>}
+      {status.last_sync_at && <span className="dim">synced {timeAgo(status.last_sync_at)}</span>}
+    </div>
+  ) : null;
+  const thisClusterExtras =
+    status?.active && !showLegacyClusterCard &&
+    (licenseBanner || mirrorServingBanner || mintedTokenRow || freshnessLine) ? (
+      <>
+        {licenseBanner}
+        {mirrorServingBanner}
+        {mintedTokenRow}
+        {freshnessLine}
+      </>
+    ) : undefined;
+
   function submitLink(e: FormEvent) {
     e.preventDefault();
     if (!peerUrl.trim()) { toast.show("Set this node's LAN address", "fail"); return; }
@@ -675,37 +778,36 @@ export function System() {
     );
   })();
 
-  // Linked → a compact identity card (email · plan · vault freshness); the
-  // fleet god view renders separately below it.
-  const accountCard = account?.linked && (
-    <div className="card">
-      <div className="card-row">
-        <div className="row">
-          <span className="badge ok"><LogIn size={12} /> homebox.sh account linked</span>
-          {account.email && <strong>{account.email}</strong>}
-          <span className="badge plain">{planLabel(account.plan ?? undefined)}</span>
-          <span className="dim">as {account.node_name || "unnamed node"} · {account.peer_url}</span>
-        </div>
-        <div className="row" style={{ gap: "0.5rem" }}>
-          <button className="btn ghost" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
-            <RefreshCw size={14} /> Refresh
-          </button>
-          <button className="btn ghost" onClick={() => unlink.mutate()}>Unlink</button>
-        </div>
+  // The account modal behind the header pill handles BOTH states.
+  // Linked → identity details (email · plan · node · vault freshness) with
+  // Refresh/Unlink. Unlinked → the link-account flow that used to be the hero
+  // card: every click tries the SILENT link first (a provider token stored
+  // from an earlier OAuth login/link); only a 412 (nothing stored) opens the
+  // inline AccountAuthModal with the popup/token fallbacks. Manual token
+  // flows stay collapsed under "Advanced".
+  const accountModalBody = !account ? (
+    <span className="spinner" />
+  ) : account.linked ? (
+    <>
+      <div className="row" style={{ gap: "0.5rem", flexWrap: "wrap" }}>
+        <span className="badge success"><LogIn size={12} /> linked</span>
+        {account.email && <strong>{account.email}</strong>}
+        <span className="badge plain">{planLabel(account.plan ?? undefined)}</span>
+      </div>
+      <div className="dim" style={{ marginTop: "0.5rem" }}>
+        as {account.node_name || "unnamed node"} · {account.peer_url}
       </div>
       {vaultLine}
-    </div>
-  );
-
-  // Unlinked → the hero "Link Account" card that leads the page. Every click
-  // tries the SILENT link first (a provider token stored from an earlier
-  // OAuth login/link); only a 412 (nothing stored) opens the inline
-  // AccountAuthModal with the popup/token fallbacks. Manual token flows stay
-  // collapsed under "Advanced".
-  const heroCard = account && !account.linked && (
-    <div className="card premium-callout">
-      <h3><LogIn size={16} /> Link your homebox.sh account</h3>
-      <p className="dim" style={{ marginTop: "0.4rem" }}>
+      <div className="row" style={{ gap: "0.5rem", marginTop: "0.9rem" }}>
+        <button className="btn ghost" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
+          <RefreshCw size={14} /> Refresh
+        </button>
+        <button className="btn ghost danger" onClick={() => unlink.mutate()}>Unlink</button>
+      </div>
+    </>
+  ) : (
+    <>
+      <p className="dim" style={{ marginTop: 0 }}>
         Linking backs up and restores this node from your encrypted cloud vault, keeps every
         homebox on your account in sync, unlocks clustering, and gives you one view of your
         whole fleet — from anywhere.
@@ -721,7 +823,7 @@ export function System() {
               : account.suggested.provider === "github" ? <Github size={15} /> : <GoogleIcon size={15} />}
             Continue with {account.suggested.provider === "github" ? "GitHub" : "Google"} as {account.suggested.email}
           </button>
-          <button className="btn ghost" onClick={() => setConnectModalOpen(true)}>
+          <button className="btn ghost" onClick={() => { setAccountModalOpen(false); setConnectModalOpen(true); }}>
             Use a different account
           </button>
         </div>
@@ -790,7 +892,7 @@ export function System() {
           </div>
         )}
       </div>
-    </div>
+    </>
   );
 
   // The god view, wired to this node's account endpoints. Remote node ops go
@@ -807,33 +909,82 @@ export function System() {
       busy={
         directive.isPending || provision.isPending || cancelProvision.isPending ||
         evict.isPending || mirrorEnable.isPending || mint.isPending ||
-        joinCluster.isPending || inviteNode.isPending || createCluster.isPending
+        joinCluster.isPending || inviteNode.isPending || createCluster.isPending ||
+        sync.isPending || setServing.isPending || split.isPending
       }
+      thisClusterExtras={thisClusterExtras}
+      thisNodeHealth={<NodeHealthDetail isSelf />}
       actions={{
-        setServing: (node_id, serving) => directive.mutate({ node_id, type: "set_serving", payload: { serving } }),
+        // Nodes in THIS cluster use the direct local endpoints (instant,
+        // optimistic); nodes in other clusters ride the directive queue.
+        setServing: (node_id, serving) =>
+          (status?.roster ?? []).some(n => n.node_id === node_id)
+            ? setServing.mutate({ node_id, serving })
+            : directive.mutate({ node_id, type: "set_serving", payload: { serving } }),
         evict: (_clusterId, node_id) => evict.mutate(node_id),
-        splitOff: (node_id, name) => directive.mutate({ node_id, type: "split_off", payload: { name } }),
+        splitOff: (node_id, name) =>
+          node_id === status?.node_id
+            ? split.mutate(name)
+            : directive.mutate({ node_id, type: "split_off", payload: { name } }),
         splitCluster: (cluster_id, node_ids, name) =>
           directive.mutate({ node_id: node_ids[0], type: "split_cluster", payload: { name, cluster_id, node_ids } }),
         addMirror: () => mirrorEnable.mutate(),
         provision: (v) => provision.mutate(v),
         cancelProvision: (id) => cancelProvision.mutate(id),
         mintToken: () => mint.mutate(),
+        syncNow: () => sync.mutate(),
+        leave: () => setConfirmLeave(true),
         joinCluster: (cluster_id) => joinCluster.mutate(cluster_id),
         inviteNode: (node_id) => inviteNode.mutate(node_id),
         createCluster: (name) => createCluster.mutate(name),
+        renameCluster: (cluster_id, name) => renameCluster.mutate({ cluster_id, name }),
       }}
     />
   );
 
   return (
     <>
-      <h1>System</h1>
-      <p className="lede">
-        {status?.active
-          ? "Health of every node in the cluster — active-active, with replicated databases and automatic failover."
-          : "Health of this node's infrastructure, monitored every 30s and self-healing. Join a cluster to add more nodes."}
-      </p>
+      <div className="page-head">
+        <div className="row" style={{ gap: "0.4rem", minWidth: 0 }}>
+          <h1>System</h1>
+          <PageHelp title="System">
+            <p>
+              This page is the health and topology view of your Homebox setup. With a homebox.sh
+              account linked, it shows every cluster and standalone node on your account — the
+              node you are connected to is marked "you are here". Without an account it shows
+              this homebox and, if you joined a cluster with a token, its full roster.
+            </p>
+            <p>
+              The pill next to the title shows whether this node is linked to a homebox.sh
+              account. Click it to link (silently when possible, or via GitHub/Google or an
+              account token) or to see account details, refresh, and unlink. While linked, this
+              node's configuration is continuously backed up to your encrypted cloud vault and
+              kept in sync across every homebox on your account.
+            </p>
+            <p>
+              Click a cluster's name to rename it. The "this cluster" pill opens cluster
+              actions: trigger an immediate sync, mint a join token for adding a node manually,
+              add a cloud node on AWS/GCP, split the cluster, or leave it. Each node's status
+              pill opens node actions — drain or resume app traffic, split a node off into its
+              own cluster, or evict a dead node. The last serving node can't be drained unless
+              a standby mirror is online, so app traffic always has somewhere to go.
+            </p>
+            <p>
+              Expand the row of the node you're connected to for its live infrastructure
+              health — public URL, tunnel, router, and DNS checks with uptime and latency,
+              sampled every 30 seconds.
+            </p>
+          </PageHelp>
+        </div>
+        {account && (
+          <button type="button"
+            className={`badge ${account.linked ? "success" : "plain"} account-pill`}
+            title={account.linked ? "homebox.sh account details" : "Link your homebox.sh account"}
+            onClick={() => setAccountModalOpen(true)}>
+            {account.linked ? "Linked" : "Unlinked"}
+          </button>
+        )}
+      </div>
 
       {joining && (
         <div className="card"><span className="spinner" /> Restarting onto the cluster keys — hang tight…</div>
@@ -862,20 +1013,13 @@ export function System() {
         </div>
       )}
 
-      {heroCard}
-      {accountCard}
       {topologySection}
 
-      {status?.active && (
+      {status?.active && showLegacyClusterCard && (
         <div className="card">
           <div className="card-row">
             <div className="row">
-              <span className="badge ok"><Network size={12} /> {status.name} · {status.cluster_id}</span>
-              {license && (
-                <span className={`badge ${license.expired ? "fail" : license.in_grace ? "warn" : "plain"}`}>
-                  {license.node_count}/{license.max_nodes} nodes · {planLabel(license.plan)}
-                </span>
-              )}
+              <span className="badge ok"><Network size={12} /> {status.name?.trim() || "home"} · {status.cluster_id}</span>
               {!status.initial_sync_done && <span className="badge warn">initial sync pending…</span>}
             </div>
             <div className="row" style={{ gap: "0.5rem" }}>
@@ -900,39 +1044,11 @@ export function System() {
             </div>
           </div>
 
-          {license?.expired ? (
-            <div className="banner danger">
-              <span>Premium features paused — existing services keep running. Manage your plan to restore clustering.</span>
-              <button className="btn primary small" onClick={() => upgrade.mutate()} disabled={upgrade.isPending}>
-                {upgrade.isPending ? <span className="spinner" /> : <>Manage plan at homebox.sh</>}
-              </button>
-            </div>
-          ) : license?.in_grace ? (
-            <div className="banner warn">
-              <span>License expired — running in a 14-day grace period. Manage your plan soon to keep clustering.</span>
-              <button className="btn primary small" onClick={() => upgrade.mutate()} disabled={upgrade.isPending}>
-                {upgrade.isPending ? <span className="spinner" /> : <>Manage plan at homebox.sh</>}
-              </button>
-            </div>
-          ) : null}
+          {licenseBanner}
 
-          {mirrorServingRoster && (
-            <div className="banner info" style={{ marginTop: "0.75rem" }}>
-              <span><Cloud size={14} style={{ verticalAlign: "-2px", marginRight: "0.35rem" }} />
-                Cloud mirror is serving your traffic
-              </span>
-            </div>
-          )}
+          {mirrorServingBanner}
 
-          {mintedToken && (
-            <div className="card-row" style={{ marginTop: "0.75rem" }}>
-              <code style={{ wordBreak: "break-all", userSelect: "all" }}>{mintedToken}</code>
-              <button className="btn ghost"
-                onClick={() => { navigator.clipboard.writeText(mintedToken); toast.show("Copied", "ok"); }}>
-                <Copy size={14} /> Copy
-              </button>
-            </div>
-          )}
+          {mintedTokenRow && <div style={{ marginTop: "0.75rem" }}>{mintedTokenRow}</div>}
 
           <h3 style={{ marginTop: "0.9rem" }}>Nodes</h3>
           {(status.roster ?? []).map(n => {
@@ -992,7 +1108,13 @@ export function System() {
         />
       )}
 
-      {!status?.active && status?.node_id && (
+      {/* This node's infrastructure health (uptime sparklines). Linked, it
+          lives behind the expandable self row inside the topology god view;
+          clustered-but-unlinked it lives in the legacy roster rows. Only the
+          unlinked/unclustered layout (or a linked node whose topology hasn't
+          loaded) keeps this standalone card — its row IS the same expandable
+          chevron pattern. */}
+      {status?.node_id && !status.active && !(account?.linked && topology) && (
         <div className="card">
           <h3 style={{ marginTop: 0 }}>This node</h3>
           <NodeRow
@@ -1088,7 +1210,7 @@ export function System() {
             <button className="btn ghost" onClick={() => setConfirmSplit(false)} disabled={split.isPending}>
               Cancel
             </button>
-            <button className="btn danger" onClick={() => split.mutate()}
+            <button className="btn danger" onClick={() => split.mutate(splitName)}
               disabled={split.isPending || !splitName.trim()}>
               {split.isPending ? <span className="spinner" /> : <><Split size={14} /> Split off</>}
             </button>
@@ -1127,6 +1249,14 @@ export function System() {
         }
       >
         <p>The cloud standby is torn down — local nodes are unaffected and keep serving traffic as usual.</p>
+      </Modal>
+
+      <Modal
+        open={accountModalOpen}
+        title={account?.linked ? "homebox.sh account" : "Link your homebox.sh account"}
+        onClose={() => setAccountModalOpen(false)}
+      >
+        {accountModalBody}
       </Modal>
 
       <AccountAuthModal

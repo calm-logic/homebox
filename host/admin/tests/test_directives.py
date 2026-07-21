@@ -520,6 +520,121 @@ def test_directive_proxy_412_when_unlinked():
         assert r.status_code == 412
 
 
+# ───── cluster rename proxy + "home" name coalescing ─────────────────────────
+
+
+def test_rename_proxy_happy_path(monkeypatch):
+    calls = []
+
+    async def _cp(method, base, path, *, token=None, body=None):
+        calls.append((method, path, body, token))
+        return {"ok": True, "cluster_id": "c-far", "name": "attic"}
+    monkeypatch.setattr(clusterlib, "_cp", _cp)
+
+    with make_client(link_account) as client:
+        r = client.patch("/api/cluster/account/clusters/c-far/name",
+                         json={"name": "attic"})
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "name": "attic"}
+        assert calls == [("PATCH", "/v1/clusters/c-far", {"name": "attic"}, "acct-token")]
+
+
+def test_rename_proxy_412_when_unlinked():
+    with make_client() as client:
+        r = client.patch("/api/cluster/account/clusters/c1/name", json={"name": "x"})
+        assert r.status_code == 412
+
+
+def test_rename_proxy_passes_cp_4xx_through(monkeypatch):
+    async def _cp(method, base, path, *, token=None, body=None):
+        if body["name"].strip() == "":
+            raise clusterlib.ControlPlaneError(
+                "bad name", status_code=400, detail="Cluster name must not be empty")
+        raise clusterlib.ControlPlaneError(
+            "not yours", status_code=404, detail="Unknown cluster")
+    monkeypatch.setattr(clusterlib, "_cp", _cp)
+
+    with make_client(link_account) as client:
+        r = client.patch("/api/cluster/account/clusters/c-other/name",
+                         json={"name": "steal"})
+        assert r.status_code == 404
+        assert r.json()["detail"] == "Unknown cluster"
+        r = client.patch("/api/cluster/account/clusters/c-other/name",
+                         json={"name": "  "})
+        assert r.status_code == 400
+        assert "empty" in r.json()["detail"]
+
+
+def test_rename_own_cluster_updates_local_state(monkeypatch):
+    """Renaming THIS node's own cluster also rewrites the local state blob —
+    heartbeats never refresh the name (only roster/license), so without the
+    local write /api/cluster would show the old name forever."""
+    async def setup(s):
+        await link_account(s)
+        await join_fake_cluster(s)
+
+    async def _cp(method, base, path, *, token=None, body=None):
+        assert (method, path) == ("PATCH", "/v1/clusters/c1")
+        return {"ok": True, "cluster_id": "c1", "name": body["name"].strip()}
+    monkeypatch.setattr(clusterlib, "_cp", _cp)
+
+    with make_client(setup) as client:
+        r = client.patch("/api/cluster/account/clusters/c1/name",
+                         json={"name": "renamed-home"})
+        assert r.status_code == 200 and r.json()["name"] == "renamed-home"
+        status = client.get("/api/cluster").json()
+        assert status["active"] is True
+        assert status["name"] == "renamed-home"
+
+
+def test_rename_other_cluster_leaves_local_state_alone(monkeypatch):
+    async def setup(s):
+        await link_account(s)
+        await join_fake_cluster(s)  # cluster_id c1, name "home"
+
+    async def _cp(method, base, path, *, token=None, body=None):
+        return {"ok": True, "cluster_id": "c-far", "name": "attic"}
+    monkeypatch.setattr(clusterlib, "_cp", _cp)
+
+    with make_client(setup) as client:
+        r = client.patch("/api/cluster/account/clusters/c-far/name",
+                         json={"name": "attic"})
+        assert r.status_code == 200
+        assert client.get("/api/cluster").json()["name"] == "home"
+
+
+def test_cluster_status_coalesces_empty_name_to_home():
+    async def setup(s):
+        self_id = await clusterlib.get_node_id(s)
+        await clusterlib.save_cluster(s, {
+            "cluster_id": "c1", "name": "",  # pre-default blob
+            "control_plane_url": "https://cp.test",
+            "peer_url": "http://n1", "node_name": "test-node",
+            "cluster_secret_encrypted": crypto.encrypt("shhh"),
+            "node_token_encrypted": crypto.encrypt("ntok"),
+            "roster": [{"node_id": self_id, "ordinal": 1, "role": "peer"}],
+            "initial_sync_done": True,
+        })
+        await s.commit()
+
+    with make_client(setup) as client:
+        assert client.get("/api/cluster").json()["name"] == "home"
+
+
+def test_topology_proxy_coalesces_empty_cluster_name(monkeypatch):
+    async def _cp(method, base, path, *, token=None, body=None):
+        topo = dict(TOPOLOGY)
+        topo["clusters"] = [{"cluster_id": "c1", "name": "", "license": {},
+                             "mirror": None, "nodes": []}]
+        return topo
+    monkeypatch.setattr(clusterlib, "_cp", _cp)
+
+    with make_client(link_account) as client:
+        r = client.get("/api/cluster/account/topology")
+        assert r.status_code == 200
+        assert r.json()["clusters"][0]["name"] == "home"
+
+
 def test_account_status_carries_vault_freshness():
     async def setup(s):
         await link_account(s)

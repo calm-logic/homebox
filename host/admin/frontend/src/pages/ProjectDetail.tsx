@@ -7,6 +7,7 @@ import {
   Settings, LayoutDashboard, Boxes, Trash2,
 } from "lucide-react";
 import { api } from "../lib/api";
+import { HeaderSave, HeaderSaveButton, useHeaderSave } from "../lib/headerSave";
 import { DeploymentPanel } from "./DeploymentDetail";
 import { RuntimeLogsPanel } from "./RuntimeLogs";
 import { ServicePanel } from "./ServiceDetail";
@@ -140,6 +141,10 @@ export function ProjectDetail() {
   const envTabsRef = useRef<HTMLDivElement>(null);
   useTabIndicator(envTabsRef, ".tab.active", [section, envTab, project?.environments?.length]);
 
+  // Settings' conditional Save lives in the page header row; the panel
+  // reports its dirty/saving state up while mounted (settings section only).
+  const [settingsSave, setSettingsSave] = useState<HeaderSave | null>(null);
+
   if (isError) return <Navigate to="/projects" replace />;
   if (sectionParam && !logsView && !SECTIONS.some(s => s.key === sectionParam)) {
     return <Navigate to={{ pathname: `/projects/${id}`, search: searchParams.toString() }} replace />;
@@ -155,6 +160,8 @@ export function ProjectDetail() {
         </Link>
         <ProjectIconPicker projectId={project.id} icon={project.icon} name={project.name} />
         <h1 style={{ margin: 0 }}>{project.name}</h1>
+        <span className="spacer" />
+        <HeaderSaveButton state={settingsSave} />
       </div>
       <p className="dim" style={{ marginTop: "0.25rem" }}>
         {project.services.length} service{project.services.length === 1 ? "" : "s"} · {project.environments.length} environment{project.environments.length === 1 ? "" : "s"}
@@ -271,7 +278,7 @@ export function ProjectDetail() {
           })()}
 
           {/* ─── Settings ────────────────────────────────────────── */}
-          {section === "settings" && <SettingsPanel project={project} onSaved={invalidate} />}
+          {section === "settings" && <SettingsPanel project={project} onSaved={invalidate} onStatus={setSettingsSave} />}
         </div>
       </div>
     </>
@@ -505,19 +512,27 @@ function Deployments({ projectId, envId }: { projectId: number; envId: number })
 }
 
 // ─── Settings panel (name + domain) ───────────────────────────────────────────
-function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSaved: () => void }) {
+
+/** The select-encoded deployment target the server currently holds. */
+function projectTargetValue(project: ProjectDetailData): string {
+  if (project.deployment_target !== "homebox") return project.deployment_target;
+  if (project.deployment_target_config.cluster_id) return `homebox:cluster:${project.deployment_target_config.cluster_id}`;
+  if (project.deployment_target_config.node_id) return `homebox:node:${project.deployment_target_config.node_id}`;
+  return "homebox";
+}
+
+function SettingsPanel({ project, onSaved, onStatus }: {
+  project: ProjectDetailData;
+  onSaved: () => void;
+  onStatus: (s: HeaderSave | null) => void;
+}) {
   const qc = useQueryClient();
   const nav = useNavigate();
   const toast = useToast();
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [name, setName] = useState(project.name);
-  const initialTarget = (() => {
-    if (project.deployment_target !== "homebox") return project.deployment_target;
-    if (project.deployment_target_config.cluster_id) return `homebox:cluster:${project.deployment_target_config.cluster_id}`;
-    if (project.deployment_target_config.node_id) return `homebox:node:${project.deployment_target_config.node_id}`;
-    return "homebox";
-  })();
-  const [targetValue, setTargetValue] = useState(initialTarget);
+  const serverTarget = projectTargetValue(project);
+  const [targetValue, setTargetValue] = useState(serverTarget);
   const [domainId, setDomainId] = useState<string>(project.domain_id ? String(project.domain_id) : "");
   const [requireChecks, setRequireChecks] = useState(project.require_checks);
   // "By environment" reveals the per-env override rows below each toggle;
@@ -554,6 +569,56 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
     queryFn: () => api.get<ProjectTargetOptions>(`/api/projects/${project.id}/target-options`),
   });
 
+  // ── Dirty tracking against server truth ──────────────────────────────
+  // Effective values exactly as the save flow would persist them; the header
+  // Save renders only when at least one differs from what the server holds,
+  // so reverting an edit hides the button again.
+  const serverDomainId = project.domain_id ? String(project.domain_id) : "";
+  const effectiveEnvDomain = (envId: number): string =>
+    domainScope === "by_env" ? (envDomains[envId] ?? "") : "";
+  const effectiveGate = (env: EnvironmentInfo): boolean =>
+    deployMode === "by_env" ? (envGates[env.id] ?? false)
+      : deployMode === "simple" ? false : env.promotion_gate;
+  const effectiveE2e = (env: EnvironmentInfo): string =>
+    deployMode === "by_env" ? (envE2e[env.id] ?? "").trim()
+      : deployMode === "simple" ? "" : (env.e2e_workflow ?? "");
+  const dirty =
+    name !== project.name
+    || targetValue !== serverTarget
+    || domainId !== serverDomainId
+    || domainMode !== (project.domain_mode ?? "container")
+    || (deployMode !== "manual") !== project.auto_deploy
+    || requireChecks !== project.require_checks
+    || project.environments.some(env =>
+      effectiveEnvDomain(env.id) !== (env.domain_id ? String(env.domain_id) : "")
+      || effectiveGate(env) !== env.promotion_gate
+      || effectiveE2e(env) !== (env.e2e_workflow ?? ""));
+
+  // The project query polls every 6s. When it brings genuinely new server
+  // state and there are no unsaved edits, reseed the form; while dirty, the
+  // user's staged edits are never clobbered by a background refetch.
+  const serverSer = JSON.stringify([
+    project.name, serverTarget, serverDomainId, project.domain_mode,
+    project.auto_deploy, project.require_checks,
+    project.environments.map(e => [e.id, e.domain_id, e.promotion_gate, e.e2e_workflow]),
+  ]);
+  useEffect(() => {
+    if (dirty) return;
+    setName(project.name);
+    setTargetValue(serverTarget);
+    setDomainId(serverDomainId);
+    setRequireChecks(project.require_checks);
+    setDomainScope(project.environments.some(e => e.domain_id) ? "by_env" : "single");
+    setDeployMode(!project.auto_deploy ? "manual"
+      : project.environments.some(e => e.promotion_gate) ? "by_env" : "simple");
+    setDomainMode(project.domain_mode ?? "container");
+    setEnvDomains(Object.fromEntries(project.environments.map(e => [e.id, e.domain_id ? String(e.domain_id) : ""])));
+    setEnvGates(Object.fromEntries(project.environments.map(e => [e.id, e.promotion_gate])));
+    setEnvE2e(Object.fromEntries(project.environments.map(e => [e.id, e.e2e_workflow ?? ""])));
+    // Deps are server truth only: an edit flipping `dirty` must not reseed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverSer]);
+
   const resolveDomain = (id: string): DomainItem | undefined =>
     id ? (domains ?? []).find(d => d.id === Number(id)) : (domains ?? []).find(d => d.is_primary);
   const domainName = (id: string): string => resolveDomain(id)?.name ?? "…";
@@ -567,7 +632,7 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
         name, domain_id: domainId ? Number(domainId) : 0, domain_mode: domainMode,
         auto_deploy: deployMode !== "manual", require_checks: requireChecks,
       };
-      if (targetValue !== initialTarget) {
+      if (targetValue !== serverTarget) {
         const [target, locationKind, ...locationParts] = targetValue.split(":");
         const locationId = locationParts.join(":");
         projectPatch.deployment_target = target;
@@ -580,13 +645,11 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
       await api.patch(`/api/projects/${project.id}`, projectPatch);
       for (const env of project.environments) {
         const body: Record<string, unknown> = {};
-        const chosen = domainScope === "by_env" ? (envDomains[env.id] ?? "") : "";
+        const chosen = effectiveEnvDomain(env.id);
         if (chosen !== (env.domain_id ? String(env.domain_id) : "")) body.domain_id = chosen ? Number(chosen) : 0;
-        const gate = deployMode === "by_env" ? (envGates[env.id] ?? false)
-          : deployMode === "simple" ? false : env.promotion_gate;
+        const gate = effectiveGate(env);
         if (gate !== env.promotion_gate) body.promotion_gate = gate;
-        const e2e = deployMode === "by_env" ? (envE2e[env.id] ?? "").trim()
-          : deployMode === "simple" ? "" : (env.e2e_workflow ?? "");
+        const e2e = effectiveE2e(env);
         if (e2e !== (env.e2e_workflow ?? "")) body.e2e_workflow = e2e;
         if (Object.keys(body).length > 0) {
           await api.patch(`/api/projects/${project.id}/environments/${env.id}`, body);
@@ -596,6 +659,8 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
     onSuccess: () => { toast.show("Saved — redeploy to apply hostname changes", "ok"); onSaved(); },
     onError: (e) => toast.show(String(e), "fail"),
   });
+
+  useHeaderSave(onStatus, dirty, save.isPending, () => save.mutate());
 
   const remove = useMutation({
     mutationFn: () => api.post(`/api/projects/${project.id}/release`),
@@ -765,13 +830,6 @@ function SettingsPanel({ project, onSaved }: { project: ProjectDetailData; onSav
           Wait for GitHub checks to pass before deploying
         </label>
       )}
-
-      <div className="row" style={{ marginTop: "1.25rem", paddingTop: "1rem", borderTop: "1px solid var(--border)" }}>
-        <span className="spacer" />
-        <button className="btn primary" disabled={save.isPending} onClick={() => save.mutate()}>
-          {save.isPending ? <span className="spinner" /> : "Save changes"}
-        </button>
-      </div>
     </div>
 
     <div className="card" style={{ marginTop: "1.25rem", borderColor: "var(--danger)" }}>

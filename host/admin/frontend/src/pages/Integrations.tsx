@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Github, Plus, ExternalLink, Cloud, CloudCog, Server, ChevronRight } from "lucide-react";
 import { api } from "../lib/api";
 import { Modal } from "../components/Modal";
+import PageHelp from "../components/PageHelp";
 import { useToast } from "../lib/toast";
 import type { CloudflareAccount, IntegrationItem, OAuthSettings, SetTokenResponse } from "../lib/types";
 
@@ -39,14 +40,32 @@ export function Integrations() {
     <>
       <div className="row">
         <h1 style={{ margin: 0 }}>Integrations</h1>
+        <PageHelp title="About integrations">
+          <p>
+            Integrations are this host's connections to external systems. GitHub supplies
+            source: connecting an account or organization lets you add its repositories as
+            projects, with push webhooks triggering deploys. Cloudflare provides the tunnel
+            and DNS that route domains here. AWS and Google Cloud act as deploy targets, so
+            individual services can run on S3, App Runner, or EC2, and GCS, Cloud Run, or
+            GCE instead of this box.
+          </p>
+          <p>
+            Credentials — GitHub tokens, the Cloudflare API token, AWS keys, GCP
+            service-account JSON — are verified against the provider when you save them and
+            stored encrypted at rest. GitHub can also connect via OAuth instead of a token.
+          </p>
+          <p>
+            Each card opens a detail page with the connection's status and actions. When
+            this host is linked to a Homebox account, integrations sync to your other nodes
+            through the encrypted account vault, with secrets re-encrypted under each
+            cluster's own key.
+          </p>
+        </PageHelp>
         <div className="spacer" />
         <button className="btn primary" onClick={() => setAddOpen(true)}>
           <Plus size={14} /> Add
         </button>
       </div>
-      <p className="lede" style={{ marginTop: "0.5rem" }}>
-        GitHub organizations for source, Cloudflare for routing. Credentials are encrypted at rest.
-      </p>
 
       {!integrations ? (
         <span className="spinner" />
